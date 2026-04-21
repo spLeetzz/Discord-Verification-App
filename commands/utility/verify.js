@@ -31,16 +31,19 @@ export default {
     const [, cfg] = eventEntry;
 
     try {
-      // Get the bot's pinned message to read email + participant mention
       const pins = await thread.messages.fetchPins();
-      const pinnedMsg = pins.find((m) => m.author.id === interaction.client.user.id);
+      const pinnedMsg = pins.items.find(
+        (m) => m.message.author.id === interaction.client.user.id,
+      )?.message;
+
+
+
       if (!pinnedMsg) {
         return interaction.editReply({
-          content: "No pinned message found in this thread.",
+          content: "Could not find the bot's pinned message in this ticket.",
         });
       }
 
-      // Parse email from pinned content
       const emailMatch = pinnedMsg.content.match(/\*\*Email:\*\* (.+)/);
       if (!emailMatch) {
         return interaction.editReply({

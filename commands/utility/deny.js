@@ -30,11 +30,20 @@ export default {
 
 
       const pins = await thread.messages.fetchPins();
-      const pinnedMsg = pins
-        .map((p) => p)
-        .find((m) => m.author.id === interaction.client.user.id);
+      const pinnedMsg = pins.items.find(
+        (m) => m.message.author.id === interaction.client.user.id,
+      )?.message;
 
-      const member = pinnedMsg?.mentions.members?.first();
+
+
+      if (!pinnedMsg) {
+        return interaction.editReply({
+          content: "No pinned message found in this thread.",
+        });
+      }
+
+      const member = pinnedMsg.mentions.members?.first();
+
       const name = member ? `${member}` : "there";
 
       const msg = reason

@@ -51,13 +51,18 @@ export default {
     }
 
     const pins = await thread.messages.fetchPins();
-    const pinnedMsg = pins.find((m) => m.author.id === interaction.client.user.id);
+    const pinnedMsg = pins.items.find(
+      (m) => m.message.author.id === interaction.client.user.id,
+    )?.message;
+
+
 
     if (!pinnedMsg) {
       return interaction.editReply({
         content: "Could not find the bot's pinned message in this ticket.",
       });
     }
+
 
     const member = pinnedMsg.mentions.members?.first();
     const user = member?.user ?? { toString: () => "Unknown" };
