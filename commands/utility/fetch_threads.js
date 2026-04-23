@@ -1,4 +1,9 @@
-import { SlashCommandBuilder, ChannelType, MessageFlags, PermissionFlagsBits } from "discord.js";
+import {
+  SlashCommandBuilder,
+  ChannelType,
+  MessageFlags,
+  PermissionFlagsBits,
+} from "discord.js";
 import { logger } from "../../utils/logger.js";
 
 export default {
@@ -25,7 +30,6 @@ export default {
     }
 
     try {
-
       const activeThreads = [...channel.threads.cache.values()];
 
       const archivedPublic = await channel.threads.fetchArchived({
@@ -83,10 +87,11 @@ export default {
       }
       if (chunk) chunks.push(chunk.trimEnd());
 
-      await interaction.editReply({ content: chunks[0] });
+      await interaction.channel.send({ content: chunks[0] });
       for (let i = 1; i < chunks.length; i++) {
-        await interaction.followUp({ content: chunks[i] });
+        await interaction.channel.send({ content: chunks[i] });
       }
+      await interaction.deleteReply();
     } catch (err) {
       logger.error("[FetchThreads] Error:", err);
       await interaction.editReply({
