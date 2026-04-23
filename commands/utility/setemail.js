@@ -67,8 +67,18 @@ export default {
     const member = pinnedMsg.mentions.members?.first();
     const user = member?.user ?? { toString: () => "Unknown" };
 
+    let chessRating = null;
+    if (eventKey === "Chess") {
+      const ratingLine = pinnedMsg.content
+        .split("\n")
+        .find((l) => l.startsWith("**Chess.com Rating:**"));
+      if (ratingLine) {
+        chessRating = ratingLine.replace("**Chess.com Rating:**", "").trim();
+      }
+    }
+
     // Edit pinned message with refreshed registration details
-    const newContent = buildPinnedContent(user, eventKey, email, result);
+    const newContent = buildPinnedContent(user, eventKey, email, result, chessRating);
     await pinnedMsg.edit(newContent);
 
     await interaction.editReply({

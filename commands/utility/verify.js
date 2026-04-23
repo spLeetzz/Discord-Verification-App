@@ -119,9 +119,10 @@ export default {
       if (backupChannel) {
         setImmediate(async () => {
           try {
-            await forwardMedia(thread, backupChannel);
-            await backupChannel.send(
-              `✅ Verified by ${interaction.user}\nThread: ${thread.url}`,
+            await forwardMedia(
+              thread,
+              backupChannel,
+              `✅ Verified by ${interaction.user}`,
             );
           } catch (err) {
             logger.error("[Verify] Background backup failed:", err);

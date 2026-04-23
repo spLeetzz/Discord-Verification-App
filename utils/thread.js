@@ -17,13 +17,13 @@ export async function updateThreadStatus(thread, emoji) {
 }
 
 export async function createVerificationThread(
-
   interaction,
   user,
   eventKey,
   email,
   name,
   result,
+  chessRating = null,
 ) {
   const thread = await interaction.channel.threads.create({
     name: name.slice(0, 100),
@@ -34,7 +34,7 @@ export async function createVerificationThread(
   await thread.members.add(user.id);
 
   const pinnedMsg = await thread.send(
-    buildPinnedContent(user, eventKey, email, result),
+    buildPinnedContent(user, eventKey, email, result, chessRating),
   );
 
   setImmediate(async () => {
@@ -50,25 +50,34 @@ export async function createVerificationThread(
 }
 
 
-export async function forwardMedia(thread, backupChannel) {
+export async function forwardMedia(thread, backupChannel, summary = "") {
+  const allUrls = [];
   let before;
 
   while (true) {
     const batch = await thread.messages.fetch({ limit: 100, before });
     if (batch.size === 0) break;
 
-    for (const [, msg] of batch) {
-      if (msg.attachments.size > 0) {
-        const files = [...msg.attachments.values()].map((a) => a.url);
-        await backupChannel.send({
-          content: `Thread: ${thread.name} ${thread.url}`,
-          files,
-        });
-        await new Promise((r) => setTimeout(r, 1000));
+    for (const [, msg] of [...batch].reverse()) {          // chronological order
+      for (const attachment of msg.attachments.values()) {
+        allUrls.push(attachment.url);
       }
     }
 
     before = batch.last()?.id;
     if (batch.size < 100) break;
+  }
+
+  // Always send the header (even if no files) so the summary is never lost
+  const header = [`📁 **Thread:** ${thread.name}`, `🔗 ${thread.url}`];
+  if (summary) header.push(summary);
+  await backupChannel.send(header.join("\n"));
+
+  const CHUNK = 10;
+  for (let i = 0; i < allUrls.length; i += CHUNK) {
+    await backupChannel.send({ files: allUrls.slice(i, i + CHUNK) });
+    if (i + CHUNK < allUrls.length) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
   }
 }

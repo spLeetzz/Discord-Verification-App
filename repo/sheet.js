@@ -66,6 +66,30 @@ export function findAcrossAll(email) {
   return results;
 }
 
+export function getVerifiedEventForUser(discordId) {
+  for (const eventKey in EVENTS) {
+    const cfg = EVENTS[eventKey];
+    const rows = cache.get(cfg.sheetName) ?? [];
+    if (rows.length === 0) continue;
+
+    const headers = rows[0];
+    const discordCol = headers.findIndex((h) => h?.trim() === "Discord ID Final");
+    const verifiedCol = headers.findIndex((h) => h?.trim() === "Verified?");
+    if (discordCol === -1 || verifiedCol === -1) continue;
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (
+        row[discordCol]?.trim() === discordId &&
+        row[verifiedCol]?.trim().toUpperCase() === "TRUE"
+      ) {
+        return cfg.displayName;
+      }
+    }
+  }
+  return null;
+}
+
 export async function verifyParticipant(
   sheetName,
   email,

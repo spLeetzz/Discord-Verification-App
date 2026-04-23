@@ -55,9 +55,10 @@ export default {
         cfg.backupChannelId,
       );
       if (backupChannel) {
-        await forwardMedia(thread, backupChannel);
-        await backupChannel.send(
-          `✅ Force-verified by ${interaction.user}\nThread: ${thread.url}`,
+        await forwardMedia(
+          thread,
+          backupChannel,
+          `✅ Force-verified by ${interaction.user}`,
         );
       }
 

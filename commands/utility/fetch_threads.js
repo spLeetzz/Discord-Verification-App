@@ -3,6 +3,7 @@ import { logger } from "../../utils/logger.js";
 
 export default {
   staffOnly: true,
+  ephemeral: false,
   data: new SlashCommandBuilder()
     .setName("fetch_threads")
     .setDescription("Get all threads in a channel sorted alphabetically.")
@@ -84,10 +85,7 @@ export default {
 
       await interaction.editReply({ content: chunks[0] });
       for (let i = 1; i < chunks.length; i++) {
-        await interaction.followUp({
-          content: chunks[i],
-          flags: MessageFlags.Ephemeral,
-        });
+        await interaction.followUp({ content: chunks[i] });
       }
     } catch (err) {
       logger.error("[FetchThreads] Error:", err);

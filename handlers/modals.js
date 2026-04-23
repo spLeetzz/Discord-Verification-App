@@ -20,6 +20,10 @@ export async function handleModal(interaction) {
 
   const email = interaction.fields.getTextInputValue("email").trim();
   const name = interaction.fields.getTextInputValue("name").trim();
+  const chessRating =
+    eventKey === "Chess"
+      ? interaction.fields.getTextInputValue("chess_rating")?.trim() || null
+      : null;
   const result = findParticipant(cfg.sheetName, email);
 
   if (result.status === "duplicate") {
@@ -37,6 +41,7 @@ export async function handleModal(interaction) {
       email,
       name,
       result,
+      chessRating,
     );
 
     await interaction.editReply({

@@ -49,14 +49,29 @@ export function buildVerificationModal(eventKey) {
   const nameInput = new TextInputBuilder()
     .setCustomId("name")
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder(cfg.isTeamEvent ? "e.g. Team Phoenix" : "e.g. Rahul Sharma")
+    .setPlaceholder(cfg.isTeamEvent ? "e.g. Team Phoenix" : "ex. Rahul Sharma")
     .setRequired(true);
 
   const nameLabel = new LabelBuilder()
     .setLabel(cfg.isTeamEvent ? "Team Name" : "Your Full Name")
     .setTextInputComponent(nameInput);
 
-  modal.addLabelComponents(emailLabel, nameLabel);
+  if (eventKey === "Chess") {
+    const ratingInput = new TextInputBuilder()
+      .setCustomId("chess_rating")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("Max rating in your most played mode")
+      .setRequired(false);
+
+    const ratingLabel = new LabelBuilder()
+      .setLabel("Chess.com Rating")
+      .setTextInputComponent(ratingInput);
+
+    modal.addLabelComponents(emailLabel, nameLabel, ratingLabel);
+  } else {
+    modal.addLabelComponents(emailLabel, nameLabel);
+  }
+
   return modal;
 }
 
@@ -70,17 +85,27 @@ function parseBGMIPlayers(row) {
   return players;
 }
 
-export function buildPinnedContent(user, eventKey, email, result) {
+export function buildPinnedContent(
+  user,
+  eventKey,
+  email,
+  result,
+  chessRating = null,
+) {
   const cfg = EVENTS[eventKey];
   const tag = `${user}`; // resolves to <@id> mention
 
   if (result.status === "not_found") {
-    return [
+    const lines = [
       `📋 **REG Details**`,
       `**Email:** ${email}`,
       `**Discord:** ${tag}`,
       `**Status:** ❌ Not found in current sheet`,
-    ].join("\n");
+    ];
+    if (eventKey === "Chess" && chessRating) {
+      lines.splice(3, 0, `**Chess.com Rating:** ${chessRating}`);
+    }
+    return lines.join("\n");
   }
 
   const row = result.rows[0];
@@ -103,15 +128,19 @@ export function buildPinnedContent(user, eventKey, email, result) {
     ].join("\n");
   }
 
-  // Individual event
-  return [
+  // Individual event — include chess.com rating for Chess tickets
+  const lines = [
     `📋 **REG Details**`,
     `**Name:** ${row[3] || "N/A"}`,
     `**DOB:** ${row[5] || "N/A"}`,
     `**Email:** ${email}`,
     `**Discord:** ${tag}`,
-    `**Status:** ✅ Found in data`,
-  ].join("\n");
+  ];
+  if (eventKey === "Chess" && chessRating) {
+    lines.push(`**Chess.com Rating:** ${chessRating}`);
+  }
+  lines.push(`**Status:** ✅ Found in data`);
+  return lines.join("\n");
 }
 
 export function buildDocRequirements(eventKey) {

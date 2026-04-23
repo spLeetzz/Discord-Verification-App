@@ -1,6 +1,7 @@
 import { buildVerificationModal } from "../utils/embeds.js";
 import { EVENTS } from "../config/events.js";
 import { MessageFlags } from "discord.js";
+import { getVerifiedEventForUser } from "../repo/sheet.js";
 
 export async function handleButton(interaction) {
 
@@ -20,6 +21,16 @@ export async function handleButton(interaction) {
   if (roleId && interaction.member.roles.cache.has(roleId)) {
     await interaction.reply({
       content: `You have already completed ${EVENTS[eventKey].displayName}.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  // Check cache: already verified in any event?
+  const verifiedIn = getVerifiedEventForUser(interaction.user.id);
+  if (verifiedIn) {
+    await interaction.reply({
+      content: `You are already verified for **${verifiedIn}**. You cannot register again.`,
       flags: MessageFlags.Ephemeral,
     });
     return;

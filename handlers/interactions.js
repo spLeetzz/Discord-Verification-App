@@ -67,7 +67,7 @@ export async function handleInteraction(interaction) {
           await interaction.reply(reply);
         }
       } catch (innerErr) {
-        // Silent fail if even the error reporting fails
+        console.error(innerErr)
       }
     }
   });
