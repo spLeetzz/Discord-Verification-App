@@ -69,10 +69,7 @@ export default {
 
       const lines = [
         `**Threads in <#${channel.id}> (sorted alphabetically):**\n`,
-        ...sorted.map(
-          (t) =>
-            `- [${t.name}](https://discord.com/channels/${interaction.guildId}/${t.id})`,
-        ),
+        ...sorted.map((t) => `- <#${t.id}>`),
       ];
 
       const chunks = [];
