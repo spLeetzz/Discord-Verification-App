@@ -22,7 +22,7 @@ export async function handleModal(interaction) {
   const name = interaction.fields.getTextInputValue("name").trim();
   const chessRating =
     eventKey === "Chess"
-      ? interaction.fields.getTextInputValue("chess_rating")?.trim() || null
+      ? interaction.fields.getTextInputValue("chess_rating").trim()
       : null;
   const result = findParticipant(cfg.sheetName, email);
 

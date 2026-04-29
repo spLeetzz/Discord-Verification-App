@@ -61,7 +61,7 @@ export function buildVerificationModal(eventKey) {
       .setCustomId("chess_rating")
       .setStyle(TextInputStyle.Short)
       .setPlaceholder("Max rating in your most played mode")
-      .setRequired(false);
+      .setRequired(true);
 
     const ratingLabel = new LabelBuilder()
       .setLabel("Chess.com Rating")

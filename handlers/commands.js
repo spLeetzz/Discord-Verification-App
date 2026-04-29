@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-
 import { logger } from "../utils/logger.js";
 
 export async function loadCommands(client) {
