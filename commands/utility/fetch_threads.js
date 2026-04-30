@@ -67,9 +67,14 @@ export default {
         });
       }
 
+      const guildId = interaction.guildId;
+
       const lines = [
         `**Threads in <#${channel.id}> (sorted alphabetically):**\n`,
-        ...sorted.map((t) => `- <#${t.id}>`),
+        ...sorted.map(
+          (t) =>
+            `- ${t.name} [oOo](https://discord.com/channels/${guildId}/${t.id})`,
+        ),
       ];
 
       const chunks = [];
