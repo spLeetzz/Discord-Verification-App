@@ -69,11 +69,19 @@ export default {
 
       const guildId = interaction.guildId;
 
+      const renderName = (name) => {
+        const first = name[0];
+        if (first === "✅" || first === "❌") {
+          return `${first} [${name.slice(1).trimStart()}]`;
+        }
+        return `[${name}]`;
+      };
+
       const lines = [
         `**Threads in <#${channel.id}> (sorted alphabetically):**\n`,
         ...sorted.map(
           (t) =>
-            `- ${t.name} [oOo](https://discord.com/channels/${guildId}/${t.id})`,
+            `- ${renderName(t.name)}(https://discord.com/channels/${guildId}/${t.id})`,
         ),
       ];
 
