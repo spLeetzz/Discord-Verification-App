@@ -71,7 +71,7 @@ export default {
 
       const renderName = (name) => {
         const first = name[0];
-        if (first === "✅" || first === "❌") {
+        if (first === "✅" || first === "❌" || first === "❗") {
           return `${first} [${name.slice(1).trimStart()}]`;
         }
         return `[${name}]`;
