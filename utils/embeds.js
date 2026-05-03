@@ -26,7 +26,8 @@ export function buildVerificationButtonRow(eventKey) {
     .setCustomId(`verify_btn:${eventKey}`)
     .setLabel("Start Verification")
     .setEmoji("📩")
-    .setStyle(ButtonStyle.Primary);
+    .setStyle(ButtonStyle.Primary)
+    .setDisabled(disabled);
   return new ActionRowBuilder().addComponents(btn);
 }
 
