@@ -16,16 +16,12 @@
  *    the custom id. The panel survives a restart, the message being moved
  *    and the message being edited.
  *
- * The two never share a custom id and never share a handler: the wizard's
- * ids start with `identity:ssmod:wizard:` and the editor's with
- * `identity:ssmod:`. The router matches on segment boundaries and the more
- * specific prefix is registered first, so a wizard id is never mistaken
- * for an editor id.
- *
- * The wizard's prefix is `wizard` and not `setup` because the list panel
- * has a **Setup** button whose id is `identity:ssmod:setup` — and the
- * router takes the first prefix that matches, so a wizard prefix of
- * `identity:ssmod:setup` swallowed that button and it never did anything.
+ * The two never share a custom id, and the id says which one it is: the
+ * **surface** is the segment right after the prefix, and it is either
+ * `wizard` (the target is a token) or `edit` (the target is a row id).
+ * The panel has **one** prefix — `identity:ssmod` — and one registration
+ * per kind of component, so no pair of prefixes can shadow each other and
+ * no registration order decides which handler runs. See `./ids.ts`.
  *
  * ## Who may press the buttons
  *
@@ -65,6 +61,9 @@
  *    swallowed by the wizard's prefix, and the wizard's **Save & setup**
  *    and **Cancel** buttons carried the editor's prefix, so the wizard
  *    could never be saved.
+ *  - **The panel's prefixes shadowed each other.** The wizard's prefix
+ *    was a segment-prefix of the editor's, so the pair worked only
+ *    because the wizard was registered first. There is one prefix now.
  */
 
 import {
@@ -88,7 +87,6 @@ import type {
   RepliableInteraction,
 } from "discord.js";
 import { TokenStore } from "../../../core/custom-id.js";
-import { makeCustomId } from "../../../core/custom-id.js";
 import { EMBED_COLOR, ERROR_COLOR } from "../../../core/constants.js";
 import { respond } from "../../../core/context.js";
 import { errorMessage } from "../../../utils/errors.js";
@@ -97,97 +95,26 @@ import { canManageSsConfig } from "../guards.js";
 import * as service from "../service.js";
 import type { ScreenshotType, SsConfig } from "../types.js";
 import { SCREENSHOT_TYPE_LABELS } from "../types.js";
+import { SSMOD_ACTIONS, SSMOD_SURFACES, ssModCustomId } from "./ids.js";
+import type {
+  SsModEditAction,
+  SsModId,
+  SsModListAction,
+  SsModSetupSurface,
+  SsModWizardAction,
+} from "./ids.js";
 
 /* ------------------------------------------------------------------ *
  * Custom ids
  * ------------------------------------------------------------------ */
 
-/** The prefix of every id of this panel. */
-export const SSMOD_PREFIX = "identity:ssmod";
-
 /**
- * The prefix of the **wizard's** ids. Registered before {@link SSMOD_PREFIX}.
+ * The panel's custom ids.
  *
- * The wizard's prefix is `wizard` and not `setup`, because the list panel
- * has a **Setup** button whose id is `identity:ssmod:setup` — and the
- * router takes the first prefix that matches, so a wizard prefix of
- * `identity:ssmod:setup` swallowed that button and it never did anything.
+ * The scheme lives in `./ids.ts`: the surfaces, the actions, the builder
+ * and the parser. This panel builds its ids with that builder and hands
+ * them to the router's **one** registration.
  */
-export const SSMOD_WIZARD_PREFIX = "identity:ssmod:wizard";
-
-/** The actions the panel understands. */
-export const SSMOD_ACTIONS = {
-  /** Start a wizard. */
-  setup: "setup",
-  /** Open the editor of a setup. */
-  edit: "edit",
-  /** The frequently asked questions. */
-  faq: "faq",
-  /** Pick the channel. */
-  setChannel: "set_channel",
-  /** Pick the role. */
-  setRole: "set_role",
-  /** Pick the screenshot type. */
-  setType: "set_type",
-  /** Pick how many screenshots are required. */
-  setCount: "set_count",
-  /** Set the page name and link. */
-  pageDetails: "page_details",
-  /** Set the success message. */
-  successMessage: "success_message",
-  /** Turn "the same screenshot may be reused" on or off. */
-  allowSame: "allow_same",
-  /** Save the wizard. */
-  save: "save",
-  /** Delete a setup. */
-  delete: "delete",
-  /** Close the panel. */
-  close: "close",
-} as const;
-
-/** One of the panel's actions. */
-export type SsModAction = (typeof SSMOD_ACTIONS)[keyof typeof SSMOD_ACTIONS];
-
-/**
- * Builds a custom id of the panel.
- *
- * @param action what the component does.
- * @param target the row id, or the wizard's token.
- * @param setup whether the id belongs to the wizard.
- */
-export function ssModCustomId(
-  action: SsModAction,
-  target?: string,
-  setup = false,
-): string {
-  const prefix = setup ? "wizard:" : "";
-
-  const payload =
-    target === undefined ? `${prefix}${action}` : `${prefix}${action}:${target}`;
-
-  return makeCustomId("identity", "ssmod", payload);
-}
-
-/**
- * Splits a payload back into its action and its target.
- *
- * The payload is everything after the router's prefix, so it is
- * `<action>[:<target>]`.
- */
-export function parseSsModPayload(
-  payload: string | null,
-): { action: string; target: string | null } {
-  if (!payload) return { action: "", target: null };
-
-  const separator = payload.indexOf(":");
-
-  if (separator === -1) return { action: payload, target: null };
-
-  return {
-    action: payload.slice(0, separator),
-    target: payload.slice(separator + 1),
-  };
-}
 
 /* ------------------------------------------------------------------ *
  * The wizard's draft
@@ -405,12 +332,16 @@ export function buildSsPanel(target: SsTarget): SsPanel {
 
   const isSetup = target.kind === "setup";
 
+  // The surface is the segment right after the prefix, and it says what
+  // the target is: a token for the wizard, a row id for the editor.
+  const surface: SsModSetupSurface = isSetup ? "wizard" : "edit";
+
   const id = isSetup ? target.token : target.configId;
 
   const channelRow =
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ChannelSelectMenuBuilder()
-        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setChannel, id, isSetup))
+        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.setChannel, id))
         .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
         .setMaxValues(1)
         .setPlaceholder("The channel the screenshots are posted in"),
@@ -419,7 +350,7 @@ export function buildSsPanel(target: SsTarget): SsPanel {
   const roleRow =
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new RoleSelectMenuBuilder()
-        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setRole, id, isSetup))
+        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.setRole, id))
         .setMaxValues(1)
         .setPlaceholder(
           "The role the bot grants when the verification succeeds",
@@ -429,7 +360,7 @@ export function buildSsPanel(target: SsTarget): SsPanel {
   const typeRow =
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new StringSelectMenuBuilder()
-        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setType, id, isSetup))
+        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.setType, id))
         .setPlaceholder("The kind of screenshot")
         .setMaxValues(1)
         .addOptions(
@@ -443,7 +374,7 @@ export function buildSsPanel(target: SsTarget): SsPanel {
   const countRow =
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new StringSelectMenuBuilder()
-        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setCount, id, isSetup))
+        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.setCount, id))
         .setPlaceholder("How many screenshots are required")
         .setMaxValues(1)
         .addOptions(
@@ -457,15 +388,15 @@ export function buildSsPanel(target: SsTarget): SsPanel {
   const fieldRow =
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(ssModCustomId(SSMOD_ACTIONS.pageDetails, id, isSetup))
+        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.pageDetails, id))
         .setLabel("Page details")
         .setStyle(ButtonStyle.Secondary),
       new ButtonBuilder()
-        .setCustomId(ssModCustomId(SSMOD_ACTIONS.allowSame, id, isSetup))
+        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.allowSame, id))
         .setLabel("Allow same")
         .setStyle(ButtonStyle.Secondary),
       new ButtonBuilder()
-        .setCustomId(ssModCustomId(SSMOD_ACTIONS.successMessage, id, isSetup))
+        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.successMessage, id))
         .setLabel("Success message")
         .setStyle(ButtonStyle.Secondary),
     );
@@ -482,15 +413,15 @@ export function buildSsPanel(target: SsTarget): SsPanel {
     components.push(
       new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
         new ButtonBuilder()
-          // The wizard's own buttons carry the wizard's prefix, like every
-          // other button of the wizard. Without it they were the editor's
-          // ids, and the wizard could never be saved.
-          .setCustomId(ssModCustomId(SSMOD_ACTIONS.save, id, true))
+          // The wizard's own buttons carry the wizard's **surface**, like
+          // every other button of the wizard. Without it they were the
+          // editor's ids, and the wizard could never be saved.
+          .setCustomId(ssModCustomId("wizard", SSMOD_ACTIONS.save, id))
           .setLabel("Save & setup")
           .setStyle(ButtonStyle.Success)
           .setDisabled(!isDraftComplete(target.draft)),
         new ButtonBuilder()
-          .setCustomId(ssModCustomId(SSMOD_ACTIONS.close, id, true))
+          .setCustomId(ssModCustomId("wizard", SSMOD_ACTIONS.close, id))
           .setLabel("Cancel")
           .setStyle(ButtonStyle.Danger),
       ),
@@ -499,11 +430,11 @@ export function buildSsPanel(target: SsTarget): SsPanel {
     components.push(
       new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(ssModCustomId(SSMOD_ACTIONS.delete, id))
+          .setCustomId(ssModCustomId("edit", SSMOD_ACTIONS.delete, id))
           .setLabel("Delete setup")
           .setStyle(ButtonStyle.Danger),
         new ButtonBuilder()
-          .setCustomId(ssModCustomId(SSMOD_ACTIONS.close))
+          .setCustomId(ssModCustomId("edit", SSMOD_ACTIONS.close, id))
           .setLabel("Close")
           .setStyle(ButtonStyle.Secondary),
       ),
@@ -576,25 +507,31 @@ export function isDraftComplete(draft: SsDraft): boolean {
  * ------------------------------------------------------------------ */
 
 /** The custom id of the page-details modal. */
-export function pageDetailsModalId(target: string, setup: boolean): string {
-  return ssModCustomId(SSMOD_ACTIONS.pageDetails, target, setup);
+export function pageDetailsModalId(
+  surface: SsModSetupSurface,
+  target: string,
+): string {
+  return ssModCustomId(surface, SSMOD_ACTIONS.pageDetails, target);
 }
 
 /** The custom id of the-success-message modal. */
-export function successMessageModalId(target: string, setup: boolean): string {
-  return ssModCustomId(SSMOD_ACTIONS.successMessage, target, setup);
+export function successMessageModalId(
+  surface: SsModSetupSurface,
+  target: string,
+): string {
+  return ssModCustomId(surface, SSMOD_ACTIONS.successMessage, target);
 }
 
 /**
  * Builds the modal that asks for the page name and the page link.
  */
 export function buildPageDetailsModal(
+  surface: SsModSetupSurface,
   target: string,
-  setup: boolean,
   current: { channelName: string; channelLink: string },
 ): ModalBuilder {
   return new ModalBuilder()
-    .setCustomId(pageDetailsModalId(target, setup))
+    .setCustomId(pageDetailsModalId(surface, target))
     .setTitle("The page the screenshot must belong to")
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -624,12 +561,12 @@ export function buildPageDetailsModal(
  * Builds the modal that asks for the success message.
  */
 export function buildSuccessMessageModal(
+  surface: SsModSetupSurface,
   target: string,
-  setup: boolean,
   current: string | null,
 ): ModalBuilder {
   return new ModalBuilder()
-    .setCustomId(successMessageModalId(target, setup))
+    .setCustomId(successMessageModalId(surface, target))
     .setTitle("The message shown on a successful verification")
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -675,11 +612,11 @@ export function buildSsListPanel(configs: readonly SsConfig[]): SsPanel {
   const setupRow =
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setup))
+        .setCustomId(ssModCustomId("list", SSMOD_ACTIONS.setup))
         .setLabel("Setup")
         .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
-        .setCustomId(ssModCustomId(SSMOD_ACTIONS.faq))
+        .setCustomId(ssModCustomId("list", SSMOD_ACTIONS.faq))
         .setLabel("FAQ")
         .setStyle(ButtonStyle.Secondary),
     );
@@ -691,7 +628,7 @@ export function buildSsListPanel(configs: readonly SsConfig[]): SsPanel {
       new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
         ...configs.slice(0, 5).map((config) =>
           new ButtonBuilder()
-            .setCustomId(ssModCustomId(SSMOD_ACTIONS.edit, config.id))
+            .setCustomId(ssModCustomId("list", SSMOD_ACTIONS.edit, config.id))
             .setLabel(`Edit ${SCREENSHOT_TYPE_LABELS[config.ssType]}`)
             .setStyle(ButtonStyle.Primary),
         ),
@@ -804,8 +741,16 @@ export async function resolveEditTarget(
 }
 
 /* ------------------------------------------------------------------ *
- * Handlers — the wizard
+ * The handlers
  * ------------------------------------------------------------------ */
+
+/**
+ * What the panel answers when its target is gone.
+ *
+ * A token that has expired and a row that has been deleted look the
+ * same from the outside: there is nothing left to edit.
+ */
+const EXPIRED_MESSAGE = "This panel has expired. Please run the command again.";
 
 /**
  * Refuses an interaction from somebody who may not manage the setups.
@@ -830,200 +775,77 @@ async function refuseSsMod(
 }
 
 /**
- * Answers a button of the **wizard**.
+ * Resolves the target of an action.
  *
- * Registered for the prefix `identity:ssmod:wizard`.
+ * The **surface** says what the target is: a `wizard` target is a token
+ * into the draft store, an `edit` target is a row id in the database.
+ * The handler therefore knows which one it is holding, instead of trying
+ * the wizard first and falling back to the editor.
+ *
+ * @returns the target, or `null` when the interaction has been answered.
  */
-export async function handleSsSetupButton(
-  interaction: ButtonInteraction,
-  payload: string | null,
-): Promise<void> {
-  const { action, target } = parseSsModPayload(payload);
-
-  // The authorisation comes first. The panel is a message, so anybody who
-  // can read the channel can press its buttons.
-  if (await refuseSsMod(interaction, interaction.guildId)) return;
-
-  try {
-    switch (action) {
-      case SSMOD_ACTIONS.save:
-        return await saveWizard(interaction, target);
-      case SSMOD_ACTIONS.close:
-        return await closePanel(interaction, target);
-      case SSMOD_ACTIONS.allowSame:
-        return await toggleAllowSame(interaction, target);
-      case SSMOD_ACTIONS.pageDetails:
-        return await openPageDetailsModal(interaction, target);
-      case SSMOD_ACTIONS.successMessage:
-        return await openSuccessMessageModal(interaction, target);
-      default:
-        logger.debug(`[Identity] Unknown ssmod wizard action "${action}".`);
-
-        return undefined;
-    }
-  } catch (error) {
-    await respond(interaction, { content: errorMessage(error) }, true);
-  }
-}
-
-/**
- * Answers a select menu of the **wizard**.
- */
-export async function handleSsSetupSelect(
-  interaction: AnySelectMenuInteraction,
-  payload: string | null,
-): Promise<void> {
-  const { action, target } = parseSsModPayload(payload);
-
-  if (await refuseSsMod(interaction, interaction.guildId)) return;
-
-  const resolved = resolveSetupTarget(target ?? "", interaction.guildId);
+async function resolveTarget(
+  interaction: RepliableInteraction,
+  surface: SsModSetupSurface,
+  target: string | null,
+): Promise<ResolvedTarget | null> {
+  const resolved =
+    surface === "wizard"
+      ? resolveSetupTarget(target ?? "", interaction.guildId)
+      : await resolveEditTarget(interaction.guildId, target ?? "");
 
   if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This wizard has expired. Please run the command again." },
-      true,
-    );
-
-    return;
+    await respond(interaction, { content: EXPIRED_MESSAGE }, true);
   }
 
-  try {
-    switch (action) {
-      case SSMOD_ACTIONS.setChannel: {
-        const value = interaction.values[0];
-
-        if (value) await applyChannel(resolved, value);
-
-        break;
-      }
-      case SSMOD_ACTIONS.setRole: {
-        const value = interaction.values[0];
-
-        if (value) await applyRole(resolved, value);
-
-        break;
-      }
-      case SSMOD_ACTIONS.setType: {
-        const value = interaction.values[0];
-
-        if (value) await applyType(resolved, value);
-
-        break;
-      }
-      case SSMOD_ACTIONS.setCount: {
-        const value = interaction.values[0];
-
-        if (value) await applyCount(resolved, value);
-
-        break;
-      }
-      default:
-        logger.debug(`[Identity] Unknown ssmod wizard select "${action}".`);
-
-        return;
-    }
-  } catch (error) {
-    await respond(interaction, { content: errorMessage(error) }, true);
-
-    return;
-  }
-
-  await renderPanel(interaction, resolved);
+  return resolved;
 }
 
 /**
- * Answers a modal of the **wizard**.
- *
- * A modal is only shown to the person who pressed the button that opened
- * it, so it is owner-only by Discord's own doing — but the guild check
- * still applies: a moderator may have opened a modal on a setup of
- * another server.
+ * The surface a target belongs to.
  */
-export async function handleSsSetupModal(
-  interaction: ModalSubmitInteraction,
-  payload: string | null,
-): Promise<void> {
-  const { action, target } = parseSsModPayload(payload);
-
-  if (await refuseSsMod(interaction, interaction.guildId)) return;
-
-  const resolved = resolveSetupTarget(target ?? "", interaction.guildId);
-
-  if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This wizard has expired. Please run the command again." },
-      true,
-    );
-
-    return;
-  }
-
-  try {
-    if (action === SSMOD_ACTIONS.pageDetails) {
-      const name = interaction.fields.getTextInputValue("name").trim();
-      const link = interaction.fields.getTextInputValue("link").trim();
-
-      await applyPageDetails(resolved, name, link);
-    } else if (action === SSMOD_ACTIONS.successMessage) {
-      const message = interaction.fields.getTextInputValue("message").trim();
-
-      await applySuccessMessage(resolved, message);
-    }
-  } catch (error) {
-    await respond(interaction, { content: errorMessage(error) }, true);
-
-    return;
-  }
-
-  await renderPanel(interaction, resolved);
+function surfaceOf(resolved: ResolvedTarget): SsModSetupSurface {
+  return resolved.kind === "setup" ? "wizard" : "edit";
 }
 
-/* ------------------------------------------------------------------ *
- * Handlers — the editor
- * ------------------------------------------------------------------ */
+/**
+ * The id the target is written under: the wizard's token, or the row
+ * id.
+ */
+function targetOf(resolved: ResolvedTarget): string {
+  return resolved.kind === "setup" ? resolved.token : resolved.configId;
+}
 
 /**
- * Answers a button of the **editor** and of the list panel.
+ * Answers a button of the panel.
  *
- * Registered for the prefix `identity:ssmod`.
+ * There is **one** handler for every kind of component and **one**
+ * prefix for the whole area, so nothing here depends on the order the
+ * registrations were made in. The id says which surface the button is
+ * on and what it does, and the handler switches on exactly those two
+ * segments.
  */
 export async function handleSsModButton(
   interaction: ButtonInteraction,
-  payload: string | null,
+  id: SsModId,
 ): Promise<void> {
-  const { action, target } = parseSsModPayload(payload);
-
   // The authorisation comes first — before the setup is read, before it is
   // written, and before the panel is even opened.
   if (await refuseSsMod(interaction, interaction.guildId)) return;
 
   try {
-    switch (action) {
-      case SSMOD_ACTIONS.setup:
-        return await startWizard(interaction);
-      case SSMOD_ACTIONS.edit:
-        return await openEditor(interaction, target);
-      case SSMOD_ACTIONS.faq:
-        await respond(interaction, { embeds: [buildSsFaqEmbed()] }, true);
-
+    switch (id.surface) {
+      case SSMOD_SURFACES.list:
+        await handleListButton(interaction, id.action, id.target);
         return;
-      case SSMOD_ACTIONS.allowSame:
-        return await toggleAllowSame(interaction, target);
-      case SSMOD_ACTIONS.pageDetails:
-        return await openPageDetailsModal(interaction, target);
-      case SSMOD_ACTIONS.successMessage:
-        return await openSuccessMessageModal(interaction, target);
-      case SSMOD_ACTIONS.delete:
-        return await deleteSetup(interaction, target);
-      case SSMOD_ACTIONS.close:
-        return await closePanel(interaction, null);
-      default:
-        logger.debug(`[Identity] Unknown ssmod button action "${action}".`);
 
-        return undefined;
+      case SSMOD_SURFACES.edit:
+        await handleEditorButton(interaction, id.action, id.target);
+        return;
+
+      case SSMOD_SURFACES.wizard:
+        await handleWizardButton(interaction, id.action, id.target);
+        return;
     }
   } catch (error) {
     await respond(interaction, { content: errorMessage(error) }, true);
@@ -1031,32 +853,145 @@ export async function handleSsModButton(
 }
 
 /**
- * Answers a select menu of the **editor**.
+ * Answers a button of the **list panel**.
+ */
+async function handleListButton(
+  interaction: ButtonInteraction,
+  action: SsModListAction,
+  target: string | null,
+): Promise<void> {
+  switch (action) {
+    case SSMOD_ACTIONS.setup:
+      return await startWizard(interaction);
+
+    case SSMOD_ACTIONS.faq:
+      await respond(interaction, { embeds: [buildSsFaqEmbed()] }, true);
+      return;
+
+    case SSMOD_ACTIONS.edit:
+      return await openEditor(interaction, target);
+  }
+}
+
+/**
+ * Answers a button of the **editor**.
+ */
+async function handleEditorButton(
+  interaction: ButtonInteraction,
+  action: SsModEditAction,
+  target: string | null,
+): Promise<void> {
+  switch (action) {
+    case SSMOD_ACTIONS.delete:
+      return await deleteSetup(interaction, target);
+
+    case SSMOD_ACTIONS.close:
+      return await closePanel(interaction);
+
+    case SSMOD_ACTIONS.allowSame: {
+      const resolved = await resolveTarget(interaction, "edit", target);
+
+      if (!resolved) return;
+
+      return await toggleAllowSame(interaction, resolved);
+    }
+
+    case SSMOD_ACTIONS.pageDetails: {
+      const resolved = await resolveTarget(interaction, "edit", target);
+
+      if (!resolved) return;
+
+      return await openPageDetailsModal(interaction, resolved);
+    }
+
+    case SSMOD_ACTIONS.successMessage: {
+      const resolved = await resolveTarget(interaction, "edit", target);
+
+      if (!resolved) return;
+
+      return await openSuccessMessageModal(interaction, resolved);
+    }
+
+    default:
+      // The rest belong to the select menus.
+      logger.debug(`[Identity] The ssmod editor has no button "${action}".`);
+      return;
+  }
+}
+
+/**
+ * Answers a button of the **wizard**.
+ */
+async function handleWizardButton(
+  interaction: ButtonInteraction,
+  action: SsModWizardAction,
+  target: string | null,
+): Promise<void> {
+  switch (action) {
+    case SSMOD_ACTIONS.save:
+      return await saveWizard(interaction, target);
+
+    case SSMOD_ACTIONS.close:
+      return await closeWizard(interaction, target);
+
+    case SSMOD_ACTIONS.allowSame: {
+      const resolved = await resolveTarget(interaction, "wizard", target);
+
+      if (!resolved) return;
+
+      return await toggleAllowSame(interaction, resolved);
+    }
+
+    case SSMOD_ACTIONS.pageDetails: {
+      const resolved = await resolveTarget(interaction, "wizard", target);
+
+      if (!resolved) return;
+
+      return await openPageDetailsModal(interaction, resolved);
+    }
+
+    case SSMOD_ACTIONS.successMessage: {
+      const resolved = await resolveTarget(interaction, "wizard", target);
+
+      if (!resolved) return;
+
+      return await openSuccessMessageModal(interaction, resolved);
+    }
+
+    default:
+      // The rest belong to the select menus.
+      logger.debug(`[Identity] The ssmod wizard has no button "${action}".`);
+      return;
+  }
+}
+
+/**
+ * Answers a select menu of the panel.
+ *
+ * The four menus are the same on the editor and on the wizard — the
+ * channel, the role, the type and the count — so one handler answers
+ * both, and the surface says which target it writes to.
  */
 export async function handleSsModSelect(
   interaction: AnySelectMenuInteraction,
-  payload: string | null,
+  id: SsModId,
 ): Promise<void> {
-  const { action, target } = parseSsModPayload(payload);
-
   if (await refuseSsMod(interaction, interaction.guildId)) return;
 
-  // The setup is looked up **in the caller's guild**, so a row id of
-  // another server is not found and cannot be changed.
-  const resolved = await resolveEditTarget(interaction.guildId, target ?? "");
-
-  if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This panel has expired. Please run the command again." },
-      true,
-    );
-
+  if (id.surface === SSMOD_SURFACES.list) {
+    // The list panel has no menus.
+    logger.debug("[Identity] The ssmod list panel has no select menu.");
     return;
   }
 
+  // The setup is looked up **in the caller's guild**, so a row id of
+  // another server is not found and cannot be changed.
+  const resolved = await resolveTarget(interaction, id.surface, id.target);
+
+  if (!resolved) return;
+
   try {
-    switch (action) {
+    switch (id.action) {
       case SSMOD_ACTIONS.setChannel: {
         const value = interaction.values[0];
 
@@ -1086,7 +1021,9 @@ export async function handleSsModSelect(
         break;
       }
       default:
-        logger.debug(`[Identity] Unknown ssmod select "${action}".`);
+        logger.debug(
+          `[Identity] The ssmod ${id.surface} has no select "${id.action}".`,
+        );
 
         return;
     }
@@ -1100,7 +1037,7 @@ export async function handleSsModSelect(
 }
 
 /**
- * Answers a modal of the **editor**.
+ * Answers a modal of the panel.
  *
  * A modal is only shown to the person who pressed the button that opened
  * it, so it is owner-only by Discord's own doing — but the guild check
@@ -1110,34 +1047,36 @@ export async function handleSsModSelect(
  */
 export async function handleSsModModal(
   interaction: ModalSubmitInteraction,
-  payload: string | null,
+  id: SsModId,
 ): Promise<void> {
-  const { action, target } = parseSsModPayload(payload);
-
   if (await refuseSsMod(interaction, interaction.guildId)) return;
 
-  const resolved = await resolveEditTarget(interaction.guildId, target ?? "");
-
-  if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This panel has expired. Please run the command again." },
-      true,
-    );
-
+  if (id.surface === SSMOD_SURFACES.list) {
+    // The list panel has no modals.
+    logger.debug("[Identity] The ssmod list panel has no modal.");
     return;
   }
 
+  const resolved = await resolveTarget(interaction, id.surface, id.target);
+
+  if (!resolved) return;
+
   try {
-    if (action === SSMOD_ACTIONS.pageDetails) {
+    if (id.action === SSMOD_ACTIONS.pageDetails) {
       const name = interaction.fields.getTextInputValue("name").trim();
       const link = interaction.fields.getTextInputValue("link").trim();
 
       await applyPageDetails(resolved, name, link);
-    } else if (action === SSMOD_ACTIONS.successMessage) {
+    } else if (id.action === SSMOD_ACTIONS.successMessage) {
       const message = interaction.fields.getTextInputValue("message").trim();
 
       await applySuccessMessage(resolved, message);
+    } else {
+      logger.debug(
+        `[Identity] The ssmod ${id.surface} has no modal "${id.action}".`,
+      );
+
+      return;
     }
   } catch (error) {
     await respond(interaction, { content: errorMessage(error) }, true);
@@ -1301,30 +1240,16 @@ async function openEditor(
   });
 }
 
+/**
+ * Turns "the same screenshot may be reused" on or off.
+ *
+ * The target is already resolved, so the handler knows whether it is
+ * holding a draft or a row.
+ */
 async function toggleAllowSame(
   interaction: ButtonInteraction,
-  target: string | null,
+  resolved: ResolvedTarget,
 ): Promise<void> {
-  if (!target) {
-    await respond(interaction, { content: "This panel has expired." }, true);
-
-    return;
-  }
-
-  const resolved =
-    resolveSetupTarget(target, interaction.guildId) ??
-    (await resolveEditTarget(interaction.guildId, target));
-
-  if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This panel has expired. Please run the command again." },
-      true,
-    );
-
-    return;
-  }
-
   if (resolved.kind === "setup") {
     resolved.draft.allowSame = !resolved.draft.allowSame;
 
@@ -1345,28 +1270,8 @@ async function toggleAllowSame(
 
 async function openPageDetailsModal(
   interaction: ButtonInteraction,
-  target: string | null,
+  resolved: ResolvedTarget,
 ): Promise<void> {
-  if (!target) {
-    await respond(interaction, { content: "This panel has expired." }, true);
-
-    return;
-  }
-
-  const resolved =
-    resolveSetupTarget(target, interaction.guildId) ??
-    (await resolveEditTarget(interaction.guildId, target));
-
-  if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This panel has expired. Please run the command again." },
-      true,
-    );
-
-    return;
-  }
-
   const current =
     resolved.kind === "setup"
       ? {
@@ -1379,41 +1284,21 @@ async function openPageDetailsModal(
         };
 
   await interaction.showModal(
-    buildPageDetailsModal(target, resolved.kind === "setup", current),
+    buildPageDetailsModal(surfaceOf(resolved), targetOf(resolved), current),
   );
 }
 
 async function openSuccessMessageModal(
   interaction: ButtonInteraction,
-  target: string | null,
+  resolved: ResolvedTarget,
 ): Promise<void> {
-  if (!target) {
-    await respond(interaction, { content: "This panel has expired." }, true);
-
-    return;
-  }
-
-  const resolved =
-    resolveSetupTarget(target, interaction.guildId) ??
-    (await resolveEditTarget(interaction.guildId, target));
-
-  if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This panel has expired. Please run the command again." },
-      true,
-    );
-
-    return;
-  }
-
   const current =
     resolved.kind === "setup"
       ? resolved.draft.successMessage
       : resolved.config.successMessage;
 
   await interaction.showModal(
-    buildSuccessMessageModal(target, resolved.kind === "setup", current),
+    buildSuccessMessageModal(surfaceOf(resolved), targetOf(resolved), current),
   );
 }
 
@@ -1463,16 +1348,13 @@ async function deleteSetup(
   });
 }
 
-async function closePanel(
-  interaction: ButtonInteraction,
-  target: string | null,
-): Promise<void> {
-  if (target) {
-    // Throwing the draft away is the whole point: nothing was written, so
-    // the channel never went live.
-    dropSsDraft(target);
-  }
-
+/**
+ * Closes the panel.
+ *
+ * The editor's **Close** button: the setup stays as it is, and the
+ * message is closed.
+ */
+async function closePanel(interaction: ButtonInteraction): Promise<void> {
   await interaction.update({
     embeds: [
       new EmbedBuilder()
@@ -1481,6 +1363,23 @@ async function closePanel(
     ],
     components: [],
   });
+}
+
+/**
+ * Closes the **wizard**.
+ *
+ * Throwing the draft away is the whole point: nothing was written, so
+ * the channel never went live.
+ */
+async function closeWizard(
+  interaction: ButtonInteraction,
+  target: string | null,
+): Promise<void> {
+  if (target) {
+    dropSsDraft(target);
+  }
+
+  await closePanel(interaction);
 }
 
 /* ------------------------------------------------------------------ *

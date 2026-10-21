@@ -1,19 +1,28 @@
 /**
  * The component handlers of this area.
  *
- * Every custom id is namespaced `identity:<feature>:<action>[:<payload>]`
- * (D7) and carries the record it refers to (D18):
+ * Every custom id is namespaced
+ * `identity:ssmod:<surface>:<action>[:<target>]` (D7) and carries the
+ * record it refers to (D18):
  *
- *  - `identity:ssmod:wizard:<action>:<token>` — the **wizard**. The setup
- *    does not exist yet, so its state is a token.
- *  - `identity:ssmod:<action>:<configId>` — the **editor**. The setup
- *    exists, so its row id travels in the id and the panel survives a
- *    restart.
+ *  - `identity:ssmod:list:…` — the **list panel**. It carries no setup:
+ *    its buttons start a wizard, show the FAQ and open the editor.
+ *  - `identity:ssmod:edit:<action>:<configId>` — the **editor**. The
+ *    setup exists, so its row id travels in the id and the panel
+ *    survives a restart.
+ *  - `identity:ssmod:wizard:<action>:<token>` — the **wizard**. The
+ *    setup does not exist yet, so its state is a token.
+ *
+ * The surface is the segment right after the prefix, and it says what
+ * the target is: a token for the wizard, a row id for the editor. The
+ * handler therefore knows which of the two it is holding.
  *
  * The router dispatches on the prefix and **never guesses** an owner from
- * the shape of the rest of the id. The wizard's prefix is registered
- * before the editor's, because the router takes the first prefix that
- * matches and `identity:ssmod` would match the wizard's ids too.
+ * the shape of the rest of the id. The panel has **one** prefix —
+ * `identity:ssmod` — so there is one registration per kind of component
+ * and no pair of prefixes that can shadow each other. The old pair
+ * (`identity:ssmod` and `identity:ssmod:wizard`) worked only because the
+ * wizard was registered first, and the router warned about it.
  *
  * The group management is **not** here. It was a second, unreachable copy
  * of the tournament area's own group manager, and its handlers created
@@ -30,15 +39,12 @@ import type {
   ButtonInteraction,
   ModalSubmitInteraction,
 } from "discord.js";
+import { replyError } from "../../core/context.js";
+import { SSMOD_PREFIX, parseSsModId } from "./views/ids.js";
 import {
-  SSMOD_PREFIX,
-  SSMOD_WIZARD_PREFIX,
   handleSsModButton,
   handleSsModModal,
   handleSsModSelect,
-  handleSsSetupButton,
-  handleSsSetupModal,
-  handleSsSetupSelect,
 } from "./views/ssmod.js";
 
 /** A button handler. */
@@ -72,19 +78,51 @@ export interface IdentityRouter {
 }
 
 /**
+ * What a caller is told when the id is not one of this area's.
+ *
+ * The same words the router uses when nobody owns an id.
+ */
+const INACTIVE_MESSAGE =
+  "This button is no longer active. Please run the command again.";
+
+/**
  * Registers every component handler of this area.
  *
- * The order matters: the wizard's prefix is more specific than the
- * editor's, and the router takes the first prefix that matches.
+ * **One prefix, three registrations** — one per kind of component. The
+ * order does not matter: there is no second prefix that could shadow
+ * the first, and the router says so when it sees a pair like that.
  */
 export function registerIdentityInteractions(router: IdentityRouter): void {
-  // The wizard first — `identity:ssmod` would match its ids too.
-  router.registerButton(SSMOD_WIZARD_PREFIX, handleSsSetupButton);
-  router.registerSelect(SSMOD_WIZARD_PREFIX, handleSsSetupSelect);
-  router.registerModal(SSMOD_WIZARD_PREFIX, handleSsSetupModal);
+  router.registerButton(SSMOD_PREFIX, async (interaction, payload) => {
+    const id = parseSsModId(payload);
 
-  // The editor and the list panel.
-  router.registerButton(SSMOD_PREFIX, handleSsModButton);
-  router.registerSelect(SSMOD_PREFIX, handleSsModSelect);
-  router.registerModal(SSMOD_PREFIX, handleSsModModal);
+    if (!id) {
+      await replyError(interaction, INACTIVE_MESSAGE, { ephemeral: true });
+      return;
+    }
+
+    await handleSsModButton(interaction, id);
+  });
+
+  router.registerSelect(SSMOD_PREFIX, async (interaction, payload) => {
+    const id = parseSsModId(payload);
+
+    if (!id) {
+      await replyError(interaction, INACTIVE_MESSAGE, { ephemeral: true });
+      return;
+    }
+
+    await handleSsModSelect(interaction, id);
+  });
+
+  router.registerModal(SSMOD_PREFIX, async (interaction, payload) => {
+    const id = parseSsModId(payload);
+
+    if (!id) {
+      await replyError(interaction, INACTIVE_MESSAGE, { ephemeral: true });
+      return;
+    }
+
+    await handleSsModModal(interaction, id);
+  });
 }

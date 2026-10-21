@@ -102,17 +102,42 @@ premium feature is enforced (D15): `assertChannelAllowance`,
 ### Custom ids
 
 ```
-identity:ssmod:wizard:<action>:<token>   the wizard — the setup does not exist yet
-identity:ssmod:<action>:<configId>      the editor — the setup is a row
+identity:ssmod:<surface>:<action>[:<target>]
 ```
 
-The wizard's prefix is registered **before** the editor's, because
-`identity:ssmod` would match the wizard's ids too (D7, D18).
+The panel has **one** prefix — `identity:ssmod` — and one registration per
+kind of component, so no pair of prefixes can shadow each other and the
+order the registrations are made in cannot decide which handler runs.
 
-The wizard's prefix is `wizard` and not `setup` because the list panel
-has a **Setup** button whose id is `identity:ssmod:setup` — and the
-router takes the first prefix that matches, so a wizard prefix of
-`identity:ssmod:setup` swallowed that button and it never did anything.
+The **surface** is the segment right after the prefix, and it says what
+the target is:
+
+| Surface | What it is | The target |
+|---|---|---|
+| `list` | The list of a guild's setups. | none — its buttons start a wizard, show the FAQ and open the editor. |
+| `edit` | The editor of one setup. | the **row id** (D18): the setup exists, so the panel survives a restart. |
+| `wizard` | The wizard that creates a setup. | the **token**: the setup does not exist yet, so its state is a token. |
+
+The action is the next segment, and it belongs to the surface: `save` is
+the wizard's, `delete` is the editor's, and `setup` is the list panel's.
+An id that names an action of another surface is not one of this area's
+ids, and the parser refuses it.
+
+| Id | What it does |
+|---|---|
+| `identity:ssmod:list:setup` | Open the wizard. |
+| `identity:ssmod:list:faq` | Show the frequently asked questions. |
+| `identity:ssmod:list:edit:<configId>` | Open the editor of a setup. |
+| `identity:ssmod:edit:set_channel:<configId>` | One field of the editor. |
+| `identity:ssmod:edit:delete:<configId>` | Delete a setup. |
+| `identity:ssmod:wizard:set_channel:<token>` | One field of the wizard. |
+| `identity:ssmod:wizard:save:<token>` | Save the wizard. |
+
+The scheme lives in `views/ids.ts`: the surfaces, the actions, the
+builder and the parser. The rule it exists for is the router's — *the
+segments of a custom id and the segments a handler switches on must be
+the same ones* — and the builder and the parser are the only two places
+that know the layout.
 
 ### The panel's authorisation
 
@@ -454,7 +479,7 @@ checks, and the split between the raw text and the normalised text.
 
 ## The tests
 
-`npx vitest run modules/identity` — 207 tests in 11 files.
+`npx vitest run modules/identity` — 216 tests in 12 files.
 
 | File | What it covers |
 |---|---|
@@ -468,4 +493,5 @@ checks, and the split between the raw text and the normalised text.
 | `ignore-role.test.ts` | The ignore role is compared by id. |
 | `cache.test.ts` | The three channel sets stay apart. |
 | `guards.test.ts` | Who may manage a setup: the moderator, the administrator, the ordinary member, the member of another guild. |
-| `views/ssmod.test.ts` | The panel's authorisation (an ordinary member changes nothing; a moderator may; another guild's row is not found), the premium gates, the custom ids, and the routing of the buttons. |
+| `views/ids.test.ts` | The id scheme: one layout, the round trip, and that an action of another surface is refused. |
+| `views/ssmod.test.ts` | The panel's authorisation (an ordinary member changes nothing; a moderator may; another guild's row is not found), the premium gates, the custom ids, and the **routing**: every id pressed through the real router, in two registration orders. |

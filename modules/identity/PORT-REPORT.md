@@ -7,9 +7,11 @@ been **deleted** — see §10. Everything lives in `modules/identity/` and
 
 - `npm run typecheck` — **clean for this area** (zero errors in
   `modules/identity/` and `commands/esports/`).
-- `npm test` — **207 tests in this area, all passing** (11 files).
+- `npm test` — **216 tests in this area, all passing** (12 files).
 - `modules/identity/README.md` — the interface, the rules, the state
   machines, the premium gates, the bugs.
+- `modules/identity/ROUTING-REPORT.md` — the one-prefix routing of the
+  screenshot-verification panel, and why it is that way (§11).
 
 ---
 
@@ -248,7 +250,7 @@ the repository uses.
 
 ## 8. The tests
 
-`npx vitest run modules/identity` — 207 tests in 11 files.
+`npx vitest run modules/identity` — 216 tests in 12 files.
 
 | File | Tests | What it covers |
 |---|---|---|
@@ -262,7 +264,8 @@ the repository uses.
 | `ignore-role.test.ts` | 8 | The ignore role is compared by id, not by name. |
 | `cache.test.ts` | 8 | The three sets stay apart, and a database that is down does not empty a working cache. |
 | `guards.test.ts` | 8 | Who may manage a setup: the moderator, the administrator, the ordinary member, the member of another guild, the interaction with no guild. |
-| `views/ssmod.test.ts` | 41 | The panel's authorisation, the panel's gates, the custom ids, and the routing of the buttons through the real router. |
+| `views/ids.test.ts` | 7 | The id scheme: one layout, the round trip, and that an action of another surface is refused. |
+| `views/ssmod.test.ts` | 43 | The panel's authorisation, the panel's gates, the custom ids, and the **routing** of every id through the real router — in two registration orders. |
 
 The repository's own suite was run as well: 906 tests in 63 files, all
 passing. (Two of them failed in `modules/community/repo.test.ts` while
@@ -331,7 +334,7 @@ What was done:
 | Piece | What |
 |---|---|
 | `guards.ts` (new) | `canManageSsConfig(interaction, guildId)` — the caller must be a moderator of the guild the interaction came from: Manage Server, Administrator, or the staff role the guild already uses. It fails **closed**: no member, no guild, another guild — all refusals. |
-| Every handler | `handleSsModButton`, `handleSsModSelect`, `handleSsModModal`, `handleSsSetupButton`, `handleSsSetupSelect` and `handleSsSetupModal` call it **before** the setup is read or written. |
+| Every handler | `handleSsModButton`, `handleSsModSelect` and `handleSsModModal` — one per kind of component, since §11 gave the area a single prefix — call it **before** the setup is read or written. |
 | The rows | `repo.findSsConfigById(guildId, id)`, `repo.updateSsConfig(guildId, id, …)` and `repo.deleteSsConfig(guildId, id)` are keyed by the guild **and** the row id, the way the community area's `findTagById(guildId, id)` is. A uuid primary key makes a cross-guild guess unguessable rather than impossible, which is not a defence. |
 | The wizard | The draft carries the guild it was started in (`startSsWizard(guildId)`), so a wizard cannot be driven from another server. |
 | The command | `/ssverify` answers **ephemerally**. The panel is a moderator's control panel; it does not belong in the channel. This is not a substitute for the checks — a message only the moderator can see still travels, and the buttons still check the caller. |
@@ -357,7 +360,66 @@ Found on the way, and fixed:
 
 | Button | What was wrong |
 |---|---|
-| the list panel's **Setup** | Its id was `identity:ssmod:setup`, and the wizard's prefix was `identity:ssmod:setup` — the router takes the first prefix that matches, so the wizard's handler swallowed the button and it did nothing. The wizard's prefix is now `identity:ssmod:wizard`. |
+| the list panel's **Setup** | Its id was `identity:ssmod:setup`, and the wizard's prefix was `identity:ssmod:setup` — the router takes the first prefix that matches, so the wizard's handler swallowed the button and it did nothing. |
 | the wizard's **Save & setup** and **Cancel** | They were built without the wizard's flag, so they carried the **editor's** prefix and were answered by the editor's handler, which knows no `save` action. The wizard could never be saved. |
 
 Both are pinned down by `views/ssmod.test.ts`.
+
+The wizard's prefix was then changed to `identity:ssmod:wizard` to get the
+**Setup** button out of its way — which left the area with two prefixes
+that shadow each other. §11 is the end of that.
+
+---
+
+## 11. The two prefixes that shadowed each other
+
+The router warns when one prefix owns every id another one owns. It
+warned about this area three times — once per kind of component — and
+every warning was about the same pair:
+
+```
+[Router] Prefix shadowing in area "identity": the button prefix
+"identity:ssmod" (registered first) shadows "identity:ssmod:wizard"
+(registered now). … "identity:ssmod:wizard" is unreachable — the handler
+behind it never runs.
+```
+
+The pair worked **only because the wizard was registered first**. The
+router takes the first prefix that matches an id, so the order of two
+lines of registration decided whether the wizard's **Save** button
+worked. That is a load-bearing registration order, found by a warning
+rather than by a test, and it would have broken the day someone
+reordered the registrations or moved one into a lazily-imported module.
+
+The area now has **one prefix** and the handler dispatches on the
+segment after it — the shape the scrims and the tournaments areas
+already use:
+
+```
+identity:ssmod:<surface>:<action>[:<target>]
+```
+
+The **surface** (`list`, `edit` or `wizard`) is that segment, and it
+says what the target is: a token for the wizard, a row id for the
+editor. The **action** is the next one, and it belongs to the surface.
+
+| What changed | How |
+|---|---|
+| Two prefixes, one of them order-dependent | One prefix, `identity:ssmod`, registered once per kind of component. |
+| Six handlers, one per surface and per kind | Three handlers, one per kind; each switches on the surface and then on the action. |
+| The handler guessed what the target was (`resolveSetupTarget(target) ?? resolveEditTarget(target)`) | The surface says, so exactly one target is resolved. |
+| The scheme spread over the panel | `views/ids.ts`: the surfaces, the actions, the builder and the parser — the only two places that know the layout. |
+
+The parsed id is a union discriminated by the surface, so a handler that
+switches on the surface knows which actions it has to answer, and the
+builder refuses an action that belongs to another surface. An id that
+names an action of another surface — `identity:ssmod:edit:save:<token>`
+— is not one of this area's ids, and the parser refuses it.
+
+`views/ssmod.test.ts` presses **every** id the panel builds through the
+**real** router, in two registration orders, and records the *effect* of
+each press; the same file asserts that the area registers one prefix per
+kind of component and that the router logs no warning.
+
+`ROUTING-REPORT.md` has the id table, the dispatch, and the tests.
+

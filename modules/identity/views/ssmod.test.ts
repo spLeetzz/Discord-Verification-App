@@ -17,12 +17,17 @@
  * itself — and the rows are looked up **in a guild**, so a row id on its
  * own never reaches another server's configuration.
  *
+ * **The routing.** The last block presses every id the panel builds
+ * through the **real** router, in two registration orders, and says what
+ * each press did. The panel has one prefix, so the order cannot decide
+ * which handler runs — and the test is what keeps it that way.
+ *
  * The service is faked with a table that is keyed by the guild *and* the
  * row id, the way the repository is, so the assertions are about the
  * **state** — "the row is still there" — and not about the calls.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PermissionFlagsBits } from "discord.js";
 import type {
   AnySelectMenuInteraction,
@@ -31,8 +36,20 @@ import type {
 } from "discord.js";
 import { PremiumRequiredError } from "../../../core/errors.js";
 import { PremiumFeature } from "../../../core/constants.js";
+import { logger } from "../../../utils/logger.js";
 import type { SsConfig } from "../types.js";
 import type { SsDraft } from "./ssmod.js";
+import {
+  SSMOD_ACTIONS,
+  SSMOD_PREFIX,
+  SSMOD_SURFACES,
+} from "./ids.js";
+import type {
+  SsModEditAction,
+  SsModId,
+  SsModListAction,
+  SsModWizardAction,
+} from "./ids.js";
 
 const mocks = vi.hoisted(() => ({
   service: {
@@ -50,6 +67,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../service.js", () => mocks.service);
 
 const ssmod = await import("./ssmod.js");
+const router = await import("../../../core/router.js");
+const interactions = await import("../interactions.js");
 
 /* ------------------------------------------------------------------ *
  * The fake table
@@ -261,6 +280,31 @@ function modalInteraction(
 }
 
 /* ------------------------------------------------------------------ *
+ * The ids of the panel
+ * ------------------------------------------------------------------ */
+
+/**
+ * The id of something on the **list panel**.
+ */
+function listId(action: SsModListAction, target?: string): SsModId {
+  return { surface: SSMOD_SURFACES.list, action, target: target ?? null };
+}
+
+/**
+ * The id of something on the **editor**.
+ */
+function editorId(action: SsModEditAction, target?: string): SsModId {
+  return { surface: SSMOD_SURFACES.edit, action, target: target ?? null };
+}
+
+/**
+ * The id of something on the **wizard**.
+ */
+function wizardId(action: SsModWizardAction, target?: string): SsModId {
+  return { surface: SSMOD_SURFACES.wizard, action, target: target ?? null };
+}
+
+/* ------------------------------------------------------------------ *
  * The setup
  * ------------------------------------------------------------------ */
 
@@ -309,6 +353,10 @@ beforeEach(() => {
   );
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 /* ------------------------------------------------------------------ *
  * The authorisation
  * ------------------------------------------------------------------ */
@@ -319,7 +367,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModButton(
       buttonInteraction({ member: ORDINARY_MEMBER }),
-      "delete:config-1",
+      editorId(SSMOD_ACTIONS.delete, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))).toBeDefined();
@@ -333,7 +381,10 @@ describe("the panel's authorisation", () => {
       member: ORDINARY_MEMBER,
     });
 
-    await ssmod.handleSsModSelect(interaction, "set_channel:config-1");
+    await ssmod.handleSsModSelect(
+      interaction,
+      editorId(SSMOD_ACTIONS.setChannel, "config-1"),
+    );
 
     expect(mocks.service.updateSsConfig).not.toHaveBeenCalled();
     expect(table.get(key(GUILD_ID, "config-1"))?.channelId).toBe("channel-1");
@@ -345,7 +396,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModSelect(
       selectInteraction("role-9", { member: ORDINARY_MEMBER }),
-      "set_role:config-1",
+      editorId(SSMOD_ACTIONS.setRole, "config-1"),
     );
 
     expect(mocks.service.updateSsConfig).not.toHaveBeenCalled();
@@ -357,7 +408,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModSelect(
       selectInteraction("instagram", { member: ORDINARY_MEMBER }),
-      "set_type:config-1",
+      editorId(SSMOD_ACTIONS.setType, "config-1"),
     );
 
     expect(mocks.service.updateSsConfig).not.toHaveBeenCalled();
@@ -369,7 +420,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModSelect(
       selectInteraction("5", { member: ORDINARY_MEMBER }),
-      "set_count:config-1",
+      editorId(SSMOD_ACTIONS.setCount, "config-1"),
     );
 
     expect(mocks.service.updateSsConfig).not.toHaveBeenCalled();
@@ -381,7 +432,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModModal(
       modalInteraction("Team Nova", { member: ORDINARY_MEMBER }),
-      "page_details:config-1",
+      editorId(SSMOD_ACTIONS.pageDetails, "config-1"),
     );
 
     expect(mocks.service.updateSsConfig).not.toHaveBeenCalled();
@@ -393,7 +444,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModModal(
       modalInteraction("Well done", { member: ORDINARY_MEMBER }),
-      "success_message:config-1",
+      editorId(SSMOD_ACTIONS.successMessage, "config-1"),
     );
 
     expect(mocks.service.updateSsConfig).not.toHaveBeenCalled();
@@ -405,7 +456,10 @@ describe("the panel's authorisation", () => {
 
     const interaction = buttonInteraction({ member: ORDINARY_MEMBER });
 
-    await ssmod.handleSsModButton(interaction, "edit:config-1");
+    await ssmod.handleSsModButton(
+      interaction,
+      listId(SSMOD_ACTIONS.edit, "config-1"),
+    );
 
     expect(mocks.service.findSsConfig).not.toHaveBeenCalled();
     expect(interaction.update).not.toHaveBeenCalled();
@@ -414,7 +468,7 @@ describe("the panel's authorisation", () => {
   it("refuses an ordinary member who starts a setup, and nothing is created", async () => {
     await ssmod.handleSsModButton(
       buttonInteraction({ member: ORDINARY_MEMBER }),
-      "setup",
+      listId(SSMOD_ACTIONS.setup),
     );
 
     expect(mocks.service.createSsConfig).not.toHaveBeenCalled();
@@ -432,9 +486,9 @@ describe("the panel's authorisation", () => {
       channelName: "Team Phoenix",
     });
 
-    await ssmod.handleSsSetupButton(
+    await ssmod.handleSsModButton(
       buttonInteraction({ member: ORDINARY_MEMBER }),
-      `save:${token}`,
+      wizardId(SSMOD_ACTIONS.save, token),
     );
 
     expect(mocks.service.createSsConfig).not.toHaveBeenCalled();
@@ -443,9 +497,9 @@ describe("the panel's authorisation", () => {
   it("refuses an ordinary member who drives the wizard's select menu", async () => {
     const token = ssmod.startSsWizard(GUILD_ID);
 
-    await ssmod.handleSsSetupSelect(
+    await ssmod.handleSsModSelect(
       selectInteraction("channel-9", { member: ORDINARY_MEMBER }),
-      `set_channel:${token}`,
+      wizardId(SSMOD_ACTIONS.setChannel, token),
     );
 
     expect(ssmod.readSsDraft(token)?.channelId).toBeNull();
@@ -454,9 +508,9 @@ describe("the panel's authorisation", () => {
   it("refuses an ordinary member who drives the wizard's modal", async () => {
     const token = ssmod.startSsWizard(GUILD_ID);
 
-    await ssmod.handleSsSetupModal(
+    await ssmod.handleSsModModal(
       modalInteraction("Well done", { member: ORDINARY_MEMBER }),
-      `success_message:${token}`,
+      wizardId(SSMOD_ACTIONS.successMessage, token),
     );
 
     expect(ssmod.readSsDraft(token)?.successMessage).toBeNull();
@@ -467,7 +521,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModButton(
       buttonInteraction({ member: null }),
-      "delete:config-1",
+      editorId(SSMOD_ACTIONS.delete, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))).toBeDefined();
@@ -478,7 +532,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModButton(
       buttonInteraction({ member: MODERATOR }),
-      "delete:config-1",
+      editorId(SSMOD_ACTIONS.delete, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))).toBeUndefined();
@@ -493,7 +547,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModButton(
       buttonInteraction({ member: ADMINISTRATOR }),
-      "delete:config-1",
+      editorId(SSMOD_ACTIONS.delete, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))).toBeUndefined();
@@ -504,7 +558,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModSelect(
       selectInteraction("channel-9", { member: MODERATOR }),
-      "set_channel:config-1",
+      editorId(SSMOD_ACTIONS.setChannel, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))?.channelId).toBe("channel-9");
@@ -515,7 +569,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModSelect(
       selectInteraction("role-9", { member: MODERATOR }),
-      "set_role:config-1",
+      editorId(SSMOD_ACTIONS.setRole, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))?.roleId).toBe("role-9");
@@ -526,7 +580,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModSelect(
       selectInteraction("instagram", { member: MODERATOR }),
-      "set_type:config-1",
+      editorId(SSMOD_ACTIONS.setType, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))?.ssType).toBe("instagram");
@@ -537,7 +591,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModSelect(
       selectInteraction("5", { member: MODERATOR }),
-      "set_count:config-1",
+      editorId(SSMOD_ACTIONS.setCount, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))?.requiredSs).toBe(5);
@@ -548,7 +602,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModModal(
       modalInteraction("Team Nova", { member: MODERATOR }),
-      "page_details:config-1",
+      editorId(SSMOD_ACTIONS.pageDetails, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))?.channelName).toBe("Team Nova");
@@ -559,7 +613,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModModal(
       modalInteraction("Well done", { member: MODERATOR }),
-      "success_message:config-1",
+      editorId(SSMOD_ACTIONS.successMessage, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))?.successMessage).toBe("Well done");
@@ -570,7 +624,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModButton(
       buttonInteraction({ guildId: OTHER_GUILD_ID, member: MODERATOR }),
-      "delete:config-1",
+      editorId(SSMOD_ACTIONS.delete, "config-1"),
     );
 
     expect(table.get(key(GUILD_ID, "config-1"))).toBeDefined();
@@ -583,7 +637,7 @@ describe("the panel's authorisation", () => {
 
     await ssmod.handleSsModButton(
       buttonInteraction({ guildId: OTHER_GUILD_ID, member: MODERATOR }),
-      "delete:config-1",
+      editorId(SSMOD_ACTIONS.delete, "config-1"),
     );
 
     // The row of the other guild is untouched, and the row id of the first
@@ -604,7 +658,10 @@ describe("the panel's authorisation", () => {
       member: MODERATOR,
     });
 
-    await ssmod.handleSsModSelect(interaction, "set_channel:config-1");
+    await ssmod.handleSsModSelect(
+      interaction,
+      editorId(SSMOD_ACTIONS.setChannel, "config-1"),
+    );
 
     expect(mocks.service.updateSsConfig).not.toHaveBeenCalled();
     expect(table.get(key(GUILD_ID, "config-1"))?.channelId).toBe("channel-1");
@@ -618,7 +675,7 @@ describe("the panel's authorisation", () => {
         guildId: OTHER_GUILD_ID,
         member: MODERATOR,
       }),
-      "success_message:config-1",
+      editorId(SSMOD_ACTIONS.successMessage, "config-1"),
     );
 
     expect(mocks.service.updateSsConfig).not.toHaveBeenCalled();
@@ -628,12 +685,12 @@ describe("the panel's authorisation", () => {
   it("does not let a moderator of another guild drive this guild's wizard", async () => {
     const token = ssmod.startSsWizard(GUILD_ID);
 
-    await ssmod.handleSsSetupSelect(
+    await ssmod.handleSsModSelect(
       selectInteraction("channel-9", {
         guildId: OTHER_GUILD_ID,
         member: MODERATOR,
       }),
-      `set_channel:${token}`,
+      wizardId(SSMOD_ACTIONS.setChannel, token),
     );
 
     expect(ssmod.readSsDraft(token)?.channelId).toBeNull();
@@ -648,9 +705,9 @@ describe("the screenshot-type gate", () => {
   it("asks for the entitlement before the type is chosen", async () => {
     const token = ssmod.startSsWizard(GUILD_ID);
 
-    await ssmod.handleSsSetupSelect(
+    await ssmod.handleSsModSelect(
       selectInteraction("instagram"),
-      `set_type:${token}`,
+      wizardId(SSMOD_ACTIONS.setType, token),
     );
 
     expect(mocks.service.assertScreenshotTypeAllowed).toHaveBeenCalledWith(
@@ -673,7 +730,10 @@ describe("the screenshot-type gate", () => {
 
     const interaction = selectInteraction("instagram");
 
-    await ssmod.handleSsSetupSelect(interaction, `set_type:${token}`);
+    await ssmod.handleSsModSelect(
+      interaction,
+      wizardId(SSMOD_ACTIONS.setType, token),
+    );
 
     expect(ssmod.readSsDraft(token)?.ssType).toBeNull();
   });
@@ -690,7 +750,10 @@ describe("the screenshot-type gate", () => {
 
     const interaction = selectInteraction("instagram");
 
-    await ssmod.handleSsSetupSelect(interaction, `set_type:${token}`);
+    await ssmod.handleSsModSelect(
+      interaction,
+      wizardId(SSMOD_ACTIONS.setType, token),
+    );
 
     expect(interaction.update).not.toHaveBeenCalled();
   });
@@ -698,9 +761,9 @@ describe("the screenshot-type gate", () => {
   it("keeps the type when the entitlement is there", async () => {
     const token = ssmod.startSsWizard(GUILD_ID);
 
-    await ssmod.handleSsSetupSelect(
+    await ssmod.handleSsModSelect(
       selectInteraction("instagram"),
-      `set_type:${token}`,
+      wizardId(SSMOD_ACTIONS.setType, token),
     );
 
     expect(ssmod.readSsDraft(token)?.ssType).toBe("instagram");
@@ -715,9 +778,9 @@ describe("the success-message gate", () => {
   it("asks for the entitlement before the message is set", async () => {
     const token = ssmod.startSsWizard(GUILD_ID);
 
-    await ssmod.handleSsSetupModal(
+    await ssmod.handleSsModModal(
       modalInteraction("Well done"),
-      `success_message:${token}`,
+      wizardId(SSMOD_ACTIONS.successMessage, token),
     );
 
     expect(mocks.service.assertSuccessMessageAllowed).toHaveBeenCalledWith(
@@ -735,9 +798,9 @@ describe("the success-message gate", () => {
 
     const token = ssmod.startSsWizard(GUILD_ID);
 
-    await ssmod.handleSsSetupModal(
+    await ssmod.handleSsModModal(
       modalInteraction("Well done"),
-      `success_message:${token}`,
+      wizardId(SSMOD_ACTIONS.successMessage, token),
     );
 
     expect(ssmod.readSsDraft(token)?.successMessage).toBeNull();
@@ -746,9 +809,9 @@ describe("the success-message gate", () => {
   it("keeps the message when the entitlement is there", async () => {
     const token = ssmod.startSsWizard(GUILD_ID);
 
-    await ssmod.handleSsSetupModal(
+    await ssmod.handleSsModModal(
       modalInteraction("Well done"),
-      `success_message:${token}`,
+      wizardId(SSMOD_ACTIONS.successMessage, token),
     );
 
     expect(ssmod.readSsDraft(token)?.successMessage).toBe("Well done");
@@ -796,15 +859,6 @@ describe("the wizard's draft", () => {
  * The custom ids
  * ------------------------------------------------------------------ */
 
-/**
- * Does a prefix own a custom id?
- *
- * The router's own rule: the prefix has to end on a segment boundary.
- */
-function prefixMatches(prefix: string, customId: string): boolean {
-  return customId === prefix || customId.startsWith(`${prefix}:`);
-}
-
 /** Every custom id of a panel. */
 function customIds(panel: { components: unknown }): string[] {
   const rows = panel.components as {
@@ -819,18 +873,14 @@ function customIds(panel: { components: unknown }): string[] {
 }
 
 describe("the custom ids", () => {
-  it("keeps the list panel's setup button out of the wizard's prefix", () => {
-    const panel = ssmod.buildSsListPanel([makeSetup(GUILD_ID, "config-1")]);
+  it("gives every surface its own segment", () => {
+    const list = customIds(ssmod.buildSsListPanel([makeSetup(GUILD_ID, "config-1")]));
 
-    const ids = customIds(panel);
-
-    expect(ids).toContain("identity:ssmod:setup");
-    expect(
-      ids.some((id) => prefixMatches(ssmod.SSMOD_WIZARD_PREFIX, id)),
-    ).toBe(false);
+    expect(list.length).toBeGreaterThan(0);
+    expect(list.every((id) => id.startsWith("identity:ssmod:list:"))).toBe(true);
   });
 
-  it("gives the wizard's own buttons the wizard's prefix", () => {
+  it("gives the wizard's own buttons the wizard's surface", () => {
     const token = ssmod.startSsWizard(GUILD_ID);
 
     const panel = ssmod.buildSsPanel({
@@ -842,12 +892,10 @@ describe("the custom ids", () => {
     const ids = customIds(panel);
 
     expect(ids.length).toBeGreaterThan(0);
-    expect(
-      ids.every((id) => prefixMatches(ssmod.SSMOD_WIZARD_PREFIX, id)),
-    ).toBe(true);
+    expect(ids.every((id) => id.startsWith("identity:ssmod:wizard:"))).toBe(true);
   });
 
-  it("gives the editor's buttons the editor's prefix", () => {
+  it("gives the editor's buttons the editor's surface", () => {
     const panel = ssmod.buildSsPanel({
       kind: "edit",
       configId: "config-1",
@@ -856,9 +904,18 @@ describe("the custom ids", () => {
 
     const ids = customIds(panel);
 
-    expect(ids).toContain("identity:ssmod:delete:config-1");
+    expect(ids).toContain("identity:ssmod:edit:delete:config-1");
+    expect(ids.every((id) => id.startsWith("identity:ssmod:edit:"))).toBe(true);
+  });
+
+  it("keeps the list panel's setup button out of the wizard's surface", () => {
+    const panel = ssmod.buildSsListPanel([makeSetup(GUILD_ID, "config-1")]);
+
+    const ids = customIds(panel);
+
+    expect(ids).toContain("identity:ssmod:list:setup");
     expect(
-      ids.some((id) => prefixMatches(ssmod.SSMOD_WIZARD_PREFIX, id)),
+      ids.some((id) => id.startsWith("identity:ssmod:wizard:")),
     ).toBe(false);
   });
 });
@@ -867,10 +924,11 @@ describe("the custom ids", () => {
  * The routing
  * ------------------------------------------------------------------ */
 
-/**
- * A button press on a custom id.
- */
-function routedButton(customId: string): ButtonInteraction {
+/** A button press on a custom id, through the real router. */
+function routedButton(customId: string): ButtonInteraction & {
+  update: ReturnType<typeof vi.fn>;
+  reply: ReturnType<typeof vi.fn>;
+} {
   return {
     customId,
     guildId: GUILD_ID,
@@ -886,63 +944,338 @@ function routedButton(customId: string): ButtonInteraction {
     followUp: vi.fn().mockResolvedValue(undefined),
     update: vi.fn().mockResolvedValue(undefined),
     showModal: vi.fn().mockResolvedValue(undefined),
-  } as unknown as ButtonInteraction;
+  } as unknown as ButtonInteraction & {
+    update: ReturnType<typeof vi.fn>;
+    reply: ReturnType<typeof vi.fn>;
+  };
 }
 
-describe("the routing of the panel's buttons", () => {
-  beforeEach(async () => {
-    const router = await import("../../../core/router.js");
-    const interactions = await import("../interactions.js");
+/** A select-menu press on a custom id, through the real router. */
+function routedSelect(
+  customId: string,
+  value: string,
+): AnySelectMenuInteraction & {
+  update: ReturnType<typeof vi.fn>;
+  reply: ReturnType<typeof vi.fn>;
+} {
+  return {
+    customId,
+    guildId: GUILD_ID,
+    guild: fakeGuild(GUILD_ID, MODERATOR),
+    user: { id: USER_ID },
+    values: [value],
+    deferred: false,
+    replied: false,
+    isButton: () => false,
+    isAnySelectMenu: () => true,
+    isModalSubmit: () => false,
+    reply: vi.fn().mockResolvedValue(undefined),
+    editReply: vi.fn().mockResolvedValue(undefined),
+    followUp: vi.fn().mockResolvedValue(undefined),
+    update: vi.fn().mockResolvedValue(undefined),
+    showModal: vi.fn().mockResolvedValue(undefined),
+  } as unknown as AnySelectMenuInteraction & {
+    update: ReturnType<typeof vi.fn>;
+    reply: ReturnType<typeof vi.fn>;
+  };
+}
 
+/** A modal submit on a custom id, through the real router. */
+function routedModal(
+  customId: string,
+  value: string,
+): ModalSubmitInteraction & { reply: ReturnType<typeof vi.fn> } {
+  return {
+    customId,
+    guildId: GUILD_ID,
+    guild: fakeGuild(GUILD_ID, MODERATOR),
+    user: { id: USER_ID },
+    deferred: false,
+    replied: false,
+    isButton: () => false,
+    isAnySelectMenu: () => false,
+    isModalSubmit: () => true,
+    fields: { getTextInputValue: () => value },
+    message: null,
+    reply: vi.fn().mockResolvedValue(undefined),
+    editReply: vi.fn().mockResolvedValue(undefined),
+    followUp: vi.fn().mockResolvedValue(undefined),
+    deferUpdate: vi.fn().mockResolvedValue(undefined),
+  } as unknown as ModalSubmitInteraction & { reply: ReturnType<typeof vi.fn> };
+}
+
+/**
+ * Registers the area with the router.
+ */
+function registerArea(): void {
+  interactions.registerIdentityInteractions({
+    registerButton: router.registerButton,
+    registerSelect: router.registerSelect,
+    registerModal: router.registerModal,
+  });
+}
+
+/**
+ * The id in the list that starts with the prefix.
+ */
+function idOf(ids: readonly string[], prefix: string): string {
+  const found = ids.find((id) => id.startsWith(prefix));
+
+  if (!found) throw new Error(`no id starts with "${prefix}"`);
+
+  return found;
+}
+
+/** What the record says when a press was not answered. */
+const NOT_ANSWERED = "NOT ANSWERED";
+
+/**
+ * Presses every id the panel builds and records what each press did.
+ *
+ * The record is the **effect** of the press — a row written, a row
+ * deleted, a wizard opened — so it says which handler answered, and not
+ * merely that something answered.
+ */
+async function pressEveryId(): Promise<string[]> {
+  const record: string[] = [];
+
+  // The setup the list panel's Edit button opens.
+  table.set(key(GUILD_ID, "config-1"), makeSetup(GUILD_ID, "config-1"));
+
+  // --- the list panel ---
+  const listIds = customIds(
+    ssmod.buildSsListPanel([makeSetup(GUILD_ID, "config-1")]),
+  );
+
+  const setup = routedButton(idOf(listIds, "identity:ssmod:list:setup"));
+
+  await router.dispatch(setup);
+
+  record.push(
+    `list:setup → ${
+      mocks.service.assertSsConfigAllowance.mock.calls.length > 0
+        ? "the wizard opened"
+        : NOT_ANSWERED
+    }`,
+  );
+
+  const faq = routedButton(idOf(listIds, "identity:ssmod:list:faq"));
+
+  await router.dispatch(faq);
+
+  record.push(
+    `list:faq → ${faq.reply.mock.calls.length > 0 ? "the FAQ was sent" : NOT_ANSWERED}`,
+  );
+
+  const edit = routedButton(idOf(listIds, "identity:ssmod:list:edit:"));
+
+  await router.dispatch(edit);
+
+  record.push(
+    `list:edit → ${edit.update.mock.calls.length > 0 ? "the editor opened" : NOT_ANSWERED}`,
+  );
+
+  // --- the wizard ---
+  const token = ssmod.startSsWizard(GUILD_ID);
+
+  const draft: SsDraft = {
+    ...ssmod.emptySsDraft(),
+    channelId: "channel-1",
+    roleId: "role-1",
+    requiredSs: 2,
+    ssType: "youtube",
+    channelName: "Team Phoenix",
+  };
+
+  ssmod.writeSsDraft(token, draft);
+
+  const wizardIds = customIds(ssmod.buildSsPanel({ kind: "setup", token, draft }));
+
+  const channel = routedSelect(
+    idOf(wizardIds, "identity:ssmod:wizard:set_channel:"),
+    "channel-9",
+  );
+
+  await router.dispatch(channel);
+
+  record.push(
+    `wizard:set_channel → ${
+      ssmod.readSsDraft(token)?.channelId === "channel-9"
+        ? "the draft was written"
+        : NOT_ANSWERED
+    }`,
+  );
+
+  const save = routedButton(idOf(wizardIds, "identity:ssmod:wizard:save:"));
+
+  await router.dispatch(save);
+
+  record.push(
+    `wizard:save → ${
+      mocks.service.createSsConfig.mock.calls.length > 0
+        ? "the setup was created"
+        : NOT_ANSWERED
+    }`,
+  );
+
+  // A second wizard, so the cancel is not answered by the save's
+  // teardown.
+  const other = ssmod.startSsWizard(GUILD_ID);
+
+  const otherIds = customIds(
+    ssmod.buildSsPanel({
+      kind: "setup",
+      token: other,
+      draft: ssmod.emptySsDraft(),
+    }),
+  );
+
+  const cancel = routedButton(idOf(otherIds, "identity:ssmod:wizard:close:"));
+
+  await router.dispatch(cancel);
+
+  record.push(
+    `wizard:close → ${
+      ssmod.readSsDraft(other) === undefined
+        ? "the draft was dropped"
+        : NOT_ANSWERED
+    }`,
+  );
+
+  // --- the editor ---
+  const editorIds = customIds(
+    ssmod.buildSsPanel({
+      kind: "edit",
+      configId: "config-1",
+      config: makeSetup(GUILD_ID, "config-1"),
+    }),
+  );
+
+  const role = routedSelect(
+    idOf(editorIds, "identity:ssmod:edit:set_role:"),
+    "role-9",
+  );
+
+  await router.dispatch(role);
+
+  record.push(
+    `edit:set_role → ${
+      table.get(key(GUILD_ID, "config-1"))?.roleId === "role-9"
+        ? "the row was written"
+        : NOT_ANSWERED
+    }`,
+  );
+
+  const details = routedModal(
+    idOf(editorIds, "identity:ssmod:edit:page_details:"),
+    "Team Nova",
+  );
+
+  await router.dispatch(details);
+
+  record.push(
+    `edit:page_details → ${
+      table.get(key(GUILD_ID, "config-1"))?.channelName === "Team Nova"
+        ? "the row was written"
+        : NOT_ANSWERED
+    }`,
+  );
+
+  const del = routedButton(idOf(editorIds, "identity:ssmod:edit:delete:"));
+
+  await router.dispatch(del);
+
+  record.push(
+    `edit:delete → ${
+      table.get(key(GUILD_ID, "config-1")) === undefined
+        ? "the row was deleted"
+        : NOT_ANSWERED
+    }`,
+  );
+
+  return record;
+}
+
+/**
+ * Registers the prefixes in the given order and presses every id.
+ *
+ * The order is the point: the area's prefix has to answer its own ids
+ * whether it is registered first or last.
+ */
+async function pressEveryIdInOrder(
+  order: readonly string[],
+): Promise<string[]> {
+  router.clearRegistry();
+
+  // The mocks count the calls of the press, so they start empty.
+  vi.clearAllMocks();
+
+  table.clear();
+
+  for (const prefix of order) {
+    if (prefix === SSMOD_PREFIX) {
+      registerArea();
+      continue;
+    }
+
+    // Another area's prefix. It owns nothing of this area's ids, and
+    // the order it is registered in must not change that.
+    router.registerButton(prefix, () => {});
+    router.registerSelect(prefix, () => {});
+    router.registerModal(prefix, () => {});
+  }
+
+  return pressEveryId();
+}
+
+describe("the area's registration", () => {
+  it("registers one prefix per kind of component", () => {
     router.clearRegistry();
 
-    interactions.registerIdentityInteractions({
-      registerButton: router.registerButton,
-      registerSelect: router.registerSelect,
-      registerModal: router.registerModal,
-    });
+    registerArea();
+
+    const prefixes = router.registeredPrefixes();
+
+    expect(prefixes.buttons).toEqual([SSMOD_PREFIX]);
+    expect(prefixes.selects).toEqual([SSMOD_PREFIX]);
+    expect(prefixes.modals).toEqual([SSMOD_PREFIX]);
   });
 
-  it("sends the list panel's setup button to the handler that opens a wizard", async () => {
-    const router = await import("../../../core/router.js");
+  it("does not make the router warn about shadowing", () => {
+    const warnings: string[] = [];
 
-    const panel = ssmod.buildSsListPanel([]);
-    const setupId = customIds(panel).find((id) => id.endsWith(":setup"));
+    const spy = vi
+      .spyOn(logger, "warn")
+      .mockImplementation((...args: unknown[]) => {
+        warnings.push(args.map((arg) => String(arg)).join(" "));
+      });
 
-    expect(setupId).toBe("identity:ssmod:setup");
+    try {
+      router.clearRegistry();
 
-    await router.dispatch(routedButton(setupId ?? ""));
+      registerArea();
+    } finally {
+      spy.mockRestore();
+    }
 
-    // The wizard was opened: the allowance was asked for.
-    expect(mocks.service.assertSsConfigAllowance).toHaveBeenCalledWith(
-      GUILD_ID,
-    );
+    expect(warnings).toEqual([]);
   });
 
-  it("sends the wizard's save button to the handler that saves", async () => {
-    const router = await import("../../../core/router.js");
+  it("answers every id the same way in either registration order", async () => {
+    const first = await pressEveryIdInOrder([
+      "identity:tagcheck",
+      SSMOD_PREFIX,
+    ]);
 
-    const token = ssmod.startSsWizard(GUILD_ID);
+    const second = await pressEveryIdInOrder([
+      SSMOD_PREFIX,
+      "identity:tagcheck",
+    ]);
 
-    const draft: SsDraft = {
-      ...ssmod.emptySsDraft(),
-      channelId: "channel-1",
-      roleId: "role-1",
-      requiredSs: 2,
-      ssType: "youtube",
-      channelName: "Team Phoenix",
-    };
+    // The same handler answers in both orders.
+    expect(second).toEqual(first);
 
-    ssmod.writeSsDraft(token, draft);
-
-    const panel = ssmod.buildSsPanel({ kind: "setup", token, draft });
-
-    const saveId = customIds(panel).find((id) => id.includes(":save:"));
-
-    expect(saveId).toBeDefined();
-
-    await router.dispatch(routedButton(saveId ?? ""));
-
-    expect(mocks.service.createSsConfig).toHaveBeenCalled();
+    // And every id of the area reached one.
+    expect(first.filter((line) => line.includes(NOT_ANSWERED))).toEqual([]);
   });
 });
