@@ -34,7 +34,7 @@ import type {
   RepliableInteraction,
 } from "discord.js";
 import { COLLECTOR_CUSTOM_ID_PREFIX, randomId } from "../../../core/custom-id.js";
-import { sendCollectable } from "../../../core/context.js";
+import { replaceComponentContent, sendCollectable } from "../../../core/context.js";
 import type { ReplyHandle } from "../../../core/context.js";
 import {
   DANGER_COLOR,
@@ -185,24 +185,50 @@ export async function confirmAction(
 
   let answer: MessageComponentInteraction;
 
-  try {
-    answer = await handle.awaitMessageComponent({
-      componentType: ComponentType.Button,
-      time: timeoutMs,
-      filter: (candidate) =>
-        candidate.user.id === ownerId &&
-        (candidate.customId === confirmId || candidate.customId === cancelId),
-    });
-  } catch {
-    // Nobody answered, so the answer is "no".
+  /**
+   * **The collector is anchored on the channel, not on the message.**
+   *
+   * An ephemeral reply is a real message, but discord.js models it with
+   * the *interaction's* id — the API does not hand back an ephemeral
+   * message's own snowflake. A collector built on that message waits
+   * for a message id the answer will never carry, and the answer is
+   * never collected: the question is asked, the user answers, and the
+   * answer goes unanswered — which Discord shows as "the bot didn't
+   * respond in time".
+   */
+  const channel = interaction.channel;
+
+  if (!channel) {
     await finishWithTimeout(handle);
 
     return false;
   }
 
+  const collector = channel.createMessageComponentCollector({
+    componentType: ComponentType.Button,
+    time: timeoutMs,
+    filter: (candidate) =>
+      candidate.user.id === ownerId &&
+      (candidate.customId === confirmId || candidate.customId === cancelId),
+  });
+
+  try {
+    answer = await collector.next;
+  } catch {
+    // Nobody answered, so the answer is "no".
+    await finishWithTimeout(handle);
+
+    return false;
+  } finally {
+    collector.stop("done");
+  }
+
   const confirmed = answer.customId === confirmId;
 
-  await answer.update({
+  // The answer is applied through the helper, because an ephemeral
+  // message cannot be updated — the edit goes through the interaction
+  // instead.
+  await replaceComponentContent(answer, {
     embeds: [answeredPanel(spec, confirmed)],
     components: [],
   });
