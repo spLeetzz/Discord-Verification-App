@@ -18,7 +18,28 @@ export function isIgnorableInteractionError(error: unknown): boolean {
 }
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  // Not an Error. `String(error)` on a Map or a Collection is
+  // "[object Map]", which says nothing at all — and a failure that says
+  // nothing is a failure that costs an hour. So the shape is described
+  // instead.
+  if (error === null) return "null";
+  if (error === undefined) return "undefined";
+
+  if (typeof error === "object") {
+    const named = error as { constructor?: { name?: string }; name?: string };
+    const kind =
+      named.constructor?.name ?? named.name ?? Object.prototype.toString.call(error);
+
+    const keys = Object.keys(error).slice(0, 6);
+
+    return `${kind} (${keys.length > 0 ? `keys: ${keys.join(", ")}` : "no keys"})`;
+  }
+
+  return String(error);
 }
 
 /**
