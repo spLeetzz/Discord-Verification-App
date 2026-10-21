@@ -2,6 +2,7 @@ import { MessageFlags } from "discord.js";
 import type { ChatInputCommandInteraction, Interaction } from "discord.js";
 import { denialMessage } from "../core/errors.js";
 import { isStaff } from "../core/guards.js";
+import { COLLECTOR_CUSTOM_ID_PREFIX } from "../core/custom-id.js";
 import { dispatch } from "../core/router.js";
 import { isBlocked, BLOCK_ID_TYPE } from "../modules/moderation/register.js";
 import { recordCommandUsage } from "../modules/community/register.js";
@@ -164,6 +165,23 @@ async function ensureAnswered(
 ): Promise<void> {
   if (firstResponse !== null) return;
 
+  /**
+   * A component a pending collector owns.
+   *
+   * The dispatcher deliberately leaves these alone: the collector is
+   * waiting for them, and the collector is what answers them. The
+   * safety net must not answer one as well — it would acknowledge the
+   * interaction before the collector could, and the collector's own
+   * `update` would then fail.
+   */
+  if (
+    "customId" in interaction &&
+    typeof interaction.customId === "string" &&
+    interaction.customId.startsWith(COLLECTOR_CUSTOM_ID_PREFIX)
+  ) {
+    return;
+  }
+
   const what =
     interaction.isChatInputCommand()
       ? `command /${interaction.commandName}`
@@ -246,6 +264,19 @@ function markFirstResponse(interaction: Interaction): () => number | null {
    */
   const timer = setTimeout(() => {
     if (at !== null) return;
+
+    /**
+     * A component a pending collector owns is answered by the
+     * collector, not by the dispatcher — so it is not an unanswered
+     * interaction, and saying it is would be wrong.
+     */
+    if (
+      "customId" in interaction &&
+      typeof interaction.customId === "string" &&
+      interaction.customId.startsWith(COLLECTOR_CUSTOM_ID_PREFIX)
+    ) {
+      return;
+    }
 
     const what =
       interaction.isChatInputCommand()
