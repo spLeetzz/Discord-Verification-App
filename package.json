@@ -21,7 +21,8 @@
     "db:studio": "drizzle-kit studio",
     "smoke": "tsx scripts/smoke.ts",
     "test:mentions": "tsx scripts/integration-mentions.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "boot:check": "tsx scripts/boot-check.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.3",

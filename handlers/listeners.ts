@@ -1,4 +1,5 @@
 import type { Client } from "discord.js";
+import { registerButton, registerModal, registerSelect } from "../core/router.js";
 import { logger } from "../utils/logger.js";
 import { registerJobHandler } from "./jobs.js";
 
@@ -100,6 +101,16 @@ const AREAS: readonly AreaDefinition[] = [
 type AreaModule = Record<string, unknown>;
 
 /**
+ * The router an area registers its component handlers with.
+ *
+ * The core router module's three `register*` functions, bundled into the
+ * shape an area expects. Areas that import `core/router.js` directly ignore
+ * this; it is here so an area that takes a router argument can be handed
+ * one without importing the module itself.
+ */
+const router = { registerButton, registerSelect, registerModal };
+
+/**
  * Loads one area's register module.
  *
  * Both `register.ts` and `index.ts` are tried, because an area may expose
@@ -162,19 +173,30 @@ export async function registerAreas(client: Client): Promise<{
     const job = pick(mod, `handle${area.job}Job`);
 
     if (interactions) {
-      (interactions as () => void)();
+      // The router is passed whether or not the area wants it — a function
+      // that takes no arguments simply ignores it.
+      (interactions as (r: typeof router) => void)(router);
+    } else if (listeners) {
+      // Some areas register the components and the listeners together. If
+      // there is no separate interactions function, the listeners function
+      // is the area's only entry point and it gets the router too.
+      (listeners as (c: Client, r: typeof router) => void)(client, router);
     } else {
-      logger.warn(
-        `[Registry] Area "${area.dir}" has no register${area.interactions}Interactions.`,
-      );
+      const combined = pick(mod, `register${area.interactions}`);
+
+      if (combined) {
+        (combined as (c: Client, r: typeof router) => void)(client, router);
+      } else {
+        logger.warn(
+          `[Registry] Area "${area.dir}" exposes no register function — nothing was wired.`,
+        );
+        missing.push(area.dir);
+        continue;
+      }
     }
 
-    if (listeners) {
+    if (listeners && interactions) {
       (listeners as (c: Client) => void)(client);
-    } else if (area.listeners !== null) {
-      logger.warn(
-        `[Registry] Area "${area.dir}" has no register${area.listeners}Listeners.`,
-      );
     }
 
     if (job) {
