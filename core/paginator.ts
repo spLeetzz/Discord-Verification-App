@@ -27,7 +27,7 @@ import type { ButtonInteraction, RepliableInteraction } from "discord.js";
 import { respond } from "./context.js";
 import type { ReplyHandle } from "./context.js";
 import { EMBED_COLOR } from "./constants.js";
-import { registerButton } from "./router.js";
+import { registerButton, registeredPrefixes } from "./router.js";
 import { run } from "./fire-and-forget.js";
 import { logger } from "../utils/logger.js";
 
@@ -249,12 +249,19 @@ export class Paginator {
 
     // The router handler resolves the paginator through the registry, so a
     // paginator that is rebuilt does not orphan the older message.
-    registerButton(
-      `${PAGER_CUSTOM_ID_PREFIX}:${options.namespace}`,
-      async (interaction, payload) => {
+    //
+    // The handler is the same for every paginator of a namespace — it looks
+    // the paginator up by namespace — so the prefix is registered once.
+    // Registering it again would be a duplicate, and the router warns about
+    // duplicates: a rebuild is normal, and a warning that fires on a normal
+    // path is a warning nobody reads.
+    const prefix = `${PAGER_CUSTOM_ID_PREFIX}:${options.namespace}`;
+
+    if (!registeredPrefixes().buttons.includes(prefix)) {
+      registerButton(prefix, async (interaction, payload) => {
         await handlePagerPress(interaction, options.namespace, payload);
-      },
-    );
+      });
+    }
   }
 
   /**

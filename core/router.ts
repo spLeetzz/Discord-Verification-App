@@ -5,7 +5,7 @@
  * the router dispatches on the prefix. The router **never guesses**: an id
  * whose prefix nobody registered is logged and refused politely.
  *
- * Three rules that callers have to know:
+ * Four rules that callers have to know:
  *
  *  - **Registration order matters.** The first registered prefix that
  *    matches an id wins, so a specific prefix has to be registered before
@@ -16,6 +16,11 @@
  *    area registers `identity:ssmod` and `identity:ssmod:setup`, one of
  *    the two can never be reached. The router says so — loudly, and by
  *    name — when the second one is registered.
+ *  - **The id's shape and the handler's comparison must agree.** An id of
+ *    `tourneys:select:pick` carries the action `select` and the
+ *    sub-action `pick`; a handler that compares the action against
+ *    `pick` refuses every pick. The comparison lives in the handler, so
+ *    the router cannot check it — the area owns that one.
  *
  * There is one explicit exception: the frozen `verify_btn:<eventKey>` id
  * of the existing verification flow. `verify_btn` is not a module name —

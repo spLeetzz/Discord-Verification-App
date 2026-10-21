@@ -26,7 +26,14 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { vi } from "vitest";
 import type { Mock } from "vitest";
 import { ComponentType } from "discord.js";
-import type { MessageComponentInteraction, RepliableInteraction } from "discord.js";
+import type {
+  AnySelectMenuInteraction,
+  ButtonInteraction,
+  MessageComponentInteraction,
+  ModalBuilder,
+  ModalSubmitInteraction,
+  RepliableInteraction,
+} from "discord.js";
 
 /** The filter a collector is given. */
 type CollectorFilter = (
@@ -370,4 +377,207 @@ export function fakeInteraction(
   } as unknown as RepliableInteraction;
 
   return { interaction, reply, editReply, followUp, sent };
+}
+
+/* ------------------------------------------------------------------ *
+ * The component interactions
+ * ------------------------------------------------------------------ */
+
+/**
+ * A message a component sits on.
+ *
+ * The fake carries an `edit` spy, which is what a handler that
+ * re-renders a panel reaches for.
+ */
+export interface FakeMessage {
+  /** The id of the message. */
+  readonly id: string;
+  /** The edits the message was given. */
+  readonly edit: Mock<(payload: unknown) => Promise<void>>;
+}
+
+/**
+ * Builds a message.
+ */
+export function fakeMessage(id = "message-1"): FakeMessage {
+  return { id, edit: vi.fn(async () => undefined) };
+}
+
+/** How a select-menu fake is built. */
+export interface FakeSelectOptions {
+  /** The custom id the menu carries. */
+  readonly customId: string;
+  /** The values the menu was answered with. */
+  readonly values: readonly string[];
+  /** The id of the member who pressed it. */
+  readonly userId?: string;
+}
+
+/** A select-menu interaction, and the spies on it. */
+export interface FakeSelect {
+  /** The interaction, ready to hand to the router. */
+  readonly interaction: AnySelectMenuInteraction;
+  /** The modal the interaction showed. */
+  readonly showModal: Mock<(modal: ModalBuilder) => Promise<void>>;
+  /** The reply the interaction made. */
+  readonly reply: Mock<(payload?: unknown) => Promise<void>>;
+}
+
+/**
+ * Builds a select-menu interaction.
+ */
+export function fakeSelect(options: FakeSelectOptions): FakeSelect {
+  const state = { replied: false };
+
+  const showModal = vi.fn(async (_modal: ModalBuilder) => undefined);
+  const reply = vi.fn(async (_payload?: unknown) => {
+    state.replied = true;
+  });
+
+  const interaction = {
+    customId: options.customId,
+    values: [...options.values],
+    user: { id: options.userId ?? "user-1" },
+    isButton: () => false,
+    isAnySelectMenu: () => true,
+    isModalSubmit: () => false,
+    showModal,
+    reply,
+    get replied(): boolean {
+      return state.replied;
+    },
+    deferred: false,
+  } as unknown as AnySelectMenuInteraction;
+
+  return { interaction, showModal, reply };
+}
+
+/** How a modal-submit fake is built. */
+export interface FakeModalOptions {
+  /** The custom id the modal carries. */
+  readonly customId: string;
+  /**
+   * The values of the modal's fields, by their custom id.
+   *
+   * A field that is not listed is not there, and reading it throws —
+   * which is what discord.js does.
+   */
+  readonly fields?: Readonly<Record<string, string>>;
+  /** The id of the member who submitted it. */
+  readonly userId?: string;
+  /** The message the modal was opened from. */
+  readonly message?: FakeMessage | null;
+  /**
+   * The interaction starts out deferred.
+   *
+   * The dispatcher defers every modal submit with an ephemeral reply
+   * before it hands the interaction to the router, so this is the
+   * normal case.
+   */
+  readonly deferred?: boolean;
+}
+
+/** A modal-submit interaction, and the spies on it. */
+export interface FakeModal {
+  /** The interaction, ready to hand to the router. */
+  readonly interaction: ModalSubmitInteraction;
+  /** The deferred update the interaction made. */
+  readonly deferUpdate: Mock<() => Promise<void>>;
+  /** The edit of the reply the interaction made. */
+  readonly editReply: Mock<(payload?: unknown) => Promise<void>>;
+  /** The reply the interaction made. */
+  readonly reply: Mock<(payload?: unknown) => Promise<void>>;
+}
+
+/**
+ * Builds a modal-submit interaction.
+ */
+export function fakeModal(options: FakeModalOptions): FakeModal {
+  const values = options.fields ?? {};
+  const state = { replied: false, deferred: options.deferred ?? false };
+
+  const deferUpdate = vi.fn(async () => {
+    state.deferred = true;
+  });
+
+  const editReply = vi.fn(async (_payload?: unknown) => {
+    state.replied = true;
+  });
+
+  const reply = vi.fn(async (_payload?: unknown) => {
+    state.replied = true;
+  });
+
+  const interaction = {
+    customId: options.customId,
+    user: { id: options.userId ?? "user-1" },
+    isButton: () => false,
+    isAnySelectMenu: () => false,
+    isModalSubmit: () => true,
+    fields: {
+      getTextInputValue: (id: string): string => {
+        const value = values[id];
+
+        if (value === undefined) {
+          throw new Error(`The modal carried no field with the id "${id}"`);
+        }
+
+        return value;
+      },
+    },
+    message: options.message ?? null,
+    deferUpdate,
+    editReply,
+    reply,
+    get replied(): boolean {
+      return state.replied;
+    },
+    get deferred(): boolean {
+      return state.deferred;
+    },
+  } as unknown as ModalSubmitInteraction;
+
+  return { interaction, deferUpdate, editReply, reply };
+}
+
+/** How a button fake is built. */
+export interface FakeButtonOptions {
+  /** The custom id the button carries. */
+  readonly customId: string;
+  /** The id of the member who pressed it. */
+  readonly userId?: string;
+}
+
+/** A button interaction, and the spies on it. */
+export interface FakeButton {
+  /** The interaction, ready to hand to the router. */
+  readonly interaction: ButtonInteraction;
+  /** The reply the interaction made. */
+  readonly reply: Mock<(payload?: unknown) => Promise<void>>;
+}
+
+/**
+ * Builds a button interaction.
+ */
+export function fakeButton(options: FakeButtonOptions): FakeButton {
+  const state = { replied: false };
+
+  const reply = vi.fn(async (_payload?: unknown) => {
+    state.replied = true;
+  });
+
+  const interaction = {
+    customId: options.customId,
+    user: { id: options.userId ?? "user-1" },
+    isButton: () => true,
+    isAnySelectMenu: () => false,
+    isModalSubmit: () => false,
+    reply,
+    get replied(): boolean {
+      return state.replied;
+    },
+    deferred: false,
+  } as unknown as ButtonInteraction;
+
+  return { interaction, reply };
 }

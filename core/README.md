@@ -406,6 +406,24 @@ its custom id.
   one — `scrims:editor` before `scrims`.
 - A prefix matches on a **segment boundary**: `scrims` matches
   `scrims:claim:42` and does not match `scrims_extra:claim:42`.
+- **A prefix must not be a segment-prefix of another prefix in the same
+  area.** `identity:ssmod` is a segment-prefix of `identity:ssmod:setup`,
+  so when both are registered one of the two can never be reached — the
+  router takes the first matching prefix, and the order decides which one
+  that is. If an area needs `identity:ssmod:setup` and
+  `identity:ssmod:edit`, it should register `identity:ssmod` **once** and
+  dispatch on the second segment, or namespace the two so that neither can
+  shadow the other. The router logs a warning, naming both prefixes, the
+  area and the winner, when it sees such a pair.
+- **The segments of a custom id and the segments a handler switches on must
+  be the same ones.** An id of `tourneys:select:pick` carries the action
+  `select` and the sub-action `pick`; a handler that compares the action
+  against `pick` refuses every pick. The id's shape and the handler's
+  comparison are one thing, and they have to agree.
+- **Registering the same prefix twice replaces the earlier handler in
+  place**, keeping the order stable — and logs a warning, because two
+  areas claiming the same id space is a bug, and the loser of it is a
+  feature that silently does nothing.
 - The handler is called with the interaction and the **rest** of the id.
 - An id nobody owns is logged and refused politely. The router never
   guesses.
@@ -413,8 +431,6 @@ its custom id.
   button of the existing flow, so it gets an explicit branch. Until
   `registerLegacyVerifyButton` is called, `dispatch` leaves those buttons
   alone and returns `false`, so the existing handler keeps working.
-- Registering the same prefix twice replaces the earlier handler **in
-  place**, keeping the order stable.
 
 ## `paginator.ts`
 
@@ -441,20 +457,35 @@ Pagination over a list of lines, with first/previous/next/last.
   collector that never expires is a hazard.
 - The router handler resolves the paginator through a registry, so a
   paginator that is rebuilt (a command run twice) does not orphan the older
-  message.
+  message. The handler is the same for every paginator of a namespace, so
+  the prefix is registered **once**: a rebuild is not a duplicate
+  registration, and the router would warn about one.
 
 ## `embed-builder.ts`
 
 `EmbedTemplate`, `EmbedEditTarget`, `EmbedDesigner`, `EmbedDraft`,
-`EMBED_EDIT_TARGETS`, `EMBED_DESIGNER_PREFIX`, `EXPIRED_DRAFT_MESSAGE`,
+`EmbedOpenOptions`, `EmbedSaveHandler`, `embedDesigner`,
+`registerEmbedDesignerInteractions`, `EMBED_EDIT_TARGETS`,
+`EMBED_DESIGNER_PREFIX`, `EMBED_DESIGNER_SELECT_ACTION`,
+`EMBED_DESIGNER_SAVE_ACTION`, `EXPIRED_DRAFT_MESSAGE`,
 `embedTemplateToBuilder`, `embedTemplateToJSON`, `parseEmbedTemplate`,
 `parseEmbedColor`, `applyEmbedEdit`, `buildEmbedDesignerOptions`,
 `buildEmbedDesignerModal`, `embedDesignerSelectCustomId`,
-`embedDesignerModalCustomId`.
+`embedDesignerModalCustomId`, `embedDesignerSaveCustomId`.
 
 The embed designer: a select menu with the five edit targets — the message
 itself, the thumbnail, the image, the footer icon and the colour — each
 opening a modal.
+
+**It is wired by core.** Its custom ids carry the `embeds` prefix, and this
+module registers that prefix with the router: the **select** that opens the
+modals, the **modal** that applies the edit, and the **save button** that
+hands the finished design to the area. An area that uses the designer does
+not have to know that the prefix needs registering — which is how a feature
+ends up wired to nothing. The registration is **idempotent**: the prefix is
+registered once, however many times `registerEmbedDesignerInteractions()` is
+called, because a registration that fires twice is a duplicate and the
+router warns about duplicates.
 
 **A caller must know:**
 - The stored value is a **plain JSON object** (D32). Never a Python
@@ -465,6 +496,15 @@ opening a modal.
 - The designer keeps the template being edited in a **token** (D18) — it is
   a wizard mid-flight and has no database row yet. The token lives in the
   modal's custom id and expires with the token store.
+- **A draft lives in memory, and it is lost when the bot restarts.** The
+  draft is a wizard mid-flight, not a row: it is in the token store, it
+  lives fifteen minutes, and a restart empties the store. The panel's
+  buttons then answer "this draft has expired. Please run the command
+  again" instead of throwing. The *design* is not lost by that, because
+  nothing is saved until the design is saved: the area writes the finished
+  template to its own column, and a draft that was never saved was never
+  anything but an edit in progress. This is the behaviour Quotient's embed
+  builder had.
 - The select's custom id carries the token too (`embeds:options:<token>`),
   because the area has to be able to tell which draft a press is for.
 - **The draft knows its owner.** `start(template, ownerId)` records who
@@ -479,7 +519,22 @@ opening a modal.
   its own words.
 - A modal is inherently owner-only: Discord only lets the member who
   opened it submit it. The **select** is the exposed one — anybody in the
-  channel can press it — so the owner check belongs there.
+  channel can press it — so the owner check belongs there. The **save
+  button** is exposed in exactly the same way, so it is checked too.
+- `open(interaction, { template, ownerId, onSave })` is the whole flow in
+  one call: it starts the draft, posts the panel, and keeps the handle to
+  the panel in the draft. The re-render after an edit therefore lands on
+  the message that actually carries the panel — the reply, or the follow-up
+  the panel was sent as. `start(...)` makes a draft without a panel, for a
+  caller that renders the panel itself; the re-render then lands on the
+  message the modal was opened from, which is that panel.
+- The **panel** is the designer's: the embed being edited, the select, and
+  the save button. The save button is only there when the draft has
+  something to save.
+- **What a design is for is the area's business**, so the area hands the
+  designer the action to run when the owner presses Save:
+  `onSave(template, interaction)`. The designer answers the press, and
+  confirms the save unless the area has already said something itself.
 - An image URL is only accepted when it is an `https` URL; anything else
   clears the field, as in Quotient.
 - `parseEmbedColor` accepts `r,g,b`, a hex value and a colour name. The
@@ -503,14 +558,15 @@ opening a modal.
 | `context.test.ts` | `respond` on a fresh, a deferred and an already-replied interaction |
 | `prompt.test.ts` | the Confirm/Cancel row, the follow-up a second question needs, and the owner check |
 | `select.test.ts` | the select menu, **two collections out of one interaction**, the owner check, and the channel and role menus |
-| `embed-builder.test.ts` | the draft's owner, and the refusal a member who does not own it gets |
+| `embed-builder.test.ts` | the draft's owner, the refusal a member who does not own it gets, and the wiring: the select opening the modal, the modal applying the edit, the panel being re-rendered, the save button, and a draft that is gone answering instead of throwing |
 
-`interaction.fake.ts` is the stand-in for Discord the three collection
-tests share: an interaction whose state moves the way discord.js moves it,
-and whose responses resolve a collector with the buttons that were
-actually sent. Its collector takes the first click its **filter** accepts
-and ignores the rest, so a click from the wrong member is not an answer —
-the prompt keeps waiting, exactly as it does on Discord. It is test-only
-code.
+`interaction.fake.ts` is the stand-in for Discord the collection tests
+share: an interaction whose state moves the way discord.js moves it, and
+whose responses resolve a collector with the buttons that were actually
+sent. Its collector takes the first click its **filter** accepts and
+ignores the rest, so a click from the wrong member is not an answer — the
+prompt keeps waiting, exactly as it does on Discord. It also stands in for
+the three **component** interactions — a select menu, a modal submit and a
+button — for the tests that drive the router. It is test-only code.
 
 No test in `core/` talks to Discord or to a database.
