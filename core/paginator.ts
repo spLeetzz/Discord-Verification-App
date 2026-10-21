@@ -25,6 +25,7 @@ import {
 } from "discord.js";
 import type { ButtonInteraction, RepliableInteraction } from "discord.js";
 import { respond } from "./context.js";
+import type { ReplyHandle } from "./context.js";
 import { EMBED_COLOR } from "./constants.js";
 import { registerButton } from "./router.js";
 import { run } from "./fire-and-forget.js";
@@ -337,25 +338,25 @@ export class Paginator {
       return;
     }
 
-    await respond(interaction, {
+    const handle = await respond(interaction, {
       embeds: [this.buildEmbed(pages, 0)],
       components: [this.buildRow(this.namespace, 0, pages.length)],
     });
 
-    this.expireLater(interaction);
+    this.expireLater(handle);
   }
 
   /**
    * Takes the buttons off the message when the paginator times out.
+   *
+   * The edit goes through the handle, so it lands on the message the
+   * buttons are on — the interaction's reply, or a follow-up.
    */
-  private expireLater(interaction: RepliableInteraction): void {
+  private expireLater(handle: ReplyHandle): void {
     const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
     const timer = setTimeout(() => {
-      run(
-        () => interaction.editReply({ components: [] }),
-        "paginator.expire",
-      );
+      run(() => handle.edit({ components: [] }), "paginator.expire");
     }, timeoutMs);
 
     // A pending expiry is not a reason to keep the process alive.

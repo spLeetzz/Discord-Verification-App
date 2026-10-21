@@ -17,6 +17,11 @@
  * All of them cope with an interaction that has already been replied to
  * or deferred, because the dispatcher defers every chat-input command
  * before the command body runs.
+ *
+ * The distinction that matters is Discord's: **an interaction can only
+ * be replied to once.** A response is either the interaction's own reply,
+ * the edit of a deferral, or — once the interaction has answered — a
+ * follow-up message.
  */
 
 import {
@@ -51,9 +56,29 @@ export interface ReplyHandle {
     options: {
       componentType: MessageComponentType;
       time: number;
-      filter: (interaction: MessageComponentInteraction) => boolean;
+      /**
+       * The filter may be asynchronous.
+       *
+       * A filter that has to look something up — whether a channel is in
+       * this guild, say — cannot answer in a tick, and discord.js waits
+       * for a promise.
+       */
+      filter: (
+        interaction: MessageComponentInteraction,
+      ) => boolean | Promise<boolean>;
     },
   ): Promise<MessageComponentInteraction>;
+
+  /**
+   * Edits the message this handle points at.
+   *
+   * The handle is a message of its own — the interaction's reply, the
+   * edit of a deferral, or a follow-up — so an edit lands on the message
+   * that actually carries the buttons. `interaction.editReply()` would
+   * not: it always edits the interaction's *own* reply, which is a
+   * different message once a follow-up is in play.
+   */
+  edit(payload: ReplyPayload): Promise<unknown>;
 }
 
 /** How a reply is shaped. */
@@ -61,8 +86,9 @@ export interface ReplyOptions {
   /**
    * Whether the reply is only visible to the caller.
    *
-   * Ignored when the interaction was already deferred or replied to: the
-   * ephemeral flag is fixed when the response is first sent.
+   * Ignored when the interaction was already deferred: the ephemeral flag
+   * is fixed when the response is first sent. A follow-up is a message of
+   * its own, so it can be ephemeral even when the reply was not.
    */
   ephemeral?: boolean;
   /** Delete the reply after this many seconds. */
@@ -82,13 +108,37 @@ export interface ReplyPayload {
  *
  * This is the one place that knows about the deferred/replied distinction,
  * and every other helper in `core/` goes through it.
+ *
+ * | the interaction | what happens                  |
+ * | --------------- | ----------------------------- |
+ * | fresh           | `interaction.reply(...)`     |
+ * | deferred        | `interaction.editReply(...)` |
+ * | already replied | `interaction.followUp(...)`  |
+ *
+ * The last row is the one that surprises people: Discord allows one
+ * answer per interaction, so once the interaction has answered, a second
+ * message has to be a **follow-up**. It is a message of its own, and it
+ * can carry its own components — which is how a flow collects twice out
+ * of one interaction.
  */
 export async function respond(
   interaction: RepliableInteraction,
   payload: ReplyPayload,
   ephemeral = false,
 ): Promise<ReplyHandle> {
-  if (interaction.deferred || interaction.replied) {
+  if (interaction.replied) {
+    // The interaction has answered already. A second answer cannot be a
+    // reply — Discord would throw — so it is a follow-up: a new message.
+    return interaction.followUp({
+      ...payload,
+      flags: ephemeral ? MessageFlags.Ephemeral : undefined,
+    });
+  }
+
+  if (interaction.deferred) {
+    // A deferred interaction already has a placeholder message. Editing
+    // it is what turns the deferral into the real answer.
+    //
     // `flags` is not accepted by `editReply` — a reply's ephemeral flag is
     // fixed when it is first sent.
     return interaction.editReply(payload);
@@ -98,6 +148,53 @@ export async function respond(
     ...payload,
     flags: ephemeral ? MessageFlags.Ephemeral : undefined,
   });
+}
+
+/** How a message a collector waits on is sent. */
+export interface CollectableOptions {
+  /**
+   * Whether the message is only visible to the caller.
+   *
+   * Ignored when the interaction was already deferred: the ephemeral flag
+   * is fixed when the response is first sent. A follow-up is a message
+   * of its own, so it can be ephemeral even when the reply was not.
+   */
+  ephemeral?: boolean;
+  /**
+   * Send the message as a follow-up rather than as the interaction's own
+   * reply.
+   *
+   * An interaction can only be replied to once, so a flow that needs two
+   * inputs has to use a follow-up for the second one.
+   */
+  asFollowUp?: boolean;
+}
+
+/**
+ * Sends the message a component collector will wait on.
+ *
+ * The same rule as {@link respond}, with one addition: the message can be
+ * sent as a **follow-up**, which is how a flow gets a second collector out
+ * of one interaction.
+ *
+ * A follow-up needs an interaction that has already answered — Discord
+ * refuses one otherwise — so `asFollowUp` on a fresh interaction falls
+ * back to the interaction's own reply. The flow still works; it just
+ * cannot have two messages.
+ */
+export async function sendCollectable(
+  interaction: RepliableInteraction,
+  payload: ReplyPayload,
+  options: CollectableOptions = {},
+): Promise<ReplyHandle> {
+  if (options.asFollowUp && (interaction.deferred || interaction.replied)) {
+    return interaction.followUp({
+      ...payload,
+      flags: options.ephemeral ? MessageFlags.Ephemeral : undefined,
+    });
+  }
+
+  return respond(interaction, payload, options.ephemeral ?? false);
 }
 
 /**

@@ -86,11 +86,14 @@ export interface EntitlementLookup {
 /**
  * The free-tier allowances (D45).
  *
- * **The canonical table is `modules/premium/limits.ts`** — it is the one
- * the perk list is generated from. The copy here mirrors it, and a test in
- * the premium module fails the moment the two drift apart.
+ * **This is the canonical definition.** `modules/premium/limits.ts`
+ * re-exports it, so the perk list and the code that enforces the limits
+ * are generated from one table and cannot drift apart.
  *
- * `core/guards.ts` never reads a number from either table: `countLimitGuard`
+ * `core/` is the lower layer: `modules/` may import from `core/`, never
+ * the other way round, so the table has to live here.
+ *
+ * `core/guards.ts` never reads a number from the table: `countLimitGuard`
  * takes the limit as a parameter, so no allowance is hard-coded in the
  * runtime layer.
  *

@@ -5,7 +5,7 @@
  * five options — the message itself, the thumbnail, the image, the footer
  * icon and the colour — and each option opens a modal.
  *
- * Two things are different here:
+ * Three things are different here:
  *
  *  - The stored value is a **plain JSON object** (D32). Quotient stored
  *    `discord.Embed.to_dict()` as a Python literal string and re-parsed it
@@ -15,6 +15,12 @@
  *  - The designer keeps its state in a token (D18). The template being
  *    edited has no database row yet — it is a wizard mid-flight — so the
  *    modal's custom id carries a token into an in-memory map.
+ *  - The draft remembers **who started it**. The select that drives the
+ *    designer carries the token, and the token is in the message, so
+ *    anybody in the channel can drive somebody else's draft. A modal is
+ *    different: Discord only lets the person who opened it submit it, so
+ *    the select is the exposed one, and the draft's owner is what stops
+ *    it.
  */
 
 import {
@@ -25,8 +31,11 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
+import type { RepliableInteraction } from "discord.js";
 import { TokenStore } from "./custom-id.js";
 import { EMBED_COLOR } from "./constants.js";
+import { replyError } from "./context.js";
+import { OWNER_DENIAL_MESSAGE } from "./guards.js";
 
 /**
  * The prefix the designer's custom ids carry.
@@ -262,10 +271,32 @@ export function parseEmbedTemplate(raw: string): EmbedTemplate | null {
 }
 
 /**
- * The custom id of the select menu that drives the designer.
+ * A draft being designed.
+ *
+ * The template as it stands, and the member who started it. The owner is
+ * part of the draft, not part of the message: the message is in a channel
+ * other people can read, so the token in the custom id is not a secret
+ * and cannot be the guard.
  */
-export function embedDesignerSelectCustomId(prefix = EMBED_DESIGNER_PREFIX): string {
-  return `${prefix}:options`;
+export interface EmbedDraft {
+  /** The template as it stands. */
+  readonly template: EmbedTemplate;
+  /** The id of the member who started the draft. */
+  readonly ownerId: string;
+}
+
+/**
+ * The custom id of the select menu that drives the designer.
+ *
+ * The token travels in it, because the menu is what a member of the
+ * channel can press, and the handler has to know which draft they are
+ * pressing it for.
+ */
+export function embedDesignerSelectCustomId(
+  token: string,
+  prefix = EMBED_DESIGNER_PREFIX,
+): string {
+  return `${prefix}:options:${token}`;
 }
 
 /**
@@ -281,12 +312,15 @@ export function embedDesignerModalCustomId(
 
 /**
  * Builds the select menu with the five edit targets.
+ *
+ * @param token the draft the menu drives. It travels in the custom id.
  */
 export function buildEmbedDesignerOptions(
+  token: string,
   prefix = EMBED_DESIGNER_PREFIX,
 ): StringSelectMenuBuilder {
   return new StringSelectMenuBuilder()
-    .setCustomId(embedDesignerSelectCustomId(prefix))
+    .setCustomId(embedDesignerSelectCustomId(token, prefix))
     .setPlaceholder("Select an option to design the message.")
     .addOptions(
       {
@@ -503,13 +537,19 @@ export function applyEmbedEdit(
 }
 
 /**
+ * The refusal a member gets when the draft has expired.
+ */
+export const EXPIRED_DRAFT_MESSAGE =
+  "This draft has expired. Please run the command again.";
+
+/**
  * The embed designer.
  *
  * Owns the token store that holds the template being edited, and builds the
  * pieces the feature module wires into the router.
  */
 export class EmbedDesigner {
-  private readonly store = new TokenStore<EmbedTemplate>();
+  private readonly store = new TokenStore<EmbedDraft>();
   private readonly prefix: string;
 
   constructor(prefix = EMBED_DESIGNER_PREFIX) {
@@ -519,24 +559,81 @@ export class EmbedDesigner {
   /**
    * Starts a design session.
    *
-   * @returns the token that goes into the modal's custom id.
+   * @param template the template the draft starts from.
+   * @param ownerId  the member who starts it. Only that member may drive
+   *                 the draft — the select that opens the modals carries
+   *                 the token, and the token is in the message.
+   * @returns the token that goes into the custom ids.
    */
-  start(template: EmbedTemplate): string {
-    return this.store.issue({ ...template });
+  start(template: EmbedTemplate, ownerId: string): string {
+    return this.store.issue({ template: { ...template }, ownerId });
   }
 
   /**
    * Reads the template behind a token.
    */
   read(token: string): EmbedTemplate | undefined {
-    return this.store.get(token);
+    return this.store.get(token)?.template;
+  }
+
+  /**
+   * Who started the draft.
+   *
+   * @returns the member's id, or `undefined` when the token has expired.
+   */
+  ownerOf(token: string): string | undefined {
+    return this.store.get(token)?.ownerId;
+  }
+
+  /**
+   * Is this member the draft's owner?
+   *
+   * The check an area makes before it lets an interaction near the
+   * draft. It is a plain question, with no side effect: a handler that
+   * wants to refuse in its own words asks this and answers for itself.
+   */
+  isOwner(token: string, userId: string): boolean {
+    return this.store.get(token)?.ownerId === userId;
+  }
+
+  /**
+   * Refuses an interaction that is not the draft owner's.
+   *
+   * The one call an area needs: the handler asks, and either goes on or
+   * has already been told no.
+   *
+   * @returns `true` when the caller owns the draft and may go on,
+   *          `false` when the interaction was refused. The refusal has
+   *          been sent by the time this returns.
+   */
+  async guardOwner(
+    interaction: RepliableInteraction,
+    token: string,
+  ): Promise<boolean> {
+    const ownerId = this.ownerOf(token);
+
+    if (!ownerId) {
+      await replyError(interaction, EXPIRED_DRAFT_MESSAGE, { ephemeral: true });
+
+      return false;
+    }
+
+    if (ownerId !== interaction.user.id) {
+      await replyError(interaction, OWNER_DENIAL_MESSAGE, { ephemeral: true });
+
+      return false;
+    }
+
+    return true;
   }
 
   /**
    * The select menu that drives the designer.
+   *
+   * @param token the draft the menu drives. It travels in the custom id.
    */
-  buildOptions(): StringSelectMenuBuilder {
-    return buildEmbedDesignerOptions(this.prefix);
+  buildOptions(token: string): StringSelectMenuBuilder {
+    return buildEmbedDesignerOptions(token, this.prefix);
   }
 
   /**
@@ -551,6 +648,9 @@ export class EmbedDesigner {
   /**
    * Applies a modal submission to the stored template.
    *
+   * A modal can only be submitted by the member who opened it, so the
+   * owner of the draft is the only person who can reach this.
+   *
    * @returns the new template, or `null` when the token has expired.
    */
   apply(
@@ -558,13 +658,13 @@ export class EmbedDesigner {
     token: string,
     values: Readonly<Record<string, string>>,
   ): EmbedTemplate | null {
-    const template = this.store.get(token);
+    const draft = this.store.get(token);
 
-    if (!template) return null;
+    if (!draft) return null;
 
-    const next = applyEmbedEdit(target, template, values);
+    const next = applyEmbedEdit(target, draft.template, values);
 
-    this.store.set(token, next);
+    this.store.set(token, { template: next, ownerId: draft.ownerId });
 
     return next;
   }

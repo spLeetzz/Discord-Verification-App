@@ -108,10 +108,10 @@ interface `guards.ts` depends on; the premium engineer implements it
 against `guild_entitlements`.
 
 **A caller must know:**
-- `FREE_TIER` is a **mirror** of the free-tier allowance table (D45). The
-  canonical one is `modules/premium/limits.ts`, which the perk list is
-  generated from; a test in the premium module fails the moment the two
-  drift apart.
+- `FREE_TIER` is the **canonical** free-tier allowance table (D45). It
+  lives here because `core/` is the lower layer: `modules/premium/
+  limits.ts` re-exports it, and the perk list is generated from it, so
+  there is one table and not two that have to agree.
 - A gate with no entry in the table is unlimited.
 - `core/guards.ts` never reads a number from the table: `countLimitGuard`
   takes the limit as a parameter, so no allowance is hard-coded in the
@@ -184,9 +184,10 @@ seconds per member and ten per minute per guild.
 
 ## `context.ts`
 
-`respond`, `replyError`, `replySuccess`, `replySimple`, `sendFile`,
-`replyErrorUntilDeleted`, `ReplyOptions`, `ReplyPayload`, `ReplyHandle`,
-`SendFileOptions`, `ReplyErrorUntilDeletedOptions`.
+`respond`, `sendCollectable`, `replyError`, `replySuccess`, `replySimple`,
+`sendFile`, `replyErrorUntilDeleted`, `ReplyOptions`, `ReplyPayload`,
+`ReplyHandle`, `CollectableOptions`, `SendFileOptions`,
+`ReplyErrorUntilDeletedOptions`.
 
 The context, as functions rather than a class (D38). In discord.js the
 interaction *is* the context.
@@ -196,8 +197,27 @@ interaction *is* the context.
   distinction. The dispatcher defers every chat-input command, so a helper
   that called `interaction.reply()` directly would fail on a deferred
   interaction.
+- **Discord allows an interaction to be replied to once.** Every other
+  rule here follows from that one, so it is worth stating plainly:
+
+  | the interaction | what `respond` does          |
+  | --------------- | ---------------------------- |
+  | fresh           | `interaction.reply(...)`     |
+  | deferred        | `interaction.editReply(...)` |
+  | already replied | `interaction.followUp(...)`  |
+
+  A second answer cannot be a reply — Discord throws — so it has to be a
+  **follow-up**: a message of its own, which can carry its own
+  components. That is the escape hatch for a flow that needs two inputs.
 - The ephemeral flag is fixed when the response is first sent. On an
   interaction that was already deferred, the `ephemeral` option is ignored.
+  A follow-up is a message of its own, so it can be ephemeral even when
+  the reply was not.
+- `sendCollectable` sends the message a component collector waits on. It
+  is `respond` with one extra option — `asFollowUp` — and it is what
+  `prompt` and `awaitSelect` use. A follow-up needs an interaction that
+  has already answered, so `asFollowUp` on a fresh interaction falls back
+  to the interaction's own reply.
 - `replyErrorUntilDeleted` posts a refusal and then watches for the
   invoking message to be deleted; when it goes, the refusal goes with it.
   The watch is **non-blocking** — it subscribes to `messageDelete` and
@@ -215,7 +235,14 @@ The Confirm/Cancel row. Quotient's `ctx.prompt` blocked on
 (D35).
 
 **A caller must know:**
-- The prompt is owned by the caller. Somebody else's click is ignored.
+- The prompt is owned by the caller. The collector's filter checks the
+  **clicker's user id**, so somebody else's click is ignored and the prompt
+  keeps waiting for the owner. The random token in the custom id is *not*
+  the guard: it is in the message, and the message is in a channel other
+  people can read.
+- `allowOthers: true` opens the prompt to the whole channel — a vote, a
+  poll. It is off by default, and turning it on is a deliberate, visible
+  choice at the call site.
 - Each prompt's button ids carry a random token, so two prompts open in
   the same channel at the same time cannot be answered by the same click.
 - The buttons are removed once the prompt is answered or times out. A
@@ -224,11 +251,26 @@ The Confirm/Cancel row. Quotient's `ctx.prompt` blocked on
   (D43). The `ephemeral` option only has an effect when the interaction has
   not been replied to yet.
 - A timeout is a refusal: `prompt` returns `false`.
+- **One interaction yields one collection.** A flow that asks two questions
+  needs the second on a follow-up (`asFollowUp: true`) or on a message it
+  sent itself. This is a Discord constraint, not a limitation of these
+  helpers.
+
+**Behaviour change:** the owner check used to be *documented but not
+enforced* — the filter matched the custom id alone, so anybody in the
+channel could answer another moderator's prompt and confirm it on their
+behalf. The check is now real, in `prompt`, `awaitSelect`,
+`awaitChannelSelect` and `awaitRoleSelect`. A caller that relied on the
+old, open behaviour has to pass `allowOthers: true`. **No caller in the
+bot does:** every prompt and every menu is a moderator flow, and none of
+them is a vote, so the change breaks nothing today.
 
 ## `select.ts`
 
-`awaitSelect`, `SelectOption`, `AwaitSelectOptions`,
-`SELECT_CUSTOM_ID_PREFIX`.
+`awaitSelect`, `awaitChannelSelect`, `awaitRoleSelect`, `SelectOption`,
+`AwaitSelectOptions`, `AwaitAutoSelectOptions`, `AwaitChannelSelectOptions`,
+`AwaitRoleSelectOptions`, `SELECT_CUSTOM_ID_PREFIX`,
+`CHANNEL_SELECT_CUSTOM_ID_PREFIX`, `ROLE_SELECT_CUSTOM_ID_PREFIX`.
 
 Waits for a select menu and returns the chosen values as
 `Promise<string[]>` (D35). This replaces Quotient's `custom_id` string
@@ -239,9 +281,51 @@ sniffing.
 - At most 25 options, and Discord's own limits on label and value length.
   Anything outside them throws — it is a programming error, not a user
   error.
+- The menu is owned by the caller. The filter checks the **clicker's user
+  id**, so somebody else's choice is ignored and the menu keeps waiting for
+  the owner. A menu's options are visible to everybody in the channel, so
+  a menu in a public channel is at least as exposed as a button.
+- `allowOthers: true` opens the menu to the whole channel — a vote, a
+  poll. It is off by default, and turning it on is a deliberate, visible
+  choice at the call site.
 - The menu's custom id carries a random token, so two menus open in the
   same channel cannot be answered by the same click.
 - A timeout returns an empty array, not `null`.
+- **One interaction yields one collection.** A flow that asks two questions
+  needs the second on a follow-up (`asFollowUp: true`) or on a message it
+  sent itself. This is a Discord constraint, not a limitation of these
+  helpers.
+- **Three kinds of menu, one set of rules.** `awaitSelect` collects a
+  *string* menu: the options are the ones the caller wrote down.
+  `awaitChannelSelect` and `awaitRoleSelect` collect the two
+  **auto-populated** menus, which Discord fills with the guild's channels
+  and roles. They are a different component type, so they need a
+  different helper — a string menu cannot stand in for a channel picker.
+  The collection rules (owner, timeout, cleanup) are the same, and the
+  three share one implementation.
+
+**`awaitChannelSelect`:**
+- `channelTypes` filters what the menu offers. It defaults to a text
+  channel and an announcement channel — the two types every picker in the
+  bot wants. Pass `[ChannelType.GuildVoice]`, `[ChannelType.GuildCategory]`
+  and so on to widen it, or an empty list to let Discord offer every type
+  it has. An empty list is *not* sent as an empty filter: `channel_types`
+  is left off the component, which is how Discord is told "all of them".
+- `guildId` restricts the answer to one guild. It defaults to the guild
+  the interaction came from. **Discord's channel select has no "guild
+  mode" parameter** — when the bot is in more than one guild, the client
+  offers a guild picker, and the menu can hand back another guild's
+  channel — so the filter is enforced here, on the answer: the channel is
+  fetched, and a channel that is not in the guild is not an answer. The
+  collector keeps waiting and the menu stays live for the owner.
+- The menu is ephemeral by default. A picker is a private choice, and a
+  public one shows the whole channel what is being picked.
+
+**`awaitRoleSelect`:**
+- Discord's role select has **no role-type filter**: the component
+  carries no such field, so a menu cannot be narrowed to, say, the roles
+  a bot manages. The menu offers the guild's roles.
+- A role belongs to one guild, so there is no guild filter to apply.
 
 ## `time.ts`
 
@@ -351,11 +435,12 @@ Pagination over a list of lines, with first/previous/next/last.
 
 ## `embed-builder.ts`
 
-`EmbedTemplate`, `EmbedEditTarget`, `EmbedDesigner`,
-`EMBED_EDIT_TARGETS`, `EMBED_DESIGNER_PREFIX`, `embedTemplateToBuilder`,
-`embedTemplateToJSON`, `parseEmbedTemplate`, `parseEmbedColor`,
-`applyEmbedEdit`, `buildEmbedDesignerOptions`, `buildEmbedDesignerModal`,
-`embedDesignerSelectCustomId`, `embedDesignerModalCustomId`.
+`EmbedTemplate`, `EmbedEditTarget`, `EmbedDesigner`, `EmbedDraft`,
+`EMBED_EDIT_TARGETS`, `EMBED_DESIGNER_PREFIX`, `EXPIRED_DRAFT_MESSAGE`,
+`embedTemplateToBuilder`, `embedTemplateToJSON`, `parseEmbedTemplate`,
+`parseEmbedColor`, `applyEmbedEdit`, `buildEmbedDesignerOptions`,
+`buildEmbedDesignerModal`, `embedDesignerSelectCustomId`,
+`embedDesignerModalCustomId`.
 
 The embed designer: a select menu with the five edit targets — the message
 itself, the thumbnail, the image, the footer icon and the colour — each
@@ -370,6 +455,21 @@ opening a modal.
 - The designer keeps the template being edited in a **token** (D18) — it is
   a wizard mid-flight and has no database row yet. The token lives in the
   modal's custom id and expires with the token store.
+- The select's custom id carries the token too (`embeds:options:<token>`),
+  because the area has to be able to tell which draft a press is for.
+- **The draft knows its owner.** `start(template, ownerId)` records who
+  started it, and the draft is the only place that knows. The token is in
+  the message and the message is in a channel other people can read, so
+  the token is not a secret and cannot be the guard.
+- An area checks the owner in **one call**: `await
+  designer.guardOwner(interaction, token)` returns `true` when the caller
+  may go on, and `false` when the interaction has been refused (the
+  refusal has been sent by then). `designer.isOwner(token, userId)` is the
+  same question with no side effect, for a handler that wants to refuse in
+  its own words.
+- A modal is inherently owner-only: Discord only lets the member who
+  opened it submit it. The **select** is the exposed one — anybody in the
+  channel can press it — so the owner check belongs there.
 - An image URL is only accepted when it is an `https` URL; anything else
   clears the field, as in Quotient.
 - `parseEmbedColor` accepts `r,g,b`, a hex value and a colour name. The
@@ -390,5 +490,17 @@ opening a modal.
 | `time.test.ts` | duration parsing, natural-language parsing with an explicit reference date and time zone, a past date rolling forward |
 | `ratelimit.test.ts` | the sliding window and the simple timestamp bucket |
 | `ttl-cache.test.ts` | expiry, sweeping and eviction |
+| `context.test.ts` | `respond` on a fresh, a deferred and an already-replied interaction |
+| `prompt.test.ts` | the Confirm/Cancel row, the follow-up a second question needs, and the owner check |
+| `select.test.ts` | the select menu, **two collections out of one interaction**, the owner check, and the channel and role menus |
+| `embed-builder.test.ts` | the draft's owner, and the refusal a member who does not own it gets |
+
+`interaction.fake.ts` is the stand-in for Discord the three collection
+tests share: an interaction whose state moves the way discord.js moves it,
+and whose responses resolve a collector with the buttons that were
+actually sent. Its collector takes the first click its **filter** accepts
+and ignores the rest, so a click from the wrong member is not an answer —
+the prompt keeps waiting, exactly as it does on Discord. It is test-only
+code.
 
 No test in `core/` talks to Discord or to a database.
