@@ -6,6 +6,7 @@ import { updateThreadStatus } from "../../utils/thread.js";
 
 const command: Command = {
   staffOnly: true,
+  ephemeral: true,
   data: new SlashCommandBuilder()
     .setName("noreply")
     .setDescription("Flag the current verification ticket as no response."),

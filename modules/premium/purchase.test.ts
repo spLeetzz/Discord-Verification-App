@@ -1,0 +1,634 @@
+/**
+ * The purchase state machine, proved against the live database.
+ *
+ * The properties that matter (D37):
+ *
+ *  - `pending → paid` grants the subscription;
+ *  - `pending → failed` records the failure;
+ *  - `failed` is **retryable** — Quotient closed the transaction on
+ *    failure, so a failed payment could never be retried;
+ *  - the grant is **idempotent**: a replayed webhook grants once;
+ *  - the grant is **one transaction**: a failure half-way through the
+ *    entitlement writes leaves the transaction unpaid and no entitlement
+ *    rows, so the next callback grants the purchase properly;
+ *  - a paid transaction whose grant never landed is **repaired** by the
+ *    next callback, without being granted twice;
+ *  - the rows are written before anybody is told, so the entitlement is
+ *    already in force when the notification goes out.
+ */
+
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
+import { closeDatabase, db } from "../../db/client.js";
+import {
+  guildEntitlements,
+  guildSettings,
+  premiumTransactions,
+  userSettings,
+} from "../../db/schema.js";
+import { seedPremiumPlans } from "../../db/seed.js";
+import { isPostgres } from "../../db/dialect.js";
+import { isEntitled } from "./entitlements.js";
+import {
+  activatePremium,
+  canTransition,
+  failPremium,
+  nextStatus,
+  retryPremium,
+} from "./purchase.js";
+import {
+  createTransaction,
+  findPlanByCode,
+  findTransaction,
+  getGuildSettings,
+  getUserSettings,
+  listEntitlements,
+} from "./repo.js";
+import { PREMIUM_FEATURES } from "./types.js";
+import type { VerifiedPurchase } from "./purchase.js";
+
+const GUILD_ID = `premium-purchase-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const USER_ID = "111111111111111111";
+
+/**
+ * The feature the simulated failure fires on.
+ *
+ * The **last** one, so the grant has already written six rows when it
+ * fails — and the test proves that all seven of them were rolled back
+ * with the transaction.
+ */
+const LAST_FEATURE = PREMIUM_FEATURES.at(-1) ?? "success_message";
+
+let counter = 0;
+
+function nextTxnId(): string {
+  counter += 1;
+
+  return `premium-test-txn-${Date.now()}-${counter}`;
+}
+
+/**
+ * A user id of this test's own.
+ *
+ * The subscription counter lives on the user's row, so a test that wants
+ * to count purchases needs a user nobody else has bought for.
+ */
+function nextUserId(): string {
+  counter += 1;
+
+  return `premium-test-user-${Date.now()}-${counter}`;
+}
+
+beforeEach(async () => {
+  await db
+    .delete(premiumTransactions)
+    .where(sql`${premiumTransactions.guildId} = ${GUILD_ID}`);
+
+  await db.delete(guildEntitlements).where(sql`${guildEntitlements.guildId} = ${GUILD_ID}`);
+
+  // The subscription tier's expiry is the base a new purchase extends, so
+  // it has to go too — otherwise every test would build on the last one.
+  await db.delete(guildSettings).where(sql`${guildSettings.guildId} = ${GUILD_ID}`);
+
+  await seedPremiumPlans();
+});
+
+afterAll(async () => {
+  await db
+    .delete(premiumTransactions)
+    .where(sql`${premiumTransactions.guildId} = ${GUILD_ID}`);
+
+  await db.delete(guildEntitlements).where(sql`${guildEntitlements.guildId} = ${GUILD_ID}`);
+
+  await db.delete(guildSettings).where(sql`${guildSettings.guildId} = ${GUILD_ID}`);
+
+  await db
+    .delete(userSettings)
+    .where(sql`${userSettings.userId} like 'premium-test-user-%'`);
+
+  await closeDatabase();
+});
+
+/**
+ * Creates a pending transaction for the cheapest plan.
+ */
+async function makeTransaction(
+  userId: string = USER_ID,
+): Promise<{ txnId: string; durationDays: number }> {
+  // The plan is looked up by its **code**, the catalogue's natural key.
+  // Picking "the cheapest plan" would pick up another test file's
+  // temporary plan and then lose it mid-test.
+  const plan = await findPlanByCode("trial");
+
+  if (!plan) throw new Error("the plan catalogue is empty");
+
+  const txnId = nextTxnId();
+
+  await createTransaction({
+    txnId,
+    userId,
+    guildId: GUILD_ID,
+    planId: plan.id,
+    planSnapshot: {
+      name: plan.name,
+      price: plan.price,
+      duration_days: plan.durationDays,
+    },
+    email: "buyer@example.com",
+    buyerName: "Buyer",
+  });
+
+  return { txnId, durationDays: plan.durationDays };
+}
+
+function makePurchase(txnId: string): VerifiedPurchase {
+  return {
+    txnId,
+    amount: "29.00",
+    email: "buyer@example.com",
+    buyerName: "Buyer",
+    status: "success",
+    raw: { txnid: txnId, status: "success" },
+  };
+}
+
+/**
+ * Makes one entitlement write fail, the way a transient database error
+ * would.
+ *
+ * The trigger is scoped to this test's guild, so it cannot disturb any
+ * other test, and it is dropped again whatever happens.
+ *
+ * **The two engines raise differently.** SQLite has `RAISE(ABORT, …)`
+ * inside a trigger program; Postgres has `RAISE EXCEPTION` inside a
+ * plpgsql function. Both abort the statement and hand the error to the
+ * caller, and the caller is the transaction — which rolls back, so the
+ * rows the grant had already written go with it.
+ */
+async function withBrokenEntitlement<T>(fn: () => Promise<T>): Promise<T> {
+  // The guild id is generated by this file and is made of letters,
+  // digits and dashes, so it can be inlined safely.
+  for (const statement of breakEntitlementStatements()) {
+    await db.execute(sql.raw(statement));
+  }
+
+  try {
+    return await fn();
+  } finally {
+    for (const statement of dropBreakEntitlementStatements()) {
+      await db.execute(sql.raw(statement));
+    }
+  }
+}
+
+/** The statements that arm the failure, in the running engine's dialect. */
+function breakEntitlementStatements(): string[] {
+  if (isPostgres) {
+    return [
+      `DROP TRIGGER IF EXISTS premium_test_break_entitlement_trigger ON guild_entitlements;`,
+      `
+        CREATE OR REPLACE FUNCTION premium_test_break_entitlement() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.guild_id = '${GUILD_ID}' AND NEW.feature = '${LAST_FEATURE}' THEN
+            RAISE EXCEPTION 'simulated failure in the middle of the grant';
+          END IF;
+
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+      `,
+      `
+        CREATE TRIGGER premium_test_break_entitlement_trigger
+          BEFORE INSERT OR UPDATE ON guild_entitlements
+          FOR EACH ROW EXECUTE FUNCTION premium_test_break_entitlement();
+      `,
+    ];
+  }
+
+  return [
+    "DROP TRIGGER IF EXISTS premium_test_break_entitlement_trigger;",
+    `
+      CREATE TRIGGER premium_test_break_entitlement_trigger
+        BEFORE INSERT ON guild_entitlements
+        FOR EACH ROW
+        WHEN NEW.guild_id = '${GUILD_ID}' AND NEW.feature = '${LAST_FEATURE}'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated failure in the middle of the grant');
+      END;
+    `,
+  ];
+}
+
+/** The statements that disarm the failure again. */
+function dropBreakEntitlementStatements(): string[] {
+  if (isPostgres) {
+    return [
+      "DROP TRIGGER IF EXISTS premium_test_break_entitlement_trigger ON guild_entitlements;",
+      "DROP FUNCTION IF EXISTS premium_test_break_entitlement();",
+    ];
+  }
+
+  return ["DROP TRIGGER IF EXISTS premium_test_break_entitlement_trigger;"];
+}
+
+describe("modules/premium/purchase — the state machine", () => {
+  it("allows pending to become paid", () => {
+    expect(canTransition("pending", "activate")).toBe(true);
+    expect(nextStatus("pending", "activate")).toBe("paid");
+  });
+
+  it("allows pending to become failed", () => {
+    expect(canTransition("pending", "fail")).toBe(true);
+    expect(nextStatus("pending", "fail")).toBe("failed");
+  });
+
+  it("allows a failed transaction to be retried", () => {
+    expect(canTransition("failed", "retry")).toBe(true);
+    expect(nextStatus("failed", "retry")).toBe("pending");
+  });
+
+  it("does not allow a paid transaction to fail", () => {
+    expect(canTransition("paid", "fail")).toBe(false);
+    expect(nextStatus("paid", "fail")).toBeNull();
+  });
+
+  it("does not allow a paid transaction to be retried", () => {
+    expect(canTransition("paid", "retry")).toBe(false);
+  });
+});
+
+describe("modules/premium/purchase — the database", () => {
+  it("moves a pending transaction to paid and grants the entitlements", async () => {
+    const { txnId, durationDays } = await makeTransaction();
+
+    const before = await findTransaction(txnId);
+    expect(before?.status).toBe("pending");
+
+    const result = await activatePremium(makePurchase(txnId));
+
+    expect(result.outcome).toBe("activated");
+    expect(result.durationDays).toBe(durationDays);
+
+    const after = await findTransaction(txnId);
+    expect(after?.status).toBe("paid");
+    expect(after?.paidAt).not.toBeNull();
+
+    // Every feature is entitled, and the gate agrees.
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(true);
+    expect(await isEntitled(GUILD_ID, "idp_transfer")).toBe(true);
+    expect(await isEntitled(GUILD_ID, "success_message")).toBe(true);
+  });
+
+  it("gives the subscription the length the plan says", async () => {
+    const { txnId, durationDays } = await makeTransaction();
+
+    const result = await activatePremium(makePurchase(txnId));
+
+    const expected = Date.now() + durationDays * 86_400_000;
+
+    expect(result.expiresAt).not.toBeNull();
+    expect(
+      Math.abs((result.expiresAt?.getTime() ?? 0) - expected),
+    ).toBeLessThan(5_000);
+  });
+
+  it("grants once, however many times the webhook fires", async () => {
+    const { txnId, durationDays } = await makeTransaction();
+
+    const first = await activatePremium(makePurchase(txnId));
+    const second = await activatePremium(makePurchase(txnId));
+
+    expect(first.outcome).toBe("activated");
+    expect(second.outcome).toBe("already_paid");
+
+    // The second call did not extend the subscription.
+    const expected = Date.now() + durationDays * 86_400_000;
+
+    expect(
+      Math.abs((first.expiresAt?.getTime() ?? 0) - expected),
+    ).toBeLessThan(5_000);
+  });
+
+  it("extends an existing subscription instead of replacing it", async () => {
+    // Buying again before the current period ends must not lose the days
+    // that were already paid for. Quotient stacked the durations the same
+    // way.
+    const first = await makeTransaction();
+    const firstResult = await activatePremium(makePurchase(first.txnId));
+
+    const second = await makeTransaction();
+    const secondResult = await activatePremium(makePurchase(second.txnId));
+
+    const extension =
+      (secondResult.expiresAt?.getTime() ?? 0) -
+      (firstResult.expiresAt?.getTime() ?? 0);
+
+    expect(extension).toBe(first.durationDays * 86_400_000);
+  });
+
+  it("moves a pending transaction to failed", async () => {
+    const { txnId } = await makeTransaction();
+
+    const status = await failPremium({ txnId, raw: { status: "failure" } });
+
+    expect(status).toBe("failed");
+
+    const row = await findTransaction(txnId);
+    expect(row?.status).toBe("failed");
+
+    // A failed purchase grants nothing.
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(false);
+  });
+
+  it("lets a failed purchase be retried, and the retry can succeed", async () => {
+    const { txnId } = await makeTransaction();
+
+    await failPremium({ txnId, raw: { status: "failure" } });
+
+    const retried = await retryPremium(txnId);
+    expect(retried).toBe("pending");
+
+    const row = await findTransaction(txnId);
+    expect(row?.status).toBe("pending");
+
+    const result = await activatePremium(makePurchase(txnId));
+    expect(result.outcome).toBe("activated");
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(true);
+  });
+
+  it("lets the same transaction be paid again after a failure", async () => {
+    // The buyer cancels at the gateway and then pays the same link. The
+    // signature is verified again, so this is safe.
+    const { txnId } = await makeTransaction();
+
+    await failPremium({ txnId, raw: { status: "failure" } });
+
+    const result = await activatePremium(makePurchase(txnId));
+
+    expect(result.outcome).toBe("activated");
+    expect((await findTransaction(txnId))?.status).toBe("paid");
+  });
+
+  it("does not un-buy a subscription when a failure arrives late", async () => {
+    const { txnId } = await makeTransaction();
+
+    await activatePremium(makePurchase(txnId));
+
+    const status = await failPremium({ txnId, raw: { status: "failure" } });
+
+    expect(status).toBe("paid");
+    expect((await findTransaction(txnId))?.status).toBe("paid");
+  });
+
+  it("refuses to retry a transaction that was never failed", async () => {
+    const { txnId } = await makeTransaction();
+
+    expect(await retryPremium(txnId)).toBeNull();
+  });
+
+  it("reports an unknown transaction instead of throwing", async () => {
+    const result = await activatePremium(makePurchase("premium-test-unknown"));
+
+    expect(result.outcome).toBe("unknown_transaction");
+  });
+
+  it("records the buyer's real email and name", async () => {
+    const { txnId } = await makeTransaction();
+
+    await activatePremium({
+      ...makePurchase(txnId),
+      email: "real.buyer@example.com",
+      buyerName: "Real Buyer",
+    });
+
+    const row = await findTransaction(txnId);
+
+    expect(row?.email).toBe("real.buyer@example.com");
+    expect(row?.buyerName).toBe("Real Buyer");
+  });
+});
+
+describe("modules/premium/purchase — the grant is one transaction", () => {
+  it("leaves nothing behind when the grant fails half-way through", async () => {
+    // This is the bug the audit found: the transaction was flipped to
+    // `paid` and committed, and the entitlements were written afterwards.
+    // A process killed in between left a buyer who had paid with
+    // nothing, and the replay path wrote nothing because the transaction
+    // was already `paid`.
+    const userId = nextUserId();
+    const { txnId } = await makeTransaction(userId);
+
+    await withBrokenEntitlement(async () => {
+      await expect(activatePremium(makePurchase(txnId))).rejects.toThrow();
+    });
+
+    // Nothing landed. The transaction is not paid, no entitlement row
+    // exists, and the guild has no subscription.
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+    expect(await listEntitlements(GUILD_ID)).toHaveLength(0);
+    expect((await getGuildSettings(GUILD_ID))?.premiumExpiresAt ?? null).toBeNull();
+
+    // And the retry grants the purchase properly.
+    const result = await activatePremium(makePurchase(txnId));
+
+    expect(result.outcome).toBe("activated");
+    expect((await findTransaction(txnId))?.status).toBe("paid");
+    expect(await listEntitlements(GUILD_ID)).toHaveLength(PREMIUM_FEATURES.length);
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(true);
+  });
+
+  it("grants once when two callbacks arrive at the same time", async () => {
+    const userId = nextUserId();
+    const { txnId, durationDays } = await makeTransaction(userId);
+
+    const [first, second] = await Promise.all([
+      activatePremium(makePurchase(txnId)),
+      activatePremium(makePurchase(txnId)),
+    ]);
+
+    // One of them granted the purchase; the other one found it paid.
+    expect([first.outcome, second.outcome].sort()).toEqual([
+      "activated",
+      "already_paid",
+    ]);
+
+    // The entitlement was not written twice...
+    expect(await listEntitlements(GUILD_ID)).toHaveLength(PREMIUM_FEATURES.length);
+
+    // ...the subscription was not extended twice...
+    const expected = Date.now() + durationDays * 86_400_000;
+    const settings = await getGuildSettings(GUILD_ID);
+
+    expect(
+      Math.abs((settings?.premiumExpiresAt?.getTime() ?? 0) - expected),
+    ).toBeLessThan(5_000);
+
+    // ...and the purchase was not counted twice.
+    expect((await getUserSettings(userId))?.premiums).toBe(1);
+  });
+
+  it("grants nothing extra when a paid transaction is replayed", async () => {
+    const userId = nextUserId();
+    const { txnId, durationDays } = await makeTransaction(userId);
+
+    const first = await activatePremium(makePurchase(txnId));
+    const second = await activatePremium(makePurchase(txnId));
+
+    expect(first.outcome).toBe("activated");
+    expect(second.outcome).toBe("already_paid");
+
+    // The subscription was not extended a second time.
+    const expected = Date.now() + durationDays * 86_400_000;
+
+    expect(
+      Math.abs((first.expiresAt?.getTime() ?? 0) - expected),
+    ).toBeLessThan(5_000);
+    expect(
+      Math.abs((second.expiresAt?.getTime() ?? 0) - expected),
+    ).toBeLessThan(5_000);
+
+    // The purchase was counted once, and the entitlements were not
+    // written again.
+    expect((await getUserSettings(userId))?.premiums).toBe(1);
+    expect(await listEntitlements(GUILD_ID)).toHaveLength(PREMIUM_FEATURES.length);
+  });
+});
+
+describe("modules/premium/purchase — the repair", () => {
+  it("puts back a purchase that was paid for but never granted", async () => {
+    // The divergence, written straight into the database: the
+    // transaction is `paid` and the grant never landed.
+    const userId = nextUserId();
+    const { txnId, durationDays } = await makeTransaction(userId);
+
+    await db
+      .update(premiumTransactions)
+      .set({
+        status: "paid",
+        paidAt: new Date(),
+        rawData: { txnid: txnId, status: "success" },
+      })
+      .where(sql`${premiumTransactions.txnId} = ${txnId}`);
+
+    expect((await findTransaction(txnId))?.status).toBe("paid");
+    expect(await listEntitlements(GUILD_ID)).toHaveLength(0);
+
+    // The next callback repairs it.
+    const result = await activatePremium(makePurchase(txnId));
+
+    expect(result.outcome).toBe("repaired");
+    expect(await listEntitlements(GUILD_ID)).toHaveLength(PREMIUM_FEATURES.length);
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(true);
+
+    // The repair restored the purchase — it did not grant it a second
+    // time, and it did not extend the subscription.
+    const expected = Date.now() + durationDays * 86_400_000;
+
+    expect(
+      Math.abs((result.expiresAt?.getTime() ?? 0) - expected),
+    ).toBeLessThan(5_000);
+    expect((await getUserSettings(userId))?.premiums).toBe(1);
+
+    // The user's own row was put back too, and it holds the same expiry.
+    const user = await getUserSettings(userId);
+
+    expect(user?.isPremium).toBe(true);
+    expect(
+      Math.abs((user?.premiumExpireTime?.getTime() ?? 0) - expected),
+    ).toBeLessThan(5_000);
+  });
+
+  it("does not shorten a longer subscription when it repairs", async () => {
+    // The guild bought a longer subscription somewhere else, and the
+    // purchase being replayed bought a shorter one. The repair must put
+    // the missing features back without taking the longer subscription
+    // away.
+    const userId = nextUserId();
+    const { txnId, durationDays } = await makeTransaction(userId);
+
+    const paidAt = new Date(Date.now() - 86_400_000);
+    const longer = new Date(Date.now() + 100 * 86_400_000);
+
+    await db
+      .update(premiumTransactions)
+      .set({
+        status: "paid",
+        paidAt,
+        rawData: { txnid: txnId, status: "success" },
+      })
+      .where(sql`${premiumTransactions.txnId} = ${txnId}`);
+
+    // One feature is entitled — the grant was interrupted — and the guild
+    // already holds a much longer subscription.
+    await db.insert(guildEntitlements).values({
+      guildId: GUILD_ID,
+      feature: PREMIUM_FEATURES[0] ?? "scrim_slots",
+      enabled: true,
+      expiresAt: new Date(paidAt.getTime() + durationDays * 86_400_000),
+      source: "premium",
+    });
+
+    await db
+      .insert(guildSettings)
+      .values({ guildId: GUILD_ID, premiumExpiresAt: longer })
+      .onConflictDoUpdate({
+        target: guildSettings.guildId,
+        set: { premiumExpiresAt: longer },
+      });
+
+    const result = await activatePremium(makePurchase(txnId));
+
+    expect(result.outcome).toBe("repaired");
+    expect(await listEntitlements(GUILD_ID)).toHaveLength(PREMIUM_FEATURES.length);
+
+    // The longer subscription is still the one that is running.
+    expect((await getGuildSettings(GUILD_ID))?.premiumExpiresAt).toEqual(longer);
+    expect(result.expiresAt?.getTime()).toBe(longer.getTime());
+  });
+
+  it("does not resurrect a subscription that has already run out", async () => {
+    // A replayed webhook for a purchase whose subscription has lapsed
+    // must not hand the buyer a second set of days.
+    //
+    // The purchase was made thirty days ago and the plan is seven days
+    // long, so the subscription ran out three weeks ago. The grant is
+    // whole — every feature is entitled — and it is in the past, so
+    // nothing happens at all.
+    const userId = nextUserId();
+    const { txnId, durationDays } = await makeTransaction(userId);
+
+    const paidAt = new Date(Date.now() - 30 * 86_400_000);
+    const lapsed = new Date(paidAt.getTime() + durationDays * 86_400_000);
+
+    await db
+      .update(premiumTransactions)
+      .set({ status: "paid", paidAt, rawData: { txnid: txnId } })
+      .where(sql`${premiumTransactions.txnId} = ${txnId}`);
+
+    for (const feature of PREMIUM_FEATURES) {
+      await db.insert(guildEntitlements).values({
+        guildId: GUILD_ID,
+        feature,
+        enabled: true,
+        expiresAt: lapsed,
+        source: "premium",
+      });
+    }
+
+    await db
+      .insert(guildSettings)
+      .values({ guildId: GUILD_ID, premiumExpiresAt: lapsed })
+      .onConflictDoUpdate({
+        target: guildSettings.guildId,
+        set: { premiumExpiresAt: lapsed },
+      });
+
+    const result = await activatePremium(makePurchase(txnId));
+
+    // The grant was whole, so nothing was touched — and the lapsed
+    // subscription is still lapsed.
+    expect(result.outcome).toBe("already_paid");
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(false);
+    expect((await getGuildSettings(GUILD_ID))?.premiumExpiresAt).toEqual(lapsed);
+  });
+});

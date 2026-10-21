@@ -15,6 +15,7 @@ import { forwardMedia, updateThreadStatus } from "../../utils/thread.js";
 
 const command: Command = {
   staffOnly: true,
+  ephemeral: true,
   data: new SlashCommandBuilder()
     .setName("verify")
     .setDescription("Mark the current verification ticket as verified."),

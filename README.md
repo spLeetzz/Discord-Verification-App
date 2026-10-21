@@ -161,6 +161,35 @@ config but marked `enabled: false`. Disabled events are skipped at startup and
 are not read from their sheet, so the bot no longer depends on the old
 spreadsheet. Flip `enabled: true` to bring one back.
 
+## Screenshot verification
+
+The screenshot-verification feature (the `/ssverify` setup, the role it
+grants) reads the text out of a picture and compares two perceptual hashes
+of it, to refuse a picture that was submitted twice.
+
+**There is no local OCR engine.** The bot has no text recognition and no
+image hashing of its own: a remote service does both, and the bot talks to
+it over HTTP.
+
+```dotenv
+# The Quotient-compatible OCR service. Required for screenshot verification.
+OCR_PROVIDER_URL=https://example.com/ocr
+# Optional: sent in the `authorization` header.
+OCR_PROVIDER_KEY=
+# true forces OCR on, false forces it off. Unset = automatic: OCR runs only
+# when a screenshot-verification setup exists.
+OCR_ENABLED=
+```
+
+The service has to answer a `POST` of `[{"url": "..."}]` with
+`[{url, dhash, phash, text}]`, where each hash is 16 hex characters, and
+it has to be able to **fetch the image itself** — so the picture is given to
+it as a publicly reachable URL.
+
+**Without a service, every screenshot is refused.** The feature is not
+silently degraded and nothing is half-verified: a screenshot that cannot be
+checked is not accepted, and nothing is written to the database.
+
 ## Staff commands
 
 | Command | What it does |

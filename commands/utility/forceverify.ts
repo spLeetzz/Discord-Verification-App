@@ -7,6 +7,7 @@ import { forwardMedia, updateThreadStatus } from "../../utils/thread.js";
 
 const command: Command = {
   staffOnly: true,
+  ephemeral: true,
   data: new SlashCommandBuilder()
     .setName("forceverify")
     .setDescription(

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { RESTPostAPIChatInputApplicationCommandsJSONBody } from "discord.js";
 import { isCommand, listCommandFiles } from "./utils/command-files.js";
+import { assertCommandShape } from "./utils/command-shape.js";
 
 // deploy new commands on server
 
@@ -40,6 +41,10 @@ const clientId = requireEnv("BSSA_CLIENT_ID");
 const guildId = requireEnv("GUILD_ID");
 
 try {
+  // Checked before the request, because Discord rejects the whole payload
+  // for one malformed subcommand and names an index rather than a command.
+  assertCommandShape(commands);
+
   console.log(`Deploying ${commands.length} commands to guild ${guildId}...`);
   const data = (await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
     body: commands,

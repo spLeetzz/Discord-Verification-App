@@ -6,6 +6,7 @@ import { buildPinnedContent, parsePinnedField } from "../../utils/embeds.js";
 
 const command: Command = {
   staffOnly: true,
+  ephemeral: true,
   data: new SlashCommandBuilder()
     .setName("setemail")
     .setDescription(

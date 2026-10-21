@@ -1,0 +1,29 @@
+# Local infrastructure for the Quotient port.
+#
+# The bot's own data lives in Postgres now (the Google Sheet stays as the
+# registration sheet for the existing verification flow). Only Postgres is
+# defined here; the bot itself runs from the host with `npm run dev`.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bssa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bssa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bssa}
+      POSTGRES_DB: ${POSTGRES_DB:-bssa}
+    ports:
+      # Host 5433 -> container 5432. 5432 is left free for a system Postgres.
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - bssa-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bssa} -d ${POSTGRES_DB:-bssa}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  bssa-pgdata:

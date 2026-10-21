@@ -5,8 +5,32 @@ import { flushLogs, logger } from "./logger.js";
 export let draining = false;
 export let activeCommands = 0;
 
+type ShutdownHook = () => Promise<void> | void;
+
+const shutdownHooks: ShutdownHook[] = [];
+
+/**
+ * Registers cleanup that has to run before the process exits.
+ *
+ * The bot holds a database pool and a job dispatcher, and neither is
+ * released by `client.destroy()`. Without this the process hangs on exit
+ * waiting for the pool's idle timeout.
+ */
+export function registerShutdownHook(hook: ShutdownHook): void {
+  shutdownHooks.push(hook);
+}
+
 export async function shutdown(client?: Client): Promise<void> {
   logger.info("Shutting down... Flushing logs.");
+
+  for (const hook of shutdownHooks) {
+    try {
+      await hook();
+    } catch (err) {
+      logger.error("[Shutdown] Hook failed:", err);
+    }
+  }
+
   await flushLogs();
   client?.destroy();
   process.exit(0);

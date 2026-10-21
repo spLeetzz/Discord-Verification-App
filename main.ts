@@ -3,14 +3,16 @@
 import { requireEnv } from "./utils/env.js";
 import { Client, Collection, Events, GatewayIntentBits } from "discord.js";
 import { enabledEvents } from "./config/events.js";
+import { closeDatabase } from "./db/client.js";
 import { handleInteraction } from "./handlers/interactions.js";
 import { handleMessage } from "./handlers/messages.js";
 import { loadCommands } from "./handlers/commands.js";
-import { restoreVerificationEmbeds } from "./handlers/startup.js";
+import { stopJobDispatcher } from "./handlers/jobs.js";
+import { restoreVerificationEmbeds, startAreas } from "./handlers/startup.js";
 import { startCache } from "./repo/cache.js";
 import { spreadsheetIdFor } from "./repo/config.js";
 import type { Command } from "./types/command.js";
-import { exitGracefully } from "./utils/graceful-exit.js";
+import { exitGracefully, registerShutdownHook } from "./utils/graceful-exit.js";
 import { logger } from "./utils/logger.js";
 
 // Fail fast, before any network calls, if the environment is incomplete.
@@ -39,6 +41,10 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
+    // The tournament registration path reacts to a ✅ on a message. Without
+    // this intent the reaction event never fires and the feature is dead
+    // without any error (D33).
+    GatewayIntentBits.GuildMessageReactions,
   ],
 });
 
@@ -50,6 +56,7 @@ await startCache();
 client.once(Events.ClientReady, async (readyClient) => {
   logger.info(`Ready! Logged in as ${readyClient.user.username}`);
   await restoreVerificationEmbeds(readyClient);
+  await startAreas(readyClient);
 });
 
 client.on(Events.InteractionCreate, (interaction) => {
@@ -72,5 +79,12 @@ client.on(Events.MessageCreate, (message) => {
 });
 
 client.login(requireEnv("BSSA_DISCORD_BOT_TOKEN"));
+
+// The job dispatcher holds a database pool and a timer; the database holds
+// connections. Both have to be released or the process hangs on exit.
+registerShutdownHook(async () => {
+  stopJobDispatcher();
+  await closeDatabase();
+});
 
 exitGracefully(client);
