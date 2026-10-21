@@ -161,7 +161,8 @@ async function verifyPanel(
 
   if (posted) {
     const sent = panel.embeds.map((embed) => embed.toJSON());
-    const back = posted.embeds.map((embed) => embed.toJSON());
+    // What Discord sent back is plain data, not builders.
+    const back = posted.embeds;
 
     if (back.length !== sent.length) {
       notes.push(`Discord returned ${back.length} embeds, not ${sent.length}.`);
@@ -269,5 +270,10 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   logger.error(`[Verify] ${errorMessage(error)}`);
+
+  if (error instanceof Error && error.stack) {
+    logger.error(error.stack);
+  }
+
   process.exitCode = 1;
 });
