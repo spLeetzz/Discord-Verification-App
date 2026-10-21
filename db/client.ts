@@ -122,27 +122,67 @@ if (databasePath !== null) {
 }
 
 /**
+ * How long a contended statement waits for the writer lock.
+ *
+ * Two seconds is far longer than any of our transactions takes, so a
+ * timeout here means something is genuinely stuck rather than merely
+ * queued. The queue in `db/write-queue.ts` is what keeps it rare.
+ */
+const BUSY_TIMEOUT_MS = 2_000;
+
+/**
  * The libsql client.
  *
  * A local file, opened through the native libsql binding. There is no
  * server, no connection string and no pool: SQLite serialises its own
  * writes, and one bot process is one writer.
  *
- * **There is no busy timeout.** The driver can be told to wait five
- * seconds for the writer lock, and that was the wrong answer: the
- * timeout is applied to *every* connection the driver opens, so it
- * covers the connection a transaction is given — the one that already
- * holds the write lock. Two transactions that overlap in one process
- * then stall for the whole five seconds and one of them fails with
- * `SQLITE_BUSY` anyway. A fast failure is the better answer, and the
- * queue in `db/write-queue.ts` is what makes it a rare one: one writer
- * at a time, in this process, by construction.
+ * **The file is in WAL mode.** That is the setting that decides whether
+ * a read can happen while a write is going on, and the default was the
+ * wrong answer: in rollback-journal mode (`delete`) a writer holds an
+ * exclusive lock on the whole file, so *every* reader waits for it. The
+ * bot's job dispatcher deletes rows every fifteen seconds, and a button
+ * handler that read the database could land on one of those writes, wait
+ * for it, and blow Discord's three-second interaction budget — which
+ * Discord shows the user as "the bot didn't respond in time".
  *
- * Nothing else writes this file: the bot applies its own migrations at
- * boot, and the deploy pipeline has no migration step, so there is no
- * second process to wait for.
+ * WAL fixes the cause: readers and the writer run at the same time, so a
+ * read never waits for a write. It also removes the write-lock upgrade
+ * deadlock that the busy timeout used to make worse — in WAL mode a
+ * reader that later wants to write waits for the writer and then
+ * proceeds, rather than deadlocking with it.
+ *
+ * **The busy timeout is two seconds.** A contended *write* waits its
+ * turn rather than failing instantly, which matters because the timeout
+ * is applied to every connection the driver opens — including the one a
+ * transaction is given, the one that already holds the write lock. The
+ * queue in `db/write-queue.ts` is what keeps that rare: one writer at a
+ * time, in this process, by construction. Two seconds is far longer than
+ * any of our transactions takes, so a timeout here means something is
+ * genuinely stuck rather than merely queued.
  */
-const client = createClient({ url: databaseUrl });
+const client = createClient({ url: databaseUrl, timeout: BUSY_TIMEOUT_MS });
+
+/**
+ * The file is put into WAL mode.
+ *
+ * The pragma is a property of the *file*, not of a connection, so it
+ * sticks: the first run sets it and every run after that is a no-op. It
+ * cannot run inside a transaction, and this is at client creation, so
+ * there is none.
+ */
+await client.execute("PRAGMA journal_mode = WAL");
+
+/**
+ * `synchronous = NORMAL` is the setting WAL is meant to run with.
+ *
+ * In WAL mode the data is in the log, and `NORMAL` means the log is
+ * flushed at the end of a checkpoint rather than at every commit. A
+ * crash can lose the last few transactions, which does not matter for a
+ * bot whose state is a cache of what Discord already holds — and it
+ * takes the fsync out of every write.
+ */
+await client.execute("PRAGMA synchronous = NORMAL");
 
 /**
  * The queue of writes.
