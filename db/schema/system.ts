@@ -252,12 +252,26 @@ export const lockdowns = pgTable(
       .notNull()
       .default(sql`'{}'::text[]`),
     authorId: discordId("author_id").notNull(),
+    /**
+     * The logical key of the lockdown: what it locks, in one string.
+     *
+     * The subject differs by type — a channel lockdown is keyed by its
+     * channel, a maintenance one by its role, a server one by the guild.
+     * Without a single key the table cannot express "one lockdown per
+     * subject", and two moderators can both create a server lockdown, one
+     * of which then dangles and re-locks the server on the next unlock.
+     *
+     * The repository writes it in the same statement as the row, and the
+     * unique index is what actually enforces it.
+     */
+    lockKey: text("lock_key").notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
     index("lockdowns_guild_id_type_idx").on(t.guildId, t.type),
     index("lockdowns_channel_id_type_idx").on(t.channelId, t.type),
+    unique("lockdowns_lock_key_unique").on(t.lockKey),
     oneOfCheck("lockdowns_type_check", t.type, LOCKDOWN_TYPES),
   ],
 );

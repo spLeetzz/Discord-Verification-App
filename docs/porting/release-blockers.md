@@ -123,3 +123,56 @@ character between two words breaks an equality check a human would pass.
 
 **Validate each rule against the real screenshots** this bot's users will
 submit.
+
+---
+
+# Found by the independent audit
+
+These came out of the wave-1 verification audit, not from the outside world.
+They are being fixed now; they are listed here so nothing is lost.
+
+## B11. The OCR "off" switch and the `any_ss` fail-open
+
+The `any_ss` screenshot type has **no rules at all**, so a rule-based refusal
+does not apply to it: if the OCR is broken — a Tesseract worker that failed to
+start — an `any_ss` setup would accept **any image at all** and grant the
+role.
+
+`isOcrDisabled` only detects the *disabled* provider, not a *broken* local
+one, so it could not have caught this on its own. The refusal has to be
+explicit: **a submission whose OCR produced no text is refused, whatever the
+rule set says.**
+
+This one is security-relevant — a screenshot-verification feature that grants
+a role must fail closed. It is being fixed in the identity area.
+
+## B12. The ban-expiry job could delete a newer ban
+
+The source deleted an expired ban by `(scrim_id, user_id)` with no expiry
+check — but the source *skipped* a re-ban of an already-banned user, so a
+stale job could never reach a newer ban. The port's upsert makes the re-ban
+reachable, so a stale job can now lift a **permanent** ban an hour after it
+was applied, with no message.
+
+The fix: put the ban's identity in the job payload, predicate the delete on
+it, and cancel the job on a manual unban.
+
+## B13. The lockdown table had no unique constraint on its logical key
+
+Two moderators could both create a server lockdown, and the unlock picked one
+arbitrarily. The second row dangled and re-locked the server on the next
+unlock. **Fixed** — `lockdowns.lock_key` with a unique index, and the
+insert is conflict-safe.
+
+## B14. The `idp` room-credential command was missing
+
+It was assigned to the tourneys area and never built, which left the
+`msg_delete` job event with a handler and no producer — and left the
+"a room password must not linger in a channel" property unimplemented.
+
+## B15. The success-message entitlement also blocked *removing* the message
+
+A guild whose entitlement lapsed while it had a success message set could no
+longer open the panel, so the message could never be removed — and the bot
+kept posting it on every successful verification, forever. The gate should
+be "may this guild **set** one?", not "may this panel open?".

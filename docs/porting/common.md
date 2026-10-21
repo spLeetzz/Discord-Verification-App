@@ -620,7 +620,7 @@ inventories; the ones fixed outright:
 |---|---|---|---|
 | `unlock server` calls `.first()` on a coroutine | `mod/__init__.py:609` | the command always raises | fix the query |
 | `lock server` without a duration | `mod/__init__.py:568-578` | `AttributeError` on `None.dt` | create the row only when there is a duration |
-| `RoleRevertButton` ternary binds `await` to the wrong branch | `mod/views/role.py:35` | the revert button never reverts | parenthesise the ternary |
+| `RoleRevertButton` ternary binds `await` to the wrong branch | `mod/views/role.py:35` | ~~the revert button never reverts~~ **not a bug — see the correction below** | none needed; the source parsed correctly |
 | `maintenance off` uses `discord.utils.get` to find a channel by name | `mod/__init__.py:736` | maintenance channels are never deleted | use a name predicate |
 | `tag` on an embed tag also sends the raw content | `utility/__init__.py:250-256` | duplicate output | return after the embed |
 | `money` uses `User.get` | `quomisc/__init__.py:270` | crashes for users with no row | `get_or_none` |
@@ -651,6 +651,35 @@ inventories; the ones fixed outright:
 | `hide`/`unhide` replaced the whole `@everyone` overwrite | `utility/__init__.py:518,546` | other `@everyone`-level tweaks were dropped | only the one permission that changes is written — discord.js merges |
 | `nuke` claimed to recreate the category but only replaced the channels | `utility/__init__.py:560` | the description lied | it replaces the channels, keeps the category, and says so in the output |
 | The action reason was truncated | `mod/converters.py:88-95` | the 512-character cap is on the **total**, after the prefix | the reason is **refused** rather than truncated, with the counts in the message |
+
+**A correction: the `RoleRevertButton` ternary was never a bug.** I recorded
+it as one, and the moderation engineer "fixed" it — behaviourally identically,
+but with a comment that misstates Python's grammar. An independent audit
+settled it: `ast.parse` on Python 3.14 gives
+`IfExp(test=…, body=Await(remove_roles), orelse=Await(add_roles))`, so the
+source's `await _.remove_roles(...) if self.take_role else await _.add_roles(...)`
+parses as `(await remove_roles) if take_role else (await add_roles)` — the
+conditional expression binds looser than I assumed. **The source's revert
+worked, and the port's implementation is correct.**
+
+A "fix" recorded against a non-bug is a claim nobody will defend. The
+moderation engineer's comment at `modules/moderation/views/role-revert.ts`
+must be corrected to say what the code actually does.
+
+The two items below are the ones I got wrong in the other direction — I
+recorded them as source quirks to preserve, and the audit shows they are
+live bugs in the port. Both are now being fixed:
+
+- **The ban-expiry job deletes a newer ban.** The source deleted a ban by
+  `(scrim_id, user_id)` with no expiry check, but the source *skipped* a
+  re-ban of an already-banned user, so the stale job could not reach a newer
+  ban. The port's upsert makes the re-ban reachable, so the stale job now
+  lifts a permanent ban. **Fix:** put the ban's identity in the job payload,
+  predicate the delete on it, and cancel the job on a manual unban.
+- **The `lockdowns` table has no unique constraint on its logical key**
+  (`guild_id`, `type`, `channel_id`). Two moderators can both create a
+  guild-type lockdown, and the unlock picks one arbitrarily because the
+  listing has no `ORDER BY`. **Fix:** a unique index on the logical key.
 
 **A deviation, ratified:** the `lockdowns` row is **always** created, with a
 null `expire_time` when the lockdown has no duration. The row is the state —
