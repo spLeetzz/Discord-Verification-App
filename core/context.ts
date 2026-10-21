@@ -239,9 +239,14 @@ function scheduleDelete(interaction: RepliableInteraction, seconds: number): voi
  */
 export async function clearComponentMenu(
   answer: MessageComponentInteraction,
+  confirmation = "Done.",
 ): Promise<void> {
   try {
-    await answer.update({ components: [] });
+    // **The message must not end up empty.** A menu that is the whole
+    // message — which is what a channel picker is — would be nothing at
+    // all once the menu is gone, and Discord refuses to send an empty
+    // message. The confirmation keeps it alive and says what happened.
+    await answer.update({ content: confirmation, components: [] });
     return;
   } catch (error) {
     logger.warn(
@@ -254,7 +259,7 @@ export async function clearComponentMenu(
   // ephemeral response is changed.
   try {
     await answer.deferUpdate();
-    await answer.editReply({ components: [] });
+    await answer.editReply({ content: confirmation, components: [] });
     return;
   } catch (error) {
     logger.warn(
@@ -267,7 +272,7 @@ export async function clearComponentMenu(
   // interaction is the one thing that matters: an unanswered one
   // expires, and the user is told the bot did not respond.
   await answer.reply({
-    content: "Done.",
+    content: confirmation,
     flags: MessageFlags.Ephemeral,
   });
 }
