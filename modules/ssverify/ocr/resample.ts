@@ -108,12 +108,13 @@ function precomputeCoefficients(inSize: number, outSize: number): Coefficients {
     }
 
     const taps = to - from;
+    const used = taps > 0 ? taps : 0;
     start[index] = from;
-    count[index] = taps > 0 ? taps : 0;
+    count[index] = used;
 
     const base = index * ksize;
 
-    for (let tap = 0; tap < count[index]; tap += 1) {
+    for (let tap = 0; tap < used; tap += 1) {
       raw[base + tap] = lanczos((tap + from - center + 0.5) / filterScale);
     }
   }
@@ -206,7 +207,6 @@ function resampleHorizontal(
 function resampleVertical(
   source: Buffer,
   sourceWidth: number,
-  sourceHeight: number,
   targetHeight: number,
   coefficients: Coefficients,
 ): Buffer {
@@ -285,11 +285,11 @@ export function resizeLanczos(
       return intermediate;
     }
 
-    return resampleVertical(intermediate, targetWidth, sourceHeight, targetHeight, vertical);
+    return resampleVertical(intermediate, targetWidth, targetHeight, vertical);
   }
 
   const intermediate = vertical
-    ? resampleVertical(source, sourceWidth, sourceHeight, targetHeight, vertical)
+    ? resampleVertical(source, sourceWidth, targetHeight, vertical)
     : source;
 
   if (!horizontal) {

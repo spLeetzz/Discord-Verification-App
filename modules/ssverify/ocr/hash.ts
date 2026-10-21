@@ -31,7 +31,7 @@
  * The resampling is Pillow's, not `sharp`'s — see `resample.ts`. With
  * `sharp`'s Lanczos the hashes drift a few bits away from the reference,
  * and the measured distance between two screenshots of the same thing grows
- * to roughly twice what the reference measures, which moves the threshold.
+ * well past what the reference measures, which moves the threshold.
  */
 
 import sharp from "sharp";
@@ -62,6 +62,17 @@ const DHASH_SAMPLE_WIDTH = DHASH_COLUMNS + 1;
 const PHASH_COLUMNS = 8;
 const PHASH_ROWS = 8;
 const PHASH_SAMPLE_SIZE = 32;
+
+/**
+ * The magnitude below which a DCT coefficient counts as zero.
+ *
+ * The transform sums 32 products of 8-bit values and cosines, so a
+ * coefficient that is mathematically zero comes out as a rounding error of
+ * a few times 1e-12. A coefficient that carries any information at all is
+ * at least a hundredth of a grey level, so nothing real is lost by
+ * dropping everything below this.
+ */
+const COEFFICIENT_NOISE_FLOOR = 1e-6;
 
 const HEX_PATTERN = /^[0-9a-fA-F]+$/;
 
@@ -138,12 +149,10 @@ export async function computeHashes(
 ): Promise<ImageHashes> {
   const image = await readGrayscale(source);
 
-  const [dhash, phash] = await Promise.all([
-    dhashFromGrayscale(image),
-    phashFromGrayscale(image),
-  ]);
-
-  return { dhash, phash };
+  return {
+    dhash: dhashFromGrayscale(image),
+    phash: phashFromGrayscale(image),
+  };
 }
 
 /**
@@ -260,7 +269,15 @@ function phashFromGrayscale(image: GrayscaleImage): string {
 
   for (let row = 0; row < PHASH_ROWS; row += 1) {
     for (let column = 0; column < PHASH_COLUMNS; column += 1) {
-      lowFrequency.push(coefficients[row * PHASH_SAMPLE_SIZE + column] ?? 0);
+      const value = coefficients[row * PHASH_SAMPLE_SIZE + column] ?? 0;
+
+      // A coefficient that is mathematically zero comes out of the transform
+      // as a rounding error of a few times 1e-12. Left alone, those errors
+      // move the median off zero, and then every coefficient that *is*
+      // exactly zero falls on the wrong side of it. The reference
+      // implementation gets exact zeros out of its transform, so the errors
+      // are dropped here to land on the same answer.
+      lowFrequency.push(Math.abs(value) < COEFFICIENT_NOISE_FLOOR ? 0 : value);
     }
   }
 

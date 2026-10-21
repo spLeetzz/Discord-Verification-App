@@ -207,9 +207,34 @@ Key decisions:
 Tag check, easy tag, screenshot verification, the ssverify config UI, and the
 group-management UI.
 
-- The **OCR provider** is `modules/ssverify/ocr/` — **owned by another
-  engineer**. Import it; do not write your own. If it is not there yet, code
-  against the documented `OcrProvider` interface and note it.
+- The **OCR provider** is `modules/ssverify/ocr/` — **owned by another engineer,
+  now delivered**. Import it; do not write your own. Read
+  `modules/ssverify/ocr/README.md` before you start.
+- **The hash implementation is bit-exact with Python's `imagehash` 4.3.2** —
+  verified against a 14-image corpus by the OCR engineer, and independently
+  re-verified on the two reference anchor values (a uniform image gives
+  dHash `0000000000000000` and pHash `8000000000000000`; a re-encoded JPEG
+  gives distance 0 from the original). This matters because the duplicate
+  threshold of 7 is calibrated against that library. **All stored hashes must
+  come from one implementation** — a database mixing local and remote hashes
+  would compare two different conventions.
+- Store the hashes as the 16-character lowercase hex strings. `hexToHash`
+  **throws** on anything that is not exactly 16 hex characters, so a
+  truncated row fails loudly instead of comparing as "a different picture".
+- The duplicate check is on the **dHash**. The pHash is stored alongside it,
+  as Quotient did, but the threshold was calibrated on the dHash.
+- `OcrResult.text` is **already normalised** (lowercased, whitespace
+  stripped). Normalise the expected side with the same function. Use
+  `OcrResult.rawText` for literal checks like `"SUBSCRIBE "`, which the
+  normalisation would otherwise destroy.
+- The provider is **serialised per instance** — one screenshot at a time.
+  Call `warmup()` at boot so the Tesseract model download happens at startup
+  rather than on the first submission, and `shutdown()` on exit.
+- **OCR takes about 2 seconds per screenshot** — defer the interaction. The
+  hashing alone is about 28ms.
+- If the OCR cannot start, the text comes back empty and every text rule
+  rejects. **It fails closed** — a broken OCR rejects a screenshot rather
+  than waving it through.
 - **D13**: `ss_submissions.ss_config_id` is a plain FK with `ON DELETE
   CASCADE`. The join table is gone.
 - **D15**: one `assertEntitled` helper for every premium gate. The check
