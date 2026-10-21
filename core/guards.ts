@@ -16,14 +16,13 @@
 
 import { PermissionFlagsBits } from "discord.js";
 import type {
+  GuildTextBasedChannel,
   Interaction,
   PermissionResolvable,
   Role,
-  TextBasedChannel,
 } from "discord.js";
 import { getGuildMember } from "../utils/member.js";
-import type { EntitlementLookup } from "./premium.js";
-import type { PremiumFeature } from "./premium.js";
+import type { EntitlementLookup, PremiumFeature } from "./premium.js";
 
 /**
  * A guard.
@@ -104,13 +103,14 @@ export async function hasGuildPermissions(
 export async function hasChannelPermissions(
   interaction: Interaction,
   permissions: PermissionResolvable,
-  channel?: TextBasedChannel | null,
+  channel?: GuildTextBasedChannel | null,
 ): Promise<boolean> {
   const member = await getGuildMember(interaction);
   if (!member) return false;
 
   const target = channel ?? interaction.channel;
-  if (!target) return false;
+
+  if (!target || target.isDMBased()) return false;
 
   return target.permissionsFor(member).has(permissions);
 }
@@ -156,14 +156,14 @@ export async function canManageRole(
   const botMember = guild.members.me;
 
   if (!botMember) {
-    return `I could not find my own member record, so I cannot check ${role.mention}.`;
+    return `I could not find my own member record, so I cannot check ${role.toString()}.`;
   }
 
   const botTopRole = botMember.roles.highest;
 
   // 2. The role is above the bot.
   if (botTopRole.position <= role.position) {
-    return `The position of ${role.mention} is above my toprole (${botTopRole.mention})`;
+    return `The position of ${role.toString()} is above my toprole (${botTopRole.toString()})`;
   }
 
   const authorTopRole = author.roles.highest;
@@ -171,17 +171,17 @@ export async function canManageRole(
   // 3. The role is above the caller. The guild owner may manage anything
   //    they can see.
   if (author.id !== guild.ownerId && authorTopRole.position <= role.position) {
-    return `The position of ${role.mention} is above your top role (${authorTopRole.mention})`;
+    return `The position of ${role.toString()} is above your top role (${authorTopRole.toString()})`;
   }
 
   // 4. The role is more powerful than the caller.
   if (role.permissions.bitfield > author.permissions.bitfield) {
-    return `${role.mention} has higher permissions than you.`;
+    return `${role.toString()} has higher permissions than you.`;
   }
 
   // 5. The role has administrator.
   if (role.permissions.has(PermissionFlagsBits.Administrator)) {
-    return `${role.mention} has administrator permissions.`;
+    return `${role.toString()} has administrator permissions.`;
   }
 
   return null;

@@ -647,6 +647,19 @@ inventories; the ones fixed outright:
 | The premium purchase notification races the database write | `server/app/payment.py:87` vs `:90-91` | the confirmation DM shows a stale expiry | write first, then notify |
 | `made_premium` appends the user id, not the guild id | `server/app/payment.py:85` | wrong ids recorded | append the guild id |
 | The `clear`/`autorole`/`lock` groups declare a required positional alongside subcommands | `mod/__init__.py:54`, `utility/__init__.py:101`, `mod/__init__.py:488` | ambiguous parsing; the `None` fallbacks may be dead | slash commands are either a group or a command — the ambiguity disappears |
+| A bulk purge silently reported a smaller number than it deleted | `mod/utils.py:38` | `filter_old=True` swallowed the messages Discord refused | old messages are filtered and **counted**, and the report says how many could not be deleted |
+| `hide`/`unhide` replaced the whole `@everyone` overwrite | `utility/__init__.py:518,546` | other `@everyone`-level tweaks were dropped | only the one permission that changes is written — discord.js merges |
+| `nuke` claimed to recreate the category but only replaced the channels | `utility/__init__.py:560` | the description lied | it replaces the channels, keeps the category, and says so in the output |
+| The action reason was truncated | `mod/converters.py:88-95` | the 512-character cap is on the **total**, after the prefix | the reason is **refused** rather than truncated, with the counts in the message |
+
+**A deviation, ratified:** the `lockdowns` row is **always** created, with a
+null `expire_time` when the lockdown has no duration. The row is the state —
+the double-lock guard reads it and the unlock finds the prior permission state
+through it. A lockdown with no record cannot be guarded against or unlocked.
+The *job* is only created when there is a duration, because a job is a
+schedule and there is nothing to schedule. The prior permission state lives on
+`lockdowns.prior_state jsonb` (a property of the lockdown, not of the timer),
+so a lockdown with no duration still restores correctly across a restart.
 
 **Preserved deliberately:** the "Main Channel can't be edited" stub button
 (`slotm/editor.py:66-69`), the `idp` command deleting the invoking message

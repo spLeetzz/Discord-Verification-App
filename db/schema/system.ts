@@ -189,6 +189,31 @@ export const blocklist = pgTable(
 );
 
 /**
+ * The permission state a channel had *before* a lockdown locked it.
+ *
+ * Quotient's unlock path forced `send_messages = True` on every channel it
+ * had locked, which opened channels that a moderator had deliberately
+ * write-locked beforehand. Restoring the exact prior state needs the prior
+ * state.
+ */
+export interface LockdownChannelState {
+  /**
+   * Whether the channel had an explicit `@everyone` overwrite before the
+   * lock. When it did not, unlocking must **remove** the overwrite the lock
+   * created rather than set it to a value.
+   */
+  existed: boolean;
+  /**
+   * The permission value before the lock: `true`, `false`, or `null` for
+   * "inherit from the category".
+   */
+  value: boolean | null;
+}
+
+/** Prior permission state, keyed by channel id. */
+export type LockdownPriorState = Record<string, LockdownChannelState>;
+
+/**
  * A lockdown record: channels or a whole guild that are locked until a
  * moderator lifts them or the timer expires.
  */
@@ -204,6 +229,15 @@ export const lockdowns = pgTable(
       .notNull()
       .default(sql`'{}'::text[]`),
     expireTime: timestamp("expire_time", { withTimezone: true, mode: "date" }),
+    /**
+     * What each channel's permission looked like before the lock.
+     *
+     * This lives on the lockdown rather than in the scheduled job's payload
+     * because it is a property of the lockdown, not of the timer. A lockdown
+     * with no duration has no job at all, and its prior state still has to
+     * survive a restart.
+     */
+    priorState: jsonb("prior_state").$type<LockdownPriorState | null>(),
     authorId: discordId("author_id").notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),

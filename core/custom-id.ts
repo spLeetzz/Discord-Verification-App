@@ -199,6 +199,27 @@ export class TokenStore<T> {
     return value;
   }
 
+  /**
+   * Replaces the value behind a token and refreshes its expiry.
+   *
+   * @returns whether the token was live.
+   */
+  set(token: string, value: T): boolean {
+    const entry = this.entries.get(token);
+
+    if (!entry || entry.expiresAt <= this.now()) {
+      this.entries.delete(token);
+      return false;
+    }
+
+    this.entries.set(token, {
+      value,
+      expiresAt: this.now() + this.ttlMs,
+    });
+
+    return true;
+  }
+
   /** True when the token points at a live value. */
   has(token: string): boolean {
     return this.get(token) !== undefined;

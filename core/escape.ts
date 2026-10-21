@@ -134,5 +134,8 @@ export function escapeMarkdown(
 export function escapeMentions(text: string): string {
   const bare = text.replace(BARE_MENTION, "@\u200b$1");
 
-  return bare.replace(ANGLE_MENTION, (match: string, inner: string) => `\\<${inner}`);
+  return bare.replace(
+    ANGLE_MENTION,
+    (_match: string, inner: string) => `\\<${inner}>`,
+  );
 }
