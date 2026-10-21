@@ -94,8 +94,8 @@ The lifecycle is an explicit value (D26):
 1. The old slot rows are deleted and a fresh free row is created for
    every slot number.
 2. The reserved slots become ordinary claimed slots.
-3. `status` becomes `open`, `opened_at` is set, `closed_at` is cleared
-   and `slotlist_message_id` is cleared.
+3. `status` becomes `open`, `opened_at` is set and `closed_at` is
+   cleared.
 4. The open message is posted in the registration channel, with the
    ping role.
 5. The registration channel is opened to the open role.
@@ -103,14 +103,20 @@ The lifecycle is an explicit value (D26):
 
 **Opening resets the slots** — the source did the same.
 
+**Opening does not forget the published slot list.** The message id
+stays on the row, so the next close re-renders that message in place
+rather than sending a second one. A second message would be an orphan,
+with a panel of its own acting on the same slots. See
+[the published slot list](#the-published-slot-list).
+
 ### Closing
 
 1. `status` becomes `closed`, `closed_at` is set and
    `time_elapsed_seconds` records how long the registration was open.
 2. The close message is posted in the registration channel.
 3. The registration channel is locked again.
-4. If the scrim asked for it, the slotlist is published and its message
-   id is stored on the row.
+4. If the scrim asked for it, the **slot area** publishes the slot list
+   and records its message id on the row.
 
 ### The daily jobs
 
@@ -130,6 +136,38 @@ is dropped and a fresh one is armed, so a scrim whose schedule was
 edited while the bot was down still opens. The source simply gave up.
 
 ---
+
+## The published slot list
+
+The **slot area** owns the published slot list: the message, the
+buttons (`slots:slotlist_*`) and the operations behind them. This area
+owns the lifecycle — open, close, the daily `scrim_open` job, the
+autoclean — and publishes the list *through* the slot area's API:
+
+```ts
+import { publishSlotList } from "../slots/index.js";
+
+const messageId = await publishSlotList(scrimId);
+```
+
+The rules that follow from that:
+
+- **This area never writes `scrims.slotlist_message_id`.** The slot
+  area is the only writer. Two writers means whichever re-renders last
+  wins, and an id that points at a message nobody can edit. The column
+  is not even in this area's `ScrimUpdate` type, so a write would not
+  compile.
+- **This area renders no `scrims:slotlist:*` button.** The manager's
+  slotlist preview carries the slot area's row — Edit, Punish, Info —
+  so the manager reaches the same operations the published message
+  carries. One namespace for these buttons across the bot.
+- **Publishing answers `null` rather than throwing** when there is
+  nothing to publish: no scrim, no channel, or no team in a slot. The
+  publisher is idempotent, too: a scrim that already has a published
+  list has it re-rendered in place.
+
+The import direction is one-way (scrims → slots), so there is no
+cycle.
 
 ## Slots (D14)
 
@@ -325,7 +363,7 @@ the row. The wizard's state is a token, not a row.
 | Reserved slots | The scrim's slots with their reservations, Reserve Slot, Remove Reserved. |
 | Autoclean | The two toggles and the time the pass runs at. |
 | Design | The open message, the close message, the slotlist design, and the **Auto Slotlist** switch. |
-| Slotlist | Repost, Edit, Punish, Info — and the published message carries the same three buttons. |
+| Slotlist | The manager's preview of the list, with the **slot area's** row — Edit, Punish, Info — and the way back to the manager panel. |
 
 ### The ban matrix
 
@@ -382,6 +420,14 @@ wrote the column.
 The substitution runs over the title, the description, every field and
 the footer — the source replaced the keywords across the whole
 serialised embed, so a keyword in a field name was replaced too.
+
+**The slotlist template does not govern the published list.** The
+published list is rendered by the slot area, which has no template of
+its own, so a design set here shows in the `/scrims slotlist` post and
+nowhere else — not in the published message, and not in the manager's
+preview either, whose body is a plain list. One renderer for the
+preview and the published list is the next step; the `<<keyword>>`
+engine moves into `core/` so the two areas share it.
 
 ---
 

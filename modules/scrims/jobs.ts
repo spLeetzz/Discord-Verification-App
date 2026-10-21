@@ -16,15 +16,15 @@
  */
 
 import { ChannelType, PermissionFlagsBits } from "discord.js";
-import type { Client, Guild, TextChannel } from "discord.js";
+import type { Client, Guild } from "discord.js";
 import { run } from "../../core/fire-and-forget.js";
 import { dayName } from "../../core/time.js";
 import { logger } from "../../utils/logger.js";
+import { publishSlotList, refreshSlotListMessage } from "../slots/index.js";
 import * as repo from "./repo.js";
 import * as service from "./service.js";
 import { shouldRunAutoclean } from "./schedule.js";
 import { shouldAutoOpen } from "./state.js";
-import { publishSlotlist, refreshSlotlistMessage } from "./views/slotlist.js";
 import { openScrimInGuild } from "./views/lifecycle.js";
 import { writeBanLog } from "./views/ban-log.js";
 
@@ -346,59 +346,41 @@ export async function rebuildChannelCache(): Promise<void> {
   });
 }
 
-/** The channel a scrim's slotlist lives in. */
-export function slotlistChannel(
-  guild: Guild,
-  channelId: string,
-): TextChannel | null {
-  const channel = guild.channels.cache.get(channelId);
-
-  if (!channel) return null;
-
-  if (channel.type !== ChannelType.GuildText) return null;
-
-  return channel;
-}
-
-/** Refreshes a published slotlist message. */
-export async function refreshPublishedSlotlist(
-  guild: Guild,
-  scrimId: string,
-): Promise<void> {
+/**
+ * Refreshes a published slotlist message.
+ *
+ * The slot area owns the published message: it finds it through the
+ * scrim row that holds its id and re-renders it. This function only
+ * decides that a refresh is due.
+ */
+export async function refreshPublishedSlotlist(scrimId: string): Promise<void> {
   const scrim = await repo.getScrim(scrimId);
 
-  if (!scrim || !scrim.slotlistMessageId) return;
+  if (!scrim?.slotlistMessageId) return;
 
-  const channel = slotlistChannel(guild, scrim.slotlistChannelId);
-
-  if (!channel) return;
-
-  const slots = await repo.listSlots(scrim.id);
-
-  await refreshSlotlistMessage(channel, scrim, slots);
+  await refreshSlotListMessage(scrim.slotlistMessageId);
 }
 
-/** Publishes a slotlist and stores its message id. */
-export async function publishAndStore(
-  guild: Guild,
-  scrimId: string,
-): Promise<void> {
-  const scrim = await repo.getScrim(scrimId);
+/**
+ * Publishes a scrim's slot list.
+ *
+ * The slot area publishes it: it renders the body, the panel and the
+ * message id, and it records the id in `scrims.slotlist_message_id`.
+ * **This area does not write that column** — one writer, or whichever
+ * re-renders last wins.
+ *
+ * There is nothing to publish when no team has claimed a slot; the
+ * publisher answers `null` rather than throwing, so there is no guard
+ * here.
+ */
+export async function publishAndStore(scrimId: string): Promise<void> {
+  const messageId = await publishSlotList(scrimId);
 
-  if (!scrim) return;
+  if (!messageId) return;
 
-  const channel = slotlistChannel(guild, scrim.slotlistChannelId);
-
-  if (!channel) return;
-
-  const slots = await repo.listSlots(scrim.id);
-  const claimed = slots.filter((slot) => slot.state === "claimed");
-
-  if (claimed.length === 0) return;
-
-  const message = await publishSlotlist(channel, scrim, claimed);
-
-  await repo.updateScrim(scrim.id, { slotlistMessageId: message.id });
+  logger.info(
+    `[Scrims] Published the slot list ${messageId} of the scrim ${scrimId}.`,
+  );
 }
 
 /** Runs a background job without letting it crash the process. */

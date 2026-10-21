@@ -98,11 +98,15 @@ export async function openRegistration(scrimId: string): Promise<OpenResult> {
 
   const now = new Date();
 
+  // The published slot list is **not** forgotten here. The slot area
+  // owns that message, and it re-renders it in place when the scrim
+  // closes again — a second message would be an orphan, with a panel
+  // of its own acting on the same slots. This area does not write
+  // `slotlist_message_id` at all.
   const updated = await repo.updateScrim(scrim.id, {
     status: "open",
     openedAt: now,
     closedAt: null,
-    slotlistMessageId: null,
   });
 
   if (!updated) throw new ScrimError("This scrim no longer exists.");

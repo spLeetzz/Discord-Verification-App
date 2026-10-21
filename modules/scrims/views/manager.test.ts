@@ -164,6 +164,21 @@ describe("the other panels", () => {
     );
   });
 
+  it("the slotlist panel carries the slot area's buttons", () => {
+    // The slot area owns the panel. There is one namespace for these
+    // buttons across the bot — `slots:slotlist_*` — and the scrims area
+    // renders none of its own.
+    const ids = buttonIds(buildSlotlistPanel(scrim(), []));
+
+    expect(ids).toContain(`slots:slotlist_edit:${scrim().id}`);
+    expect(ids).toContain(`slots:slotlist_punish:${scrim().id}`);
+    expect(ids).toContain(`slots:slotlist_info:${scrim().id}`);
+
+    for (const id of ids) {
+      expect(id.startsWith("scrims:slotlist:")).toBe(false);
+    }
+  });
+
   it("the design panel carries the auto-slotlist switch", () => {
     // The column is honoured when the scrim closes, so the switch that
     // sets it cannot live in a place nobody can reach.

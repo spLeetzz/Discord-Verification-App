@@ -50,7 +50,8 @@ import {
   scrimPosition,
   updatePanel,
 } from "./handlers.js";
-import { buildSlotlistPanel, publishSlotlist } from "./slotlist.js";
+import { buildSlotlistPanel } from "./slotlist.js";
+import { publishSlotList } from "../../slots/index.js";
 import { writeBanLog } from "./ban-log.js";
 import { openRegistrationFlow, closeRegistrationFlow } from "./lifecycle.js";
 import { punishSelection } from "./modal-handlers.js";
@@ -1606,7 +1607,15 @@ async function changeTeam(
   );
 }
 
-/** Reposts the slotlist into the slotlist channel. */
+/**
+ * Reposts the slotlist into the slotlist channel.
+ *
+ * The "Repost Slotlist" button is no longer rendered — the slot area's
+ * row took its place in the manager's preview — so this is reached
+ * from a manager message that was rendered before the handoff. It
+ * publishes through the slot area, so the result is the message the
+ * slot area would have published.
+ */
 async function repostSlotlist(
   interaction: ButtonInteraction,
   scrim: Awaited<ReturnType<typeof repo.getScrim>> & object,
@@ -1620,20 +1629,25 @@ async function repostSlotlist(
     return;
   }
 
-  const channel = interaction.guild?.channels.cache.get(scrim.slotlistChannelId);
+  // The slot area publishes the list: it renders the body, the panel
+  // and the message id, and it records the id on the row. Publishing is
+  // idempotent — a scrim that already has a published list has it
+  // re-rendered in place rather than a second message being sent.
+  const messageId = await publishSlotList(scrim.id);
 
-  if (!channel || !("send" in channel)) {
-    await fail(interaction, "I could not find the slotlist channel.");
+  if (!messageId) {
+    await fail(
+      interaction,
+      "I could not publish the slotlist — is the slotlist channel still there?",
+    );
 
     return;
   }
 
-  const message = await publishSlotlist(channel as never, scrim, claimed);
-
-  await repo.updateScrim(scrim.id, { slotlistMessageId: message.id });
+  const link = `https://discord.com/channels/${scrim.guildId}/${scrim.slotlistChannelId}/${messageId}`;
 
   await interaction.followUp({
-    content: `Slotlist sent: ${message.url}`,
+    content: `Slotlist sent: ${link}`,
     flags: MessageFlags.Ephemeral,
   });
 }

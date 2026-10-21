@@ -19,7 +19,7 @@ import * as service from "../service.js";
 import { renderCloseMessage, renderOpenMessage } from "../render.js";
 import type { ScrimRecord } from "../types.js";
 import { buildScrimPanel } from "./manager.js";
-import { publishSlotlist } from "./slotlist.js";
+import { publishSlotList } from "../../slots/index.js";
 import { fail } from "./handlers.js";
 
 /**
@@ -240,22 +240,16 @@ export async function closeScrimInGuild(
   await toggleChannel(guild, fresh, false);
 
   if (fresh.autoslotlist && result.registered.length > 0) {
-    const slotlistChannel = guild.channels.cache.get(fresh.slotlistChannelId);
-
-    if (slotlistChannel && slotlistChannel.type === ChannelType.GuildText) {
-      run(
-        async () => {
-          const message = await publishSlotlist(
-            slotlistChannel,
-            fresh,
-            result.registered,
-          );
-
-          await repo.updateScrim(fresh.id, { slotlistMessageId: message.id });
-        },
-        "scrims.publishSlotlist",
-      );
-    }
+    // The slot area publishes the list: it renders the body, the panel
+    // and the message id, and it records the id on the row. This area
+    // decides *when* a slot list is published; the slot area decides
+    // what it looks like.
+    run(
+      async () => {
+        await publishSlotList(fresh.id);
+      },
+      "scrims.publishSlotList",
+    );
   }
 
   return result;

@@ -283,14 +283,20 @@ export async function createScrim(values: CreateScrimValues): Promise<string> {
   return id;
 }
 
-/** The fields the editor may write. */
+/**
+ * The fields the editor may write.
+ *
+ * `slotlistMessageId` is **not** in the list: the slot area owns the
+ * published slot list, and it is the only writer of the column that
+ * remembers the message. Two writers means whichever re-renders last
+ * wins.
+ */
 export type ScrimUpdate = Partial<
   Pick<
     typeof scrims.$inferInsert,
     | "name"
     | "registrationChannelId"
     | "slotlistChannelId"
-    | "slotlistMessageId"
     | "roleId"
     | "openRoleId"
     | "pingRoleId"

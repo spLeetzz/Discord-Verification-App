@@ -1,29 +1,50 @@
 /**
- * The published slotlist.
+ * The scrims area's slotlist view.
  *
- * The slotlist is a message in the slotlist channel with three buttons:
- * **Edit**, **Punish** and **Info**. It has to survive a restart, so the
- * custom id carries the scrim id (D18) and the message id is stored on
- * the scrim row.
+ * The **published** slot list belongs to the slot area: it owns the
+ * panel, the buttons (`slots:slotlist_*`) and the operations behind
+ * them. This area keeps the lifecycle — open, close, the daily
+ * `scrim_open` job, the autoclean — and publishes the list *through*
+ * the slot area's API (`modules/slots/index.js`), so there is one
+ * implementation of what a published slot list looks like and one
+ * namespace for its buttons.
  *
- * The Edit panel's "Add Team", "Remove Team" and "Change Team" buttons
- * are state transitions on the `slots` table. The source's "Add Team"
- * offered `range(start_from, 30)` — twenty slot numbers that did not
- * exist for a scrim with fewer slots (B4). Ours offers the scrim's own
- * numbers.
+ * The import direction is one-way (scrims → slots), so there is no
+ * cycle.
+ *
+ * What is left here is the **manager's view** of a scrim's slotlist:
+ * the preview a moderator sees on the manager panel. Its body is this
+ * area's own, and its buttons are the slot area's.
  */
 
 import { ButtonStyle, EmbedBuilder } from "discord.js";
-import type { Message, TextChannel } from "discord.js";
 import { EMBED_COLOR } from "../../../core/constants.js";
-import { discordTimestamp } from "../../../core/time.js";
-import { renderSlotlist, slotListLines } from "../render.js";
+import { buildSlotListPanel as slotAreaRows } from "../../slots/index.js";
+import { slotListLines } from "../render.js";
 import type { ScrimRecord, SlotRecord } from "../types.js";
 import { assertComponentBudget, button, buttonRow } from "./components.js";
 import { scrimsId } from "./ids.js";
 import type { PanelComponents } from "./manager.js";
 
-/** The panel that manages the slotlist. */
+/**
+ * The panel that manages the slotlist.
+ *
+ * The body is this area's own: a plain list of the claimed slots. The
+ * `slotlist_format` template (D32) does **not** govern it — it
+ * governs the `/scrims slotlist` post, and the published list is the
+ * slot area's. One renderer for the preview and the published list is
+ * the next step, and it is not this area's to write.
+ *
+ * The buttons are the **slot area's** — `slots:slotlist_edit`,
+ * `slots:slotlist_punish` and `slots:slotlist_info` — so the manager
+ * reaches the same operations the published message carries, and there
+ * is one namespace for them across the bot. This area renders no
+ * `scrims:slotlist:*` button of its own any more.
+ *
+ * The second row is the way back to the manager panel. Every other
+ * panel in this area has one, and this preview is rendered *on* the
+ * manager's message, so without it there would be no way back.
+ */
 export function buildSlotlistPanel(
   scrim: ScrimRecord,
   slots: readonly SlotRecord[],
@@ -40,29 +61,8 @@ export function buildSlotlistPanel(
     );
 
   const rows: PanelComponents = [
+    ...slotAreaRows(scrim.id),
     buttonRow(
-      button({
-        customId: scrimsId("slotlist", scrim.id, "repost"),
-        label: "Repost Slotlist",
-        style: ButtonStyle.Primary,
-      }),
-      button({
-        customId: scrimsId("slotlist", scrim.id, "edit"),
-        label: "Edit Slotlist",
-        style: ButtonStyle.Secondary,
-      }),
-      button({
-        customId: scrimsId("slotlist", scrim.id, "punish"),
-        label: "Punish",
-        style: ButtonStyle.Danger,
-        disabled: claimed.length === 0,
-      }),
-      button({
-        customId: scrimsId("slotlist", scrim.id, "info"),
-        label: "Info",
-        style: ButtonStyle.Secondary,
-        disabled: claimed.length === 0,
-      }),
       button({
         customId: scrimsId("manager", scrim.id),
         label: "Main Menu",
@@ -74,96 +74,4 @@ export function buildSlotlistPanel(
   assertComponentBudget(rows);
 
   return { embeds: [embed], components: rows };
-}
-
-/**
- * Publishes the slotlist.
- *
- * The message carries the Edit / Punish / Info panel, so it keeps
- * working after a restart: the custom id names the scrim, and the scrim
- * row names the message.
- */
-export async function publishSlotlist(
-  channel: TextChannel,
-  scrim: ScrimRecord,
-  slots: readonly SlotRecord[],
-): Promise<Message> {
-  const embed = renderSlotlist(scrim, {
-    name: scrim.name,
-    elapsedSeconds: scrim.timeElapsedSeconds,
-    openTime: scrim.openTime,
-    slots: slotListLines(slots),
-  });
-
-  const rows: PanelComponents = [
-    buttonRow(
-      button({
-        customId: scrimsId("slotlist", scrim.id, "edit"),
-        label: "Edit",
-        emoji: "📝",
-        style: ButtonStyle.Success,
-      }),
-      button({
-        customId: scrimsId("slotlist", scrim.id, "punish"),
-        label: "Punish",
-        emoji: "🛠️",
-        style: ButtonStyle.Danger,
-      }),
-      button({
-        customId: scrimsId("slotlist", scrim.id, "info"),
-        label: "Info",
-        emoji: "🔍",
-        style: ButtonStyle.Success,
-      }),
-    ),
-  ];
-
-  assertComponentBudget(rows);
-
-  return channel.send({ embeds: [embed], components: rows });
-}
-
-/**
- * Refreshes the published slotlist message.
- *
- * The message id is on the scrim row, so the message is found again
- * after a restart without anybody rediscovering it by name.
- */
-export async function refreshSlotlistMessage(
-  channel: TextChannel,
-  scrim: ScrimRecord,
-  slots: readonly SlotRecord[],
-): Promise<void> {
-  if (!scrim.slotlistMessageId) return;
-
-  const embed = renderSlotlist(scrim, {
-    name: scrim.name,
-    elapsedSeconds: scrim.timeElapsedSeconds,
-    openTime: scrim.openTime,
-    slots: slotListLines(slots),
-  });
-
-  const message = await channel.messages
-    .fetch(scrim.slotlistMessageId)
-    .catch(() => null);
-
-  if (!message) return;
-
-  await message.edit({ embeds: [embed] }).catch(() => undefined);
-}
-
-/** The moment a slotlist was published, for the footer. */
-export function publishedAt(slots: readonly SlotRecord[]): Date | null {
-  const first = slots[0];
-
-  return first ? first.createdAt : null;
-}
-
-/** The relative time of the last update, for the panel. */
-export function updatedAgo(slots: readonly SlotRecord[]): string {
-  const published = publishedAt(slots);
-
-  if (!published) return "never";
-
-  return discordTimestamp(published, "R");
 }

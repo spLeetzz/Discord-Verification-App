@@ -467,3 +467,46 @@ scheme are untouched.
 | `npm run smoke` | **106/106**. |
 | Live Postgres | The `ban_logs` upsert verified inside a transaction that was rolled back: one row per guild, re-setting replaces the channel, no rows left behind. |
 | The bypass, re-introduced on purpose | **2 tests failed** — the bypass test and the guard-4 test. The fix was restored afterwards. |
+
+---
+
+## 9. The published slot list belongs to the slot area
+
+The slot area and this area both published a slot list, with a panel of
+their own each, and whichever re-rendered last won. **The manager
+ruled that the slot area owns the panel** — its version has the
+four-mode ban matrix, the reason modal and the real `total_slots`
+bound — and this area keeps the lifecycle.
+
+So this area publishes through the slot area's API
+(`modules/slots/index.js`) instead of publishing a message of its own:
+
+```ts
+export async function publishSlotList(scrimId: string, channelId?: string): Promise<string | null>;
+export async function refreshSlotListMessage(messageId: string): Promise<void>;
+export function buildSlotListPanel(scrimId: string): ActionRowBuilder<ButtonBuilder>[];
+```
+
+What changed here:
+
+- `views/slotlist.ts` — `publishSlotlist` and `refreshSlotlistMessage`
+  are **gone**, and the manager's slotlist preview carries the slot
+  area's row instead of this area's.
+- `jobs.ts` — `publishAndStore` calls `publishSlotList` and
+  `refreshPublishedSlotlist` calls `refreshSlotListMessage`. **This
+  area does not write `scrims.slotlist_message_id` any more** — not
+  even to clear it, because the column is not in this area's
+  `ScrimUpdate` type any more, so a write would not compile.
+- `views/lifecycle.ts` — the close flow publishes through
+  `publishSlotList`.
+- `views/button-handlers.ts` — "Repost Slotlist" publishes through
+  `publishSlotList`.
+
+The import direction is one-way (scrims → slots), so there is no
+cycle. The slotlist **template** still governs this area's own
+`/scrims slotlist` post; the published list is rendered by the slot
+area and does not honour it yet — and neither does the manager's
+preview, whose body is a plain list. One renderer for the preview and
+the published list is the next step, and it is not this area's to
+write.
+
