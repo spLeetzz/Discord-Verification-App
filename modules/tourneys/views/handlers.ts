@@ -25,6 +25,8 @@
  */
 
 import { EmbedBuilder, MessageFlags } from "discord.js";
+import { logger } from "../../../utils/logger.js";
+import { errorMessage } from "../../../utils/errors.js";
 import type {
   ActionRowBuilder,
   ButtonBuilder,
@@ -117,7 +119,11 @@ export async function acknowledge(
 ): Promise<void> {
   if (interaction.deferred || interaction.replied) return;
 
-  await interaction.deferUpdate().catch(() => undefined);
+  await interaction.deferUpdate().catch((error: unknown) => {
+        logger.warn(
+          `[Panel] The panel could not be edited: ${errorMessage(error)}`,
+        );
+      });
 }
 
 /**
@@ -137,14 +143,22 @@ export async function renderPanel(
   if (message) {
     await message
       .edit({ embeds: panel.embeds, components: panel.components })
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        logger.warn(
+          `[Panel] The panel could not be edited: ${errorMessage(error)}`,
+        );
+      });
 
     return;
   }
 
   await interaction
     .editReply({ embeds: panel.embeds, components: panel.components })
-    .catch(() => undefined);
+    .catch((error: unknown) => {
+        logger.warn(
+          `[Panel] The panel could not be edited: ${errorMessage(error)}`,
+        );
+      });
 }
 
 /**
@@ -158,7 +172,11 @@ export async function acknowledgeAndRender(
   panel: Panel,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferUpdate().catch(() => undefined);
+    await interaction.deferUpdate().catch((error: unknown) => {
+        logger.warn(
+          `[Panel] The panel could not be edited: ${errorMessage(error)}`,
+        );
+      });
   }
 
   await renderPanel(interaction, panel);
@@ -202,7 +220,11 @@ export async function fail(
         embeds: [embed],
         flags: ephemeral ? MessageFlags.Ephemeral : undefined,
       })
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        logger.warn(
+          `[Panel] The panel could not be edited: ${errorMessage(error)}`,
+        );
+      });
 
     return;
   }
@@ -212,5 +234,9 @@ export async function fail(
       embeds: [embed],
       flags: ephemeral ? MessageFlags.Ephemeral : undefined,
     })
-    .catch(() => undefined);
+    .catch((error: unknown) => {
+        logger.warn(
+          `[Panel] The panel could not be edited: ${errorMessage(error)}`,
+        );
+      });
 }

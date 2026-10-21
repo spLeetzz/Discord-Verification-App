@@ -316,6 +316,27 @@ export async function replaceComponentContent(
 }
 
 /**
+ * Clears a menu off a message without emptying it.
+ *
+ * **A message that is nothing but a menu cannot be emptied.** Discord
+ * refuses to send an empty message, so clearing the components of a
+ * bare menu is rejected — and the user is shown "interaction failed"
+ * for a choice they made correctly.
+ *
+ * So the content is kept, and a menu-only message is given a line to
+ * stand on. The confirmation is the message the user is left looking at,
+ * so it says what happened rather than "closed".
+ */
+export async function clearMenu(
+  message: Message,
+  confirmation = "Closed.",
+): Promise<void> {
+  const content = message.content.length > 0 ? message.content : confirmation;
+
+  await message.edit({ content, components: [] });
+}
+
+/**
  * A refusal.
  *
  * Red embed, the message as its description.

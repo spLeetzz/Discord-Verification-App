@@ -108,7 +108,7 @@ async function onSlotPick(
   // The menu is answered by the modal, so it must not stay live: a
   // second press would find no slot to rename.
   run(
-    () => interaction.message.edit({ components: [] }),
+    () => interaction.message.edit({ content: "Closed.", components: [] }),
     "tourneys.clearSlotPickMenu",
   );
 

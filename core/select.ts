@@ -422,7 +422,7 @@ export async function awaitSelect(
     try {
       // The edit lands on the message the menu is on — the interaction's
       // reply, or the follow-up the menu was sent as.
-      await handle.edit({ components: [] });
+      await handle.edit({ content: "Closed.", components: [] });
     } catch {
       // The interaction expired. Nothing to clean up.
     }
@@ -658,7 +658,7 @@ async function collectAutoSelect(
     try {
       // The edit lands on the message the menu is on — the interaction's
       // reply, or the follow-up the menu was sent as.
-      await handle.edit({ components: [] });
+      await handle.edit({ content: "Closed.", components: [] });
     } catch {
       // The interaction expired. Nothing to clean up.
     }

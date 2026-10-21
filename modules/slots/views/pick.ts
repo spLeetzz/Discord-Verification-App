@@ -273,7 +273,7 @@ export function clearPickMenu(
   interaction: AnySelectMenuInteraction,
 ): void {
   run(
-    () => interaction.message.edit({ components: [] }),
+    () => interaction.message.edit({ content: "Closed.", components: [] }),
     "slots.clearPickMenu",
   );
 }

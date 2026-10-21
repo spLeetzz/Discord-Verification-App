@@ -22,6 +22,7 @@ import type {
   EmbedBuilder,
 } from "discord.js";
 import { plural } from "../../../core/text.js";
+import { errorMessage } from "../../../utils/errors.js";
 import {
   actionRow,
   dangerButton,
@@ -179,7 +180,11 @@ export async function refreshPublicMessage(
 
   await message
     .edit({ embeds: [embed], components: rows })
-    .catch(() => undefined);
+    .catch((error: unknown) => {
+        logger.warn(
+          `[Panel] The panel could not be edited: ${errorMessage(error)}`,
+        );
+      });
 }
 
 /**
