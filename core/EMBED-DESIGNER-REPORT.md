@@ -152,7 +152,7 @@ instead of a token.
 
 ## The tests
 
-`core/embed-builder.test.ts` — 25 tests, all driving the **router**, the
+`core/embed-builder.test.ts` — 24 tests, all driving the **router**, the
 way a real press arrives:
 
 | test | what it pins down |

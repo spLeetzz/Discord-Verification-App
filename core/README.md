@@ -415,6 +415,11 @@ its custom id.
   dispatch on the second segment, or namespace the two so that neither can
   shadow the other. The router logs a warning, naming both prefixes, the
   area and the winner, when it sees such a pair.
+  **The screenshot-verification area is the worked example:** it registers
+  `identity:ssmod` once and its ids carry a *surface* — `identity:ssmod:wizard:save`
+  is the wizard's save, `identity:ssmod:edit:delete` is the editor's delete —
+  so the handler never has to guess whether a target is a draft token or a
+  row id.
 - **The segments of a custom id and the segments a handler switches on must
   be the same ones.** An id of `tourneys:select:pick` carries the action
   `select` and the sub-action `pick`; a handler that compares the action

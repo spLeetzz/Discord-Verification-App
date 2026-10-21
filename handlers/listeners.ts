@@ -1,4 +1,5 @@
 import type { Client } from "discord.js";
+import { registerEmbedDesignerInteractions } from "../core/embed-builder.js";
 import { registerButton, registerModal, registerSelect } from "../core/router.js";
 import { logger } from "../utils/logger.js";
 import { registerJobHandler } from "./jobs.js";
@@ -156,6 +157,12 @@ export async function registerAreas(client: Client): Promise<{
   loaded: string[];
   missing: string[];
 }> {
+  // The embed designer is core's, and its ids are core's, so core registers
+  // them. It is called explicitly here rather than relying on an area
+  // happening to import core/embed-builder.js — the wiring should not
+  // depend on somebody else's import graph.
+  registerEmbedDesignerInteractions();
+
   const loaded: string[] = [];
   const missing: string[] = [];
 
