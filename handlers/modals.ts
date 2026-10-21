@@ -2,6 +2,7 @@ import { ChannelType } from "discord.js";
 import type { ModalSubmitInteraction } from "discord.js";
 import { EVENTS, isEventKey } from "../config/events.js";
 import { dispatch } from "../core/router.js";
+import { escapeMentions } from "../core/escape.js";
 import { findParticipant, isEmailVerified } from "../repo/sheet.js";
 import type { TicketSubmission } from "../types/ticket.js";
 import { errorMessage } from "../utils/errors.js";
@@ -54,7 +55,8 @@ export async function handleModal(
   // verified for the event.
   if (isEmailVerified(eventKey, submission.email)) {
     await interaction.editReply({
-      content: `❌ **${submission.email}** has already been verified for ${cfg.displayName}.\n\nEach team can only be verified once. Please contact staff if this is a mistake.`,
+      content: `❌ **${escapeMentions(submission.email)}** has already been verified for ${cfg.displayName}.\n\nEach team can only be verified once. Please contact staff if this is a mistake.`,
+      allowedMentions: { parse: [] },
     });
     return;
   }

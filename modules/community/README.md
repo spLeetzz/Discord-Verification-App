@@ -84,6 +84,12 @@ Two things stop it, and the area uses both:
    text in the confirmation. The markdown is left alone — a tag is a
    canned message and its formatting is the point of it.
 
+> **The price of the rule.** A tag whose body mentions somebody no longer
+> pings them: the mention is escaped, like the raw path has always done
+> it. A tag is for saying something to a channel, not for reaching a
+> person — `/tag transfer` is the command that tells a member they have
+> been given a tag, and it mentions them on purpose.
+
 > **The default belongs in `core/context.ts`.** Every area that posts
 > user content has this problem, not this one. `views/reply.ts` is the
 > area's own copy of the rule, so the area is safe whether or not the

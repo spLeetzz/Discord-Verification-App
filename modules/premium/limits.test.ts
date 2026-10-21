@@ -6,6 +6,13 @@
  * did not enforce, and its perk table and its socket perk list had
  * drifted from each other. Here the perk list is generated from the one
  * configuration object, and this test proves it.
+ *
+ * The table used to live in two places — `core/premium.ts` and
+ * `modules/premium/limits.ts` — with a test comparing the two copies.
+ * That test guarded the *copies*, not the business rule: it could only
+ * say "these two lists agree", never "this is the limit a user gets".
+ * There is one table now, and the test pins **the numbers**, which is
+ * what every area of the codebase reads.
  */
 
 import { describe, expect, it } from "vitest";
@@ -19,12 +26,24 @@ import {
   FREE_TIER,
   FREE_TIER_LABELS,
 } from "./limits.js";
+import type { CappedFreeTierKey } from "./limits.js";
 import { FEATURE_LABELS, PREMIUM_FEATURES } from "./types.js";
+
+/**
+ * The keys the table has an entry for.
+ *
+ * The table is a partial record over the gated features, so this is the
+ * allowances the free tier caps — and the ones the perk list is built
+ * from.
+ */
+const CAPPED_KEYS = Object.keys(FREE_TIER) as CappedFreeTierKey[];
 
 describe("modules/premium/limits — the free tier", () => {
   it("has the limits the code enforces", () => {
     // These are the real caps, not the ones the old perk table
-    // advertised.
+    // advertised. They are business data: every area reads them, so a
+    // refactor that quietly changed a number would change what a user
+    // gets, and this is the test that says so.
     expect(FREE_TIER).toEqual({
       scrims: 3,
       tourneys: 1,
@@ -37,27 +56,33 @@ describe("modules/premium/limits — the free tier", () => {
     });
   });
 
+  it("is the canonical table, not a copy of it", () => {
+    // `core/premium.ts` owns the table; this module re-exports it. The
+    // check is identity, not equality: a copy would have the same numbers
+    // and still be a second thing to keep in step.
+    expect(FREE_TIER).toBe(CORE_FREE_TIER);
+  });
+
   it("reads a limit by name", () => {
     expect(freeTierLimit("scrims")).toBe(3);
     expect(freeTierLimit("tourneys")).toBe(1);
   });
 
-  it("treats a thing with no allowance entry as unlimited", () => {
-    expect(freeTierLimit("snipes")).toBeNull();
-    expect(freeTierLimit("")).toBeNull();
+  it("treats a gated thing with no allowance entry as unlimited", () => {
+    // The table is a partial record over the gated features: the ones
+    // the free tier does not cap have no entry in it, and no entry
+    // means no limit.
+    expect(Object.hasOwn(FREE_TIER, "slotReminders")).toBe(false);
+    expect(freeTierLimit("slotReminders")).toBeNull();
+    expect(freeTierLimit("idpTransfer")).toBeNull();
+    expect(freeTierLimit("screenshotTypes")).toBeNull();
+    expect(freeTierLimit("successMessage")).toBeNull();
   });
 
   it("has a label for every allowance", () => {
-    for (const key of Object.keys(FREE_TIER) as (keyof typeof FREE_TIER)[]) {
+    for (const key of CAPPED_KEYS) {
       expect(FREE_TIER_LABELS[key]).toBeTruthy();
     }
-  });
-
-  it("matches the copy of the table in core", () => {
-    // `core/premium.ts` carries a second copy of this table. It is not
-    // the canonical one — `modules/premium/limits.ts` is — but the two
-    // must not drift, so this test fails the moment they do.
-    expect(CORE_FREE_TIER).toEqual(FREE_TIER);
   });
 });
 
@@ -66,7 +91,7 @@ describe("modules/premium/limits — the perk list", () => {
     const lines = buildPerkLines();
     const text = buildPerkText();
 
-    for (const key of Object.keys(FREE_TIER) as (keyof typeof FREE_TIER)[]) {
+    for (const key of CAPPED_KEYS) {
       const limit = FREE_TIER[key];
 
       // Every allowance appears, with the number the gate enforces.

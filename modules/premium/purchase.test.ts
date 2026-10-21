@@ -496,29 +496,46 @@ describe("modules/premium/purchase — the repair", () => {
   it("does not resurrect a subscription that has already run out", async () => {
     // A replayed webhook for a purchase whose subscription has lapsed
     // must not hand the buyer a second set of days.
+    //
+    // The purchase was made thirty days ago and the plan is seven days
+    // long, so the subscription ran out three weeks ago. The grant is
+    // whole — every feature is entitled — and it is in the past, so
+    // nothing happens at all.
     const userId = nextUserId();
-    const { txnId } = await makeTransaction(userId);
+    const { txnId, durationDays } = await makeTransaction(userId);
 
-    const lapsed = new Date(Date.now() - 86_400_000);
+    const paidAt = new Date(Date.now() - 30 * 86_400_000);
+    const lapsed = new Date(paidAt.getTime() + durationDays * 86_400_000);
 
     await db
       .update(premiumTransactions)
-      .set({ status: "paid", paidAt: lapsed, rawData: { txnid: txnId } })
+      .set({ status: "paid", paidAt, rawData: { txnid: txnId } })
       .where(sql`${premiumTransactions.txnId} = ${txnId}`);
 
-    await db.insert(guildEntitlements).values({
-      guildId: GUILD_ID,
-      feature: "scrim_slots",
-      enabled: true,
-      expiresAt: lapsed,
-      source: "premium",
-    });
+    for (const feature of PREMIUM_FEATURES) {
+      await db.insert(guildEntitlements).values({
+        guildId: GUILD_ID,
+        feature,
+        enabled: true,
+        expiresAt: lapsed,
+        source: "premium",
+      });
+    }
+
+    await db
+      .insert(guildSettings)
+      .values({ guildId: GUILD_ID, premiumExpiresAt: lapsed })
+      .onConflictDoUpdate({
+        target: guildSettings.guildId,
+        set: { premiumExpiresAt: lapsed },
+      });
 
     const result = await activatePremium(makePurchase(txnId));
 
-    // The grant was whole — every feature is there — so nothing was
-    // touched.
+    // The grant was whole, so nothing was touched — and the lapsed
+    // subscription is still lapsed.
     expect(result.outcome).toBe("already_paid");
     expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(false);
+    expect((await getGuildSettings(GUILD_ID))?.premiumExpiresAt).toEqual(lapsed);
   });
 });

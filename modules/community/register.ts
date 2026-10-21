@@ -43,10 +43,13 @@ export { autoPurgeChannels } from "./cache.js";
 
 export {
   checkAutoPurgeAdmission,
+  checkMemberQuota,
   isReservedTagName,
   normaliseTagName,
   splitTimedText,
   validateTagName,
+  MAX_REMINDERS_PER_MEMBER,
+  MAX_TAGS_PER_MEMBER,
   RESERVED_TAG_WORDS,
   TAG_CONTENT_MAX_LENGTH,
   TAG_NAME_MAX_LENGTH,
@@ -55,6 +58,9 @@ export {
 export type {
   AutoPurgeAdmission,
   AutoPurgeRefusal,
+  QuotaAdmission,
+  QuotaRefusal,
+  QuotaSubject,
   TagNameRejection,
   TagNameValidation,
   TimedText,

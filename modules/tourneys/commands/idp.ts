@@ -24,6 +24,7 @@
 
 import { SlashCommandBuilder } from "discord.js";
 import { respond } from "../../../core/context.js";
+import { logger } from "../../../utils/logger.js";
 import type { Command } from "../../../types/command.js";
 import { canUseTourneyMod } from "../guards.js";
 import * as repo from "../repo.js";
@@ -33,6 +34,27 @@ import {
   IDP_LIFETIME_MINUTES,
   IDP_LIFETIME_MS,
 } from "../views/idp.js";
+
+/**
+ * What may safely be said about a failure.
+ *
+ * The error may carry the **request body** — and the request body of a
+ * failed post is the room password. So the log line gets the error's
+ * name and its status, and nothing else: no message, no stack, no body.
+ */
+function safeFailure(error: unknown): string {
+  if (typeof error !== "object" || error === null) return "unknown";
+
+  const name =
+    "name" in error && typeof error.name === "string" ? error.name : "Error";
+
+  const status =
+    "status" in error && typeof error.status === "number"
+      ? error.status
+      : undefined;
+
+  return status === undefined ? name : `${name} (${status})`;
+}
 
 /** The command. */
 export const idpCommand: Command = {
@@ -112,26 +134,69 @@ export const idpCommand: Command = {
       return;
     }
 
-    const message = await channel.send({
-      // The ping is the only thing in the content: a mention inside an
-      // embed does not ping, so the role has to be mentioned out here.
-      content: pingRole ? `<@&${pingRole.id}>` : undefined,
-      embeds: [buildIdpEmbed({ roomId, password, map })],
-      components: buildIdpComponents(),
-      allowedMentions: {
-        // Only the role the caller named may be pinged. Nothing else — not
-        // @everyone, and not the room id or the password.
-        parse: [],
-        roles: pingRole ? [pingRole.id] : [],
-      },
-    });
+    const message = await channel
+      .send({
+        // The ping is the only thing in the content: a mention inside an
+        // embed does not ping, so the role has to be mentioned out here.
+        content: pingRole ? `<@&${pingRole.id}>` : undefined,
+        embeds: [buildIdpEmbed({ roomId, password, map })],
+        components: buildIdpComponents(),
+        allowedMentions: {
+          // Only the role the caller named may be pinged. Nothing else —
+          // not @everyone, and not the room id or the password.
+          parse: [],
+          roles: pingRole ? [pingRole.id] : [],
+        },
+      })
+      .catch((error: unknown) => {
+        // The error may carry the request body, and the request body
+        // holds the password. The log line says what kind of failure it
+        // was and nothing more.
+        logger.error(
+          `[Tourneys] The room-credential post failed: ${safeFailure(error)}.`,
+        );
 
-    // The message deletes itself. The job row carries the two ids the
-    // deletion needs and nothing else — in particular, not the password.
-    await repo.scheduleMessageDelete(
-      { channelId: channel.id, messageId: message.id },
-      new Date(Date.now() + IDP_LIFETIME_MS),
-    );
+        return null;
+      });
+
+    if (!message) {
+      await respond(
+        interaction,
+        { content: "I could not post the room details. Please try again." },
+        true,
+      );
+
+      return;
+    }
+
+    try {
+      // The message deletes itself. The job row carries the two ids the
+      // deletion needs and nothing else — in particular, not the
+      // password.
+      await repo.scheduleMessageDelete(
+        { channelId: channel.id, messageId: message.id },
+        new Date(Date.now() + IDP_LIFETIME_MS),
+      );
+    } catch (error) {
+      // No job means no deletion, and a message with a password in it
+      // that nothing will ever delete. Take it back down now.
+      await message.delete().catch(() => undefined);
+
+      logger.error(
+        `[Tourneys] The room-credential deletion could not be armed: ${safeFailure(error)}.`,
+      );
+
+      await respond(
+        interaction,
+        {
+          content:
+            "I could not arm the deletion, so the details were taken down again. Please try again.",
+        },
+        true,
+      );
+
+      return;
+    }
 
     await respond(
       interaction,

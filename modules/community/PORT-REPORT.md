@@ -5,7 +5,7 @@ and the `reminder` cog: tags, snipe, auto-roles, auto-purge, reminders, the
 durable job scheduler's consumers, and the command-usage log.
 
 **Status: complete.** `npm run typecheck` is clean for my files, `npm test` is
-green for my files (9 files, 111 tests), and `npm run smoke` is still 106/106.
+green for my files (9 files, 113 tests), and `npm run smoke` is still 106/106.
 The whole repository typechecks. At the time of writing, two tests in
 `modules/tourneys/` fail; that area is in flight, and the failures are not
 mine and are not in my files.

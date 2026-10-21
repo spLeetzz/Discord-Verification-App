@@ -20,6 +20,7 @@ import {
   amountsEqual,
   constantTimeEquals,
   formatAmount,
+  isFailureStatus,
   isPayuOrigin,
   isSuccessfulStatus,
   parseAmount,
@@ -29,6 +30,7 @@ import {
   payuResponseHash,
   payuResponseHashCandidates,
   verifyPayuCallback,
+  verifyPayuFailureCallback,
 } from "./payu.js";
 import type {
   PayuCallbackPayload,
@@ -661,5 +663,181 @@ describe("modules/premium/payu — the status", () => {
     expect(isSuccessfulStatus("pending")).toBe(false);
     expect(isSuccessfulStatus("")).toBe(false);
     expect(isSuccessfulStatus(undefined)).toBe(false);
+  });
+
+  it("recognises a payment that did not go through", () => {
+    // PayU documents three outcomes — `success`, `failure` and
+    // `pending` — and says to treat the last two as failed.
+    expect(isFailureStatus("failure")).toBe(true);
+    expect(isFailureStatus("pending")).toBe(true);
+    expect(isFailureStatus("FAILURE")).toBe(true);
+    expect(isFailureStatus(" failure ")).toBe(true);
+  });
+
+  it("does not call a success or a silence a failure", () => {
+    expect(isFailureStatus("success")).toBe(false);
+    expect(isFailureStatus("SUCCESS")).toBe(false);
+    expect(isFailureStatus("")).toBe(false);
+    expect(isFailureStatus(undefined)).toBe(false);
+  });
+});
+
+describe("modules/premium/payu — the failure callback", () => {
+  const expectation = {
+    txnId: INPUT.txnId,
+    amount: INPUT.amount,
+    credentials: CREDENTIALS,
+  };
+
+  /**
+   * A failure callback the gateway would send: the same fields as a
+   * successful one, with the status inside the signature.
+   */
+  function makeFailurePayload(
+    overrides: Partial<PayuCallbackPayload> = {},
+  ): PayuCallbackPayload {
+    const status = overrides.status ?? "failure";
+
+    return {
+      txnid: INPUT.txnId,
+      amount: INPUT.amount,
+      productinfo: INPUT.productInfo,
+      firstname: INPUT.firstName,
+      email: INPUT.email,
+      status,
+      hash: payuResponseHash(CREDENTIALS, {
+        txnId: INPUT.txnId,
+        amount: INPUT.amount,
+        productInfo: INPUT.productInfo,
+        firstName: INPUT.firstName,
+        email: INPUT.email,
+        status,
+      }),
+      ...overrides,
+    };
+  }
+
+  it("accepts a signed failure callback", () => {
+    const result = verifyPayuFailureCallback(makeFailurePayload(), expectation);
+
+    expect(result.ok).toBe(true);
+
+    if (result.ok) {
+      expect(result.status).toBe("failure");
+      expect(result.signed).toBe(true);
+    }
+  });
+
+  it("refuses a callback for another transaction", () => {
+    const result = verifyPayuFailureCallback(
+      makeFailurePayload({ txnid: "somebody-elses" }),
+      expectation,
+    );
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) expect(result.code).toBe("unknown_transaction");
+  });
+
+  it("refuses a callback signed for another merchant", () => {
+    const result = verifyPayuFailureCallback(
+      makeFailurePayload({ key: "somebody-elses" }),
+      expectation,
+    );
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) expect(result.code).toBe("wrong_merchant");
+  });
+
+  it("refuses a callback that reports a success", () => {
+    const result = verifyPayuFailureCallback(
+      makeFailurePayload({ status: "success" }),
+      expectation,
+    );
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) expect(result.code).toBe("not_a_failure");
+  });
+
+  it("refuses a callback with no status at all", () => {
+    const result = verifyPayuFailureCallback(
+      makeFailurePayload({ status: "" }),
+      expectation,
+    );
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) expect(result.code).toBe("not_a_failure");
+  });
+
+  it("refuses a callback with the wrong amount", () => {
+    const result = verifyPayuFailureCallback(
+      makeFailurePayload({ amount: "1.00" }),
+      expectation,
+    );
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) expect(result.code).toBe("wrong_amount");
+  });
+
+  it("refuses a callback whose signature does not verify", () => {
+    const result = verifyPayuFailureCallback(
+      makeFailurePayload({ hash: "0".repeat(128) }),
+      expectation,
+    );
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) expect(result.code).toBe("bad_signature");
+  });
+
+  it("refuses a callback from a foreign origin", () => {
+    const result = verifyPayuFailureCallback(makeFailurePayload(), {
+      ...expectation,
+      origin: "https://payu.evil.example",
+    });
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) expect(result.code).toBe("wrong_origin");
+  });
+
+  it("takes an unsigned callback only from the gateway's own page", () => {
+    // A browser posting from another site carries that site's origin,
+    // not the gateway's — so an unsigned callback is only believable
+    // when it came from the gateway.
+    const payload = makeFailurePayload({ hash: "" });
+
+    const foreign = verifyPayuFailureCallback(payload, {
+      ...expectation,
+      origin: "https://payu.evil.example",
+    });
+
+    expect(foreign.ok).toBe(false);
+
+    if (!foreign.ok) expect(foreign.code).toBe("wrong_origin");
+
+    const accepted = verifyPayuFailureCallback(payload, {
+      ...expectation,
+      origin: "https://secure.payu.in",
+    });
+
+    expect(accepted.ok).toBe(true);
+
+    if (accepted.ok) expect(accepted.signed).toBe(false);
+  });
+
+  it("refuses an unsigned callback that came from nowhere", () => {
+    const result = verifyPayuFailureCallback(makeFailurePayload({ hash: "" }), {
+      ...expectation,
+      origin: undefined,
+    });
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) expect(result.code).toBe("no_signature");
   });
 });

@@ -43,9 +43,33 @@ import {
   IDP_LIFETIME_MS,
 } from "./views/idp.js";
 
+/**
+ * The log lines the area wrote.
+ *
+ * The logger is mocked so that "the password never reaches a log line"
+ * is a thing the test can *check* rather than a thing it has to trust.
+ */
+const logged = vi.hoisted(() => ({ lines: [] as string[] }));
+
+vi.mock("../../utils/logger.js", () => {
+  const record =
+    (level: string) =>
+    (...args: unknown[]) => {
+      logged.lines.push(`${level} ${args.map((arg) => String(arg)).join(" ")}`);
+    };
+
+  return {
+    logger: {
+      info: record("INFO"),
+      warn: record("WARN"),
+      error: record("ERROR"),
+      debug: record("DEBUG"),
+    },
+  };
+});
+
 /** The prefix of every message id this file makes. */
 const MESSAGE_ID_PREFIX = "idp-test-message";
-
 /** The message id the handler tests use. Nothing writes it to a row. */
 const HANDLER_MESSAGE_ID = `${MESSAGE_ID_PREFIX}-handler`;
 
@@ -124,6 +148,8 @@ interface FakeOptions {
   readonly staff?: boolean;
   /** Has the interaction been deferred? Defaults to true. */
   readonly deferred?: boolean;
+  /** Should the post fail? Defaults to false. */
+  readonly failSend?: boolean;
 }
 
 /** One answer the fake gave. */
@@ -136,6 +162,7 @@ interface FakeReply {
 function fakeInteraction(options: FakeOptions = {}) {
   const sent: { readonly payload: unknown }[] = [];
   const replies: FakeReply[] = [];
+  const deleted: string[] = [];
   const messageId = nextMessageId();
 
   const channel = {
@@ -143,7 +170,24 @@ function fakeInteraction(options: FakeOptions = {}) {
     send: vi.fn(async (payload: unknown) => {
       sent.push({ payload });
 
-      return { id: messageId };
+      if (options.failSend) {
+        // The shape of a Discord failure: the error carries the request
+        // body, and the request body is the room password.
+        const error = new Error("500: Internal Server Error") as Error & {
+          requestBody: unknown;
+        };
+
+        error.requestBody = { json: payload };
+
+        throw error;
+      }
+
+      return {
+        id: messageId,
+        delete: async () => {
+          deleted.push(messageId);
+        },
+      };
     }),
   };
 
@@ -195,7 +239,7 @@ function fakeInteraction(options: FakeOptions = {}) {
     followUp: vi.fn(answer("followUp")),
   } as unknown as ChatInputCommandInteraction;
 
-  return { interaction, sent, replies, channel, messageId };
+  return { interaction, sent, replies, deleted, channel, messageId };
 }
 
 /**
@@ -309,6 +353,44 @@ describe("the room-credential command", () => {
   it("replies ephemerally, and never with the password", () => {
     // D23: the flag the dispatcher defers with.
     expect(idpCommand.ephemeral).toBe(true);
+  });
+
+  it("keeps the password out of the log when the post fails", async () => {
+    logged.lines.length = 0;
+
+    const { interaction, replies } = fakeInteraction({ failSend: true });
+
+    await idpCommand.execute(interaction);
+
+    // The error carried the request body, and the request body is the
+    // password. The log line must not have it.
+    expect(logged.lines.length).toBeGreaterThan(0);
+    expect(logged.lines.join("\n")).not.toContain(PASSWORD);
+
+    // And the reply does not either.
+    const payload = replies[0]?.payload as { content: string };
+
+    expect(payload.content).not.toContain(PASSWORD);
+  });
+
+  it("takes the message down again when the deletion cannot be armed", async () => {
+    logged.lines.length = 0;
+
+    const { interaction, deleted, messageId } = fakeInteraction();
+
+    const spy = vi
+      .spyOn(repo, "scheduleMessageDelete")
+      .mockRejectedValueOnce(new Error("the database is down"));
+
+    try {
+      await idpCommand.execute(interaction);
+
+      expect(deleted).toEqual([messageId]);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(logged.lines.join("\n")).not.toContain(PASSWORD);
   });
 
   it("answers the copy button ephemerally", async () => {

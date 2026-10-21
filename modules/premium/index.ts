@@ -49,7 +49,7 @@ export {
   FREE_TIER,
   FREE_TIER_LABELS,
 } from "./limits.js";
-export type { FreeTierKey } from "./limits.js";
+export type { CappedFreeTierKey, FreeTierKey } from "./limits.js";
 
 export {
   FEATURE_LABELS,
@@ -81,6 +81,7 @@ export {
   DEFAULT_PAYU_FIELD_LAYOUT,
   formatAmount,
   amountsEqual,
+  isFailureStatus,
   isPayuOrigin,
   isSuccessfulStatus,
   PAYU_FIELD_LAYOUTS,
@@ -89,12 +90,16 @@ export {
   payuResponseHash,
   payuResponseHashCandidates,
   verifyPayuCallback,
+  verifyPayuFailureCallback,
 } from "./payu.js";
 export type {
   PayuCallbackExpectation,
   PayuCallbackPayload,
   PayuCallbackSource,
   PayuCredentials,
+  PayuFailureExpectation,
+  PayuFailureRejection,
+  PayuFailureVerification,
   PayuFieldLayout,
   PayuHashInput,
   PayuRejection,

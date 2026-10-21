@@ -84,26 +84,67 @@ export interface EntitlementLookup {
 }
 
 /**
- * The free-tier allowances (D45).
+ * Every premium-gated thing a guild can hold (D45).
  *
- * **This is the canonical definition.** `modules/premium/limits.ts`
- * re-exports it, so the perk list and the code that enforces the limits
- * are generated from one table and cannot drift apart.
+ * This is the set of *features*, not the set of keys the limit table
+ * happens to contain. The two are different sets: a feature the table
+ * has no entry for is **unlimited**, and the type has to be able to say
+ * so. Had the key type been derived from the table, "no entry" would
+ * have been unrepresentable — every key would have carried a limit and
+ * the unlimited branch of {@link freeTierLimit} would have been dead
+ * code.
  *
- * `core/` is the lower layer: `modules/` may import from `core/`, never
- * the other way round, so the table has to live here.
- *
- * `core/guards.ts` never reads a number from the table: `countLimitGuard`
- * takes the limit as a parameter, so no allowance is hard-coded in the
- * runtime layer.
- *
- * A feature with no entry in the table is unlimited.
- *
- * These are the limits the *code* enforces, not the ones the old perk
- * table advertised — the two had drifted apart, and the code is the one
- * users actually hit.
+ * The list is the per-guild things the entitlement gates cover. The
+ * first eight are capped by the free tier; the rest are gated on the
+ * entitlement alone, so there is no count to cap and the table has no
+ * entry for them.
  */
-export const FREE_TIER = {
+export const FREE_TIER_FEATURES = [
+  // The features the free tier caps.
+  /** Scrims a guild may have open at once. */
+  "scrims",
+  /** Tournaments a guild may have at once. */
+  "tourneys",
+  /** Tag-check channels a guild may have. */
+  "tagcheckChannels",
+  /** Easy-tag channels a guild may have. */
+  "easytagChannels",
+  /** Slot managers a guild may have. */
+  "slotManagers",
+  /** Screenshot-verification configs a guild may have. */
+  "ssverifyConfigs",
+  /** Media-partner entries a guild may have. */
+  "mediaPartners",
+  /** Auto-purge channels a guild may have. */
+  "autopurgeChannels",
+  // The features the entitlement gates on its own. There is no count to
+  // cap, so the free tier has no entry for them and they are unlimited.
+  /** Slot reminders a guild may set. */
+  "slotReminders",
+  /** IDP transfers a guild may make. */
+  "idpTransfer",
+  /** Screenshot-verification types a guild may use. */
+  "screenshotTypes",
+  /** Custom verification success messages a guild may set. */
+  "successMessage",
+] as const;
+
+/**
+ * The name of a premium-gated thing.
+ *
+ * The union is closed and it names the *features*, not the table's
+ * entries: {@link FREE_TIER} is a partial record over it.
+ */
+export type FreeTierKey = (typeof FREE_TIER_FEATURES)[number];
+
+/**
+ * The allowances, with their exact numbers.
+ *
+ * {@link FREE_TIER} is this table typed as a partial record over the
+ * feature union. The numbers live here so the type can keep them exact:
+ * a capped feature reads as `3`, not as `number | undefined`.
+ */
+const FREE_TIER_VALUES = {
   /** Scrims a guild may have open at once. */
   scrims: 3,
   /** Tournaments a guild may have at once. */
@@ -122,14 +163,63 @@ export const FREE_TIER = {
   autopurgeChannels: 1,
 } as const;
 
-/** The names of the allowances in {@link FREE_TIER}. */
-export type FreeTierKey = keyof typeof FREE_TIER;
+/**
+ * The features the table has an entry for.
+ *
+ * The capped half of {@link FreeTierKey}. A record that names the
+ * *allowances* — a label per allowance, say — wants this set and not
+ * the whole union: a feature with no entry is not an allowance.
+ */
+export type CappedFreeTierKey = keyof typeof FREE_TIER_VALUES;
+
+/**
+ * The type of {@link FREE_TIER}.
+ *
+ * A partial record over {@link FreeTierKey}: the features the table
+ * caps keep their exact number, so a reader that knows the feature is
+ * capped reads a definite value; the features it does not cap have no
+ * entry and read as `undefined`. That absence is the "unlimited" case,
+ * and it is what makes it expressible.
+ */
+export type FreeTierLimits = {
+  readonly [K in CappedFreeTierKey]: (typeof FREE_TIER_VALUES)[K];
+} & {
+  readonly [K in Exclude<FreeTierKey, CappedFreeTierKey>]?: undefined;
+};
+
+/**
+ * The free-tier allowances (D45).
+ *
+ * **This is the canonical definition of the free tier.** The premium
+ * area re-exports it: `modules/premium/limits.ts` is a re-export of
+ * this table and not a second copy of it, so the perk list and the code
+ * that enforces the limits are generated from one table and cannot
+ * drift apart.
+ *
+ * `core/` is the lower layer: `modules/` may import from `core/`, never
+ * the other way round, so the table has to live here.
+ *
+ * `core/guards.ts` never reads a number from the table: `countLimitGuard`
+ * takes the limit as a parameter, so no allowance is hard-coded in the
+ * runtime layer.
+ *
+ * The table is a **partial** record over {@link FreeTierKey}: it has an
+ * entry for the features the free tier caps and none for the ones it
+ * does not. A feature with no entry is unlimited.
+ *
+ * These are the limits the *code* enforces, not the ones the old perk
+ * table advertised — the two had drifted apart, and the code is the one
+ * users actually hit.
+ */
+export const FREE_TIER: FreeTierLimits = FREE_TIER_VALUES;
 
 /**
  * Reads one allowance.
  *
- * @returns the limit, or `null` when the feature is unlimited.
+ * @param key the gated thing to read.
+ * @returns the limit, or `null` when the feature has no entry in the
+ *          table and is therefore unlimited.
  */
 export function freeTierLimit(key: FreeTierKey): number | null {
-  return FREE_TIER[key];
+  return FREE_TIER[key] ?? null;
 }

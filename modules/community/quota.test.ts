@@ -179,6 +179,14 @@ describe.skipIf(!reachable)("the reminder allowance", () => {
     expect(await service.deleteReminder({ id, userId: OTHER })).toBe(false);
   });
 
+  it("refuses an id that is not a reminder id", async () => {
+    // The `jobs` key is a uuid, so a mistyped id has to be a refusal and
+    // not a database error.
+    await expect(
+      service.deleteReminder({ id: "not-an-id", userId: OWNER }),
+    ).rejects.toThrow(/not a reminder id/i);
+  });
+
   it("deletes every reminder of a member at once", async () => {
     const count = await service.deleteReminders(OWNER);
 

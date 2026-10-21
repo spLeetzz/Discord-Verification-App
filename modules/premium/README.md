@@ -79,18 +79,21 @@ implementation of the expiry rule.
 
 ### `FREE_TIER` and `freeTierLimit(key)`
 
-The free-tier allowances (D45), in `modules/premium/limits.ts`.
+The free-tier allowances (D45). The table is **canonical in
+`core/premium.ts`** and re-exported here, so there is one copy of it and
+one place it is written down.
 
 ```ts
 import { FREE_TIER, freeTierLimit } from "../modules/premium/index.js";
 
-FREE_TIER.scrims;        // 3
-freeTierLimit("tourneys"); // 1
-freeTierLimit("snipes");   // null — unlimited
+FREE_TIER.scrims;              // 3
+freeTierLimit("tourneys");     // 1
+freeTierLimit("slotReminders"); // null — unlimited
 ```
 
 **Never hard-code `3` or `1`.** A gate for a thing with no entry in
-`FREE_TIER` is unlimited.
+`FREE_TIER` is unlimited: the table is a partial record over the gated
+features, so the ones the free tier does not cap have no entry at all.
 
 ### `startPremiumServer(options)` / `stopPremiumServer()`
 
@@ -205,13 +208,54 @@ A purchase enables **every** feature for the guild, with one expiry:
   lapsed — so buying again before the period ends does not lose the days
   that were already paid for;
 - the expiry is `base + plan.duration_days`;
-- the rows are written for all six features, plus
+- the rows are written for all seven features, plus
   `guild_settings.premium_expires_at` and
   `user_settings.premium_expire_time` (the summary the status command
   reads).
 
 `user_settings.is_premium` is a **display record, not a gate**. Nothing
 in this codebase decides entitlement from it.
+
+### The grant is one transaction
+
+The transaction row, the seven entitlement rows, the guild's summary and
+the user's summary are written by **one** `withLockedTransaction`. Either
+all of it lands or none of it does.
+
+They used to be separate statements: the transaction was flipped to `paid`
+and **committed**, and the entitlements were written afterwards. A
+process killed in between — or one entitlement upsert that threw — left a
+buyer who had paid with nothing, and the replay path could not repair it,
+because the transaction was already `paid`.
+
+The `SELECT … FOR UPDATE` on the transaction row is what makes two
+concurrent callbacks safe: the second one waits for the first to commit
+and then finds the row already `paid`. The guild's own row is locked
+while it is read for the same reason — two purchases for the same guild
+would otherwise both read the same expiry and both extend it.
+
+### The `already_paid` branch repairs
+
+A callback for a transaction that is already `paid` **checks** that the
+grant is whole, and puts it back together when it is not. The check is:
+
+- every feature has an entitlement row, and
+- the guild's subscription runs at least as long as the purchase bought.
+
+The repair cannot become a second grant:
+
+- the expiry is the latest of what the purchase bought on its own, what
+  the interrupted grant wrote, and what the guild already holds — never
+  longer than the guild's own subscription;
+- the user's subscription counter is **recounted** from the transactions
+  rather than incremented, so a purchase is never counted twice;
+- the guild's and the user's summaries are only ever moved **later**.
+
+A lapsed subscription is not resurrected: the repair's expiry is anchored
+on `paid_at`, so a replayed webhook for a subscription that has already
+run out restores nothing.
+
+The outcome is `"repaired"`, and the buyer is told about it.
 
 ---
 
@@ -262,7 +306,11 @@ in this codebase decides entitlement from it.
    redirect) and, in parallel, to **`/payu/webhook`** (server to
    server). Both verify, and both funnel into the same idempotent
    `activatePremium`.
-7. The rows are written, **then** the buyer is told. Quotient dispatched
+7. The failure redirect, **`/premium_failed`**, is verified the same way
+   before it marks anything failed. The gateway signs the failure
+   callback exactly as it signs the successful one — the status is inside
+   the signature — so a forged failure cannot change a transaction.
+8. The rows are written, **then** the buyer is told. Quotient dispatched
    the notification before the guild row was written, so the confirmation
    DM could show a stale expiry or crash on `None`.
 
@@ -344,7 +392,24 @@ refusal rather than an exception. The server-to-server webhook has no
 **7. The webhook is the trustworthy path; the redirect is untrusted until
 it verifies.** Both are verified the same way and both are idempotent.
 
-**8. The buyer's real email and display name are used**, not
+**8. The failure redirect is verified too.** It used to be the one route
+that wrote to the database on the strength of a transaction id and
+nothing else: no signature, no origin check, no merchant check. The
+browser does not have to sign anything — the **gateway** signs the
+failure callback on its own servers and the hash travels with the
+redirect, exactly as it does with the webhook, and the server holds the
+salt. So the route checks the transaction id, the merchant key, the
+status, the amount and the signature before it marks anything failed.
+
+The status has to be a **failure**: a callback that says `success`, or
+that says nothing at all, is not a failure and must not mark one. The
+`Origin`, when the request carried one, has to be PayU's; it is not
+*required*, because the gateway also calls the failure url from its own
+servers and a server-to-server call has no origin at all. A callback with
+**no signature at all** is only accepted when it came from PayU's
+origin — the one thing a third-party site cannot forge.
+
+**9. The buyer's real email and display name are used**, not
 `"abcd@gmail.com"` and the user id.
 
 ---
@@ -396,8 +461,9 @@ the routes would never see it.
 
 ## The free-tier allowances (D45)
 
-One configuration object, in `modules/premium/limits.ts`. The gates read
-it and the perk list is generated from it, so the two cannot disagree.
+One configuration object, canonical in `core/premium.ts` and re-exported by
+`modules/premium/limits.ts`. The gates read it and the perk list is
+generated from it, so the two cannot disagree.
 
 ```
 scrims: 3   tourneys: 1   tagcheckChannels: 1   easytagChannels: 1
@@ -405,8 +471,9 @@ slotManagers: 1   ssverifyConfigs: 1   mediaPartners: 1   autopurgeChannels: 1
 ```
 
 These are the limits the **code** enforces, not the ones Quotient's
-`constants.perks` advertised. A gate for a thing with no entry is
-unlimited.
+`constants.perks` advertised. The table is a **partial** record over the
+gated features: the eight above are capped, the rest have no entry, and a
+gate for a thing with no entry is unlimited.
 
 ---
 
@@ -430,11 +497,14 @@ unlimited.
 | the guild does not hold the feature | `assertEntitled` throws a `PremiumRequiredError` (a `DenialError`) |
 | the transaction is unknown | the payment routes answer 404 |
 | the transaction is already paid | the payment page answers 409; a repeated callback answers "already paid" |
+| a paid transaction's grant never landed | the next callback repairs it and answers "repaired" |
 | the signature does not verify | 400, and the transaction stays `pending` |
 | the amount is not the plan's price | 400, and the transaction stays `pending` |
 | the status is not `success` | 400, and the transaction stays `pending` |
 | the `Origin` is missing, or is not PayU's | 403 |
 | the callback names a different transaction than the link | 400 |
+| a failure callback carries no signature and no PayU origin | 400, and the transaction stays `pending` |
+| a failure callback reports a success | 400, and the transaction stays `pending` |
 | the gateway is not configured | 503 |
 | the server does not know its own public address | 503 on the payment page; the checkout is off |
 | the buyer's DMs are closed | the purchase stands; the error is logged |
@@ -448,10 +518,10 @@ unlimited.
 | `payu.test.ts` | the pinned hash vectors for every layout, PayU's own SDK known-answer vectors, the request and the response differing for every layout, the status being inside the signature, and that a tampered amount, a tampered email, a tampered name, a wrong key, a wrong salt, a foreign origin, a missing origin, a non-`success` status and a request-hash-used-as-a-response-hash are all refused |
 | `env.test.ts` | the environment reader: nothing throws, everything unset is `null`, and the warnings say what is missing |
 | `entitlements.test.ts` | the gate: allowed, no expiry, expired without a sweep, disabled, unknown feature, and that an expired entitlement is not deleted |
-| `purchase.test.ts` | the state machine, the retry, the idempotent grant, the extension of an existing subscription, and the real email and name |
-| `server/server.test.ts` | the routes: the health check, the payment page and its request hash, a genuine callback, a missing `Origin`, a hostile `Origin`, the other field layout, the tampered forms, the webhook, the repeated webhook, the failure and the retry, and the already-paid page |
+| `purchase.test.ts` | the state machine, the retry, the idempotent grant, the extension of an existing subscription, the real email and name, **the grant being one transaction** (a failure half-way through the entitlement writes leaves the transaction unpaid and no rows, and the retry grants it), two concurrent callbacks granting once, a replay granting nothing extra, the repair of a paid-but-ungranted purchase, and a lapsed subscription not being resurrected |
+| `server/server.test.ts` | the routes: the health check, the payment page and its request hash, a genuine callback, a missing `Origin`, a hostile `Origin`, the other field layout, the tampered forms, the webhook, the repeated webhook, the failure and the retry, the already-paid page, **the failure redirect being verified** (no signature, a bad signature, another transaction's, a tampered amount, a success status, a foreign origin, and a forged failure not overwriting the audit data), and **the notification** (sent after the commit, a failure to notify not undoing the purchase, and a repaired purchase still being announced) |
 | `gate.test.ts` | one presentation, one button, and the reason naming the feature and the way out |
-| `limits.test.ts` | the free-tier table, the generated perk list, and that the table and the copy in `core/premium.ts` have not drifted |
+| `limits.test.ts` | the free-tier **numbers** (business data, pinned), that the module's table is the canonical one in `core/premium.ts` and not a copy of it, the generated perk list, and that a name with no entry is unlimited |
 
 The database tests run against the local Postgres on `:5433`, like
 `db/schema.test.ts`. They create rows with ids no real row can have and

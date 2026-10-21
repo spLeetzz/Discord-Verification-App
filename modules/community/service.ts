@@ -584,13 +584,23 @@ export async function countReminders(userId: string): Promise<number> {
  * The delete is the member's own row, so a member at their allowance can
  * always make room for another one — the allowance must never be a trap.
  *
+ * The id is checked before the query: the `jobs` table's key is a uuid, and
+ * Postgres refuses a malformed one with an error rather than with an empty
+ * result. A refusal is the right answer for a mistyped id.
+ *
  * @returns whether the reminder was there and was deleted.
  */
 export async function deleteReminder(input: {
   id: string;
   userId: string;
 }): Promise<boolean> {
-  return repo.deleteUserReminder(input.id, input.userId);
+  const id = input.id.trim();
+
+  if (!UUID_PATTERN.test(id)) {
+    throw new InputError("That is not a reminder id.");
+  }
+
+  return repo.deleteUserReminder(id, input.userId);
 }
 
 /**

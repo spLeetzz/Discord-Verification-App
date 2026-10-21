@@ -12,10 +12,14 @@
  *    one is a clean refusal, not a crash, and a foreign one is refused;
  *  - the server-to-server webhook needs no origin at all (there is none
  *    in a server-to-server call) and grants the same way;
- *  - the grant is idempotent.
+ *  - the grant is idempotent;
+ *  - the failure redirect is **verified** too: a forged one changes
+ *    nothing;
+ *  - the buyer is told **after** the purchase is committed, and a
+ *    failure to tell does not undo it.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import { closeDatabase, db } from "../../../db/client.js";
 import {
@@ -29,6 +33,7 @@ import type { PayuCredentials, PayuFieldLayout } from "../payu.js";
 import { createTransaction, findPlanByCode, findTransaction } from "../repo.js";
 import { startPremiumServer } from "./index.js";
 import type { PremiumServerHandle } from "./index.js";
+import type { PurchaseNotification } from "../notifications.js";
 
 const GUILD_ID = `premium-server-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const USER_ID = "222222222222222222";
@@ -469,13 +474,18 @@ describe("modules/premium/server — the routes", () => {
   });
 
   it("records a failed payment, and the transaction can be retried", async () => {
-    const { txnId } = await makeTransaction();
+    const { txnId, price } = await makeTransaction();
 
+    // The gateway signs the failure callback exactly as it signs the
+    // successful one — the status is inside the signature.
     const response = await server.app.inject({
       method: "POST",
       url: `/premium_failed?txnId=${txnId}`,
-      payload: encode({ txnid: txnId, status: "failure" }),
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      payload: encode(makeForm(txnId, price.toFixed(2), { status: "failure" })),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
     });
 
     expect(response.statusCode).toBe(200);
@@ -510,5 +520,280 @@ describe("modules/premium/server — the routes", () => {
     });
 
     expect(page.statusCode).toBe(409);
+  });
+});
+
+describe("modules/premium/server — the failure redirect", () => {
+  it("refuses a failure callback that carries no signature", async () => {
+    // The old route took the transaction id and marked it failed. This
+    // one checks that the gateway signed it first.
+    const { txnId, price } = await makeTransaction();
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_failed?txnId=${txnId}`,
+      payload: encode({ txnid: txnId, amount: price.toFixed(2), status: "failure" }),
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+  });
+
+  it("refuses a failure callback whose signature does not verify", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    const form = makeForm(txnId, price.toFixed(2), { status: "failure" });
+    form.hash = "0".repeat(128);
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_failed?txnId=${txnId}`,
+      payload: encode(form),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+  });
+
+  it("refuses a failure callback for somebody else's transaction", async () => {
+    // The transaction id is inside the signature, so a signed callback
+    // cannot be pointed at another transaction.
+    const { txnId, price } = await makeTransaction();
+    const other = await makeTransaction();
+
+    const form = makeForm(other.txnId, price.toFixed(2), { status: "failure" });
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_failed?txnId=${txnId}`,
+      payload: encode(form),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+    expect((await findTransaction(other.txnId))?.status).toBe("pending");
+  });
+
+  it("refuses a failure callback with a tampered amount", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    const form = makeForm(txnId, price.toFixed(2), { status: "failure" });
+    form.amount = "1.00";
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_failed?txnId=${txnId}`,
+      payload: encode(form),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+  });
+
+  it("refuses a failure callback that reports a success", async () => {
+    // The status says the payment went through, so this is not a
+    // failure and must not mark one.
+    const { txnId, price } = await makeTransaction();
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_failed?txnId=${txnId}`,
+      payload: encode(makeForm(txnId, price.toFixed(2), { status: "success" })),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+  });
+
+  it("refuses a failure callback from an origin that is not PayU's", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_failed?txnId=${txnId}`,
+      payload: encode(makeForm(txnId, price.toFixed(2), { status: "failure" })),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://payu.evil.example",
+      },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+  });
+
+  it("does not let a forged failure overwrite the audit data", async () => {
+    const { txnId } = await makeTransaction();
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_failed?txnId=${txnId}`,
+      payload: encode({
+        txnid: txnId,
+        status: "failure",
+        attacker: "anything the attacker likes",
+      }),
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+    });
+
+    expect(response.statusCode).toBe(400);
+
+    const row = await findTransaction(txnId);
+
+    expect(row?.status).toBe("pending");
+    expect(row?.rawData).toEqual({});
+  });
+
+  it("does not un-buy a paid subscription when a failure arrives late", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    await server.app.inject({
+      method: "POST",
+      url: `/premium_success?txnId=${txnId}`,
+      payload: encode(makeForm(txnId, price.toFixed(2))),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_failed?txnId=${txnId}`,
+      payload: encode(makeForm(txnId, price.toFixed(2), { status: "failure" })),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((await findTransaction(txnId))?.status).toBe("paid");
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(true);
+  });
+});
+
+describe("modules/premium/server — the notification", () => {
+  const notifications: PurchaseNotification[] = [];
+
+  /** A hook the tests use to watch what the notifier sees. */
+  let onNotify: ((notification: PurchaseNotification) => Promise<void>) | null = null;
+
+  let notifying: PremiumServerHandle;
+
+  beforeAll(async () => {
+    notifying = await startPremiumServer({
+      port: 0,
+      host: "127.0.0.1",
+      publicUrl: PUBLIC_URL,
+      credentials: CREDENTIALS,
+      notify: async (notification) => {
+        notifications.push(notification);
+
+        if (onNotify) await onNotify(notification);
+      },
+    });
+  });
+
+  afterAll(async () => {
+    await notifying.close();
+  });
+
+  afterEach(() => {
+    onNotify = null;
+    notifications.length = 0;
+  });
+
+  it("tells the buyer after the purchase is committed", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    let entitledWhenTold: boolean | null = null;
+
+    onNotify = async () => {
+      // The rows have to be there already: the DM shows the expiry, and
+      // a stale one is a support ticket.
+      entitledWhenTold = await isEntitled(GUILD_ID, "scrim_slots");
+    };
+
+    const response = await notifying.app.inject({
+      method: "POST",
+      url: `/premium_success?txnId=${txnId}`,
+      payload: encode(makeForm(txnId, price.toFixed(2))),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.userId).toBe(USER_ID);
+    expect(entitledWhenTold).toBe(true);
+  });
+
+  it("keeps the purchase when the buyer cannot be told", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    onNotify = async () => {
+      throw new Error("the buyer's direct messages are closed");
+    };
+
+    const response = await notifying.app.inject({
+      method: "POST",
+      url: `/premium_success?txnId=${txnId}`,
+      payload: encode(makeForm(txnId, price.toFixed(2))),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    // The purchase stands. A failure to tell is a support ticket, not a
+    // refund.
+    expect(response.statusCode).toBe(200);
+    expect((await findTransaction(txnId))?.status).toBe("paid");
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(true);
+  });
+
+  it("tells the buyer about a purchase that had to be repaired", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    // The divergence: the transaction is paid and the grant never
+    // landed.
+    await db
+      .update(premiumTransactions)
+      .set({ status: "paid", paidAt: new Date(), rawData: { txnid: txnId } })
+      .where(sql`${premiumTransactions.txnId} = ${txnId}`);
+
+    const response = await notifying.app.inject({
+      method: "POST",
+      url: `/premium_success?txnId=${txnId}`,
+      payload: encode(makeForm(txnId, price.toFixed(2))),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(notifications).toHaveLength(1);
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(true);
   });
 });

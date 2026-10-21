@@ -157,7 +157,8 @@ export interface ActivationResult {
  * Grants the subscription for a verified purchase.
  *
  * Idempotent: calling it twice grants one subscription. The second call
- * finds the transaction already `paid` and does nothing.
+ * finds the transaction already `paid`, checks that the grant is whole,
+ * and does nothing when it is.
  *
  * **One transaction.** The state change and every entitlement are written
  * by a single `withLockedTransaction`, so the two cannot drift apart: a
@@ -286,11 +287,11 @@ async function grantPurchase(
  * Two rules keep the repair from becoming a second grant:
  *
  *  - the expiry is the latest of what the purchase bought on its own, what
- *    the guild already holds, and what the interrupted grant wrote. It is
- *    never longer than the guild's own subscription, so a repair can
- *    never hand out a second set of days;
- *  - the user's subscription counter is not incremented, so a purchase is
- *    never counted twice.
+ *    the interrupted grant wrote, and what the guild already holds. It is
+ *    never longer than the guild's own subscription, so a repair can never
+ *    hand out a second set of days;
+ *  - the user's subscription counter is recounted from the transactions
+ *    rather than incremented, so a purchase is never counted twice.
  */
 async function repairPaidTransaction(
   transaction: TransactionRow,
@@ -319,6 +320,11 @@ async function repairPaidTransaction(
   // every row it wrote carried the same expiry.
   const witness = latestExpiry(entitlements);
 
+  // What the grant wrote, or would have written: the days the purchase
+  // bought, counted from the moment they were paid for — and the expiry
+  // the interrupted grant itself wrote, when it got that far.
+  const expected = latestDate([ownExpiry, witness]) ?? ownExpiry;
+
   const held = new Set(entitlements.map((row) => row.feature));
   const missing = PREMIUM_FEATURES.filter((feature) => !held.has(feature));
 
@@ -327,7 +333,7 @@ async function repairPaidTransaction(
   const incomplete =
     missing.length > 0 ||
     guildExpiry === null ||
-    guildExpiry.getTime() < ownExpiry.getTime();
+    guildExpiry.getTime() < expected.getTime();
 
   if (!incomplete) {
     // Nothing to repair, and nothing to extend: the subscription the
@@ -340,7 +346,10 @@ async function repairPaidTransaction(
     );
   }
 
-  const expiresAt = latestDate([ownExpiry, guildExpiry, witness]) ?? ownExpiry;
+  // The repair never hands out a second set of days: the expiry is the
+  // latest of what the purchase bought, what the interrupted grant
+  // wrote, and what the guild already holds.
+  const expiresAt = latestDate([expected, guildExpiry]) ?? expected;
 
   // The grant is all or nothing, so it is put back as a whole.
   for (const feature of PREMIUM_FEATURES) {

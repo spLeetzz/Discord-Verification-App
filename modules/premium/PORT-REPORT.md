@@ -63,15 +63,16 @@ disabled button is banned.
 ### The free-tier allowances (D45)
 
 ```ts
-FREE_TIER.scrims            // 3
-freeTierLimit("tourneys")   // 1
-freeTierLimit("snipes")     // null — unlimited
-buildPerkLines()            // the perk list, generated from FREE_TIER
+FREE_TIER.scrims              // 3
+freeTierLimit("tourneys")     // 1
+freeTierLimit("slotReminders") // null — unlimited
+buildPerkLines()              // the perk list, generated from FREE_TIER
 ```
 
-One config object, in `modules/premium/limits.ts`. The gates read it and
-the perk list is generated from it, so the table and the code cannot
-disagree. **Never hard-code `3` or `1`.**
+One config object, canonical in `core/premium.ts` and re-exported by
+`modules/premium/limits.ts`. The gates read it and the perk list is
+generated from it, so the table and the code cannot disagree.
+**Never hard-code `3` or `1`.**
 
 ### The purchase path
 
@@ -201,7 +202,7 @@ decides entitlement from it.
    POST /premium_success?txnId=                   POST /premium_failed?txnId=
                  │                                               │
                  ▼                                               ▼
-         verify, then activate                          mark it failed
+         verify, then activate                   verify, then mark it failed
                  │                                  (and it is retryable)
                  ▼
    POST /payu/webhook ──▶ verify, then activate (idempotent)
@@ -239,8 +240,31 @@ Nothing is written before every one of them has passed.
    a string comparison would refuse a real payment over a missing zero.
    The comparison is exact (`BigInt` on the scaled value), not a float.
 7. **Then, and only then, the grant.** `activatePremium` is idempotent:
-   the second call finds the transaction already `paid` and grants
-   nothing.
+   the second call finds the transaction already `paid`, checks that the
+   grant is whole, and grants nothing when it is.
+
+### The failure redirect is verified too
+
+The failure redirect used to be the one route that wrote to the database
+on the strength of a transaction id and nothing else: no signature, no
+origin check, no merchant check. A caller who knew a transaction id
+could flip it to `failed` and overwrite its audit data.
+
+The premise that a browser redirect cannot be signed is wrong. The
+**browser** does not sign anything, and it does not have to: PayU
+computes the response hash on its own servers and the hash travels with
+the redirect, exactly as it does with the webhook. The status is inside
+the signature, so a failure callback is as unforgeable as a successful
+one. The server holds the salt, so the server can check it.
+
+So `/premium_failed` now makes the same checks the success route makes,
+with one difference: the status has to be a **failure**. A callback that
+says `success`, or that says nothing at all, is not a failure and must
+not mark one. The `Origin`, when the request carried one, has to be
+PayU's; it is not *required*, because the gateway also calls the failure
+url from its own servers and a server-to-server call carries no origin.
+A callback with no signature at all is only accepted when it came from
+PayU's origin — the one thing a third-party site cannot forge.
 
 ### The field layout is one named thing
 
@@ -291,6 +315,34 @@ purchase notification before the guild row was written, so the
 confirmation DM could show a stale expiry or crash on `None`. The
 notification is the caller's job, after `activatePremium` has returned,
 and a failed DM never undoes the purchase.
+
+**The grant is one transaction.** The transaction row, the seven
+entitlement rows and the two summary rows are written by a single
+`withLockedTransaction`, so either all of it lands or none of it does.
+They used to be separate statements, and the state change was committed
+first: a process killed in between left a buyer who had paid with
+nothing, and the replay path could not repair it because the transaction
+was already `paid`.
+
+The `SELECT … FOR UPDATE` on the transaction row is what makes two
+concurrent callbacks safe, and the guild's own row is locked while it is
+read so that two purchases for the same guild cannot both extend the
+same expiry.
+
+### The `already_paid` branch repairs
+
+A callback for a transaction that is already `paid` checks that the
+grant is whole — every feature has an entitlement row, and the guild's
+subscription runs at least as long as the purchase bought — and puts it
+back together when it is not. The outcome is `"repaired"`, and the buyer
+is told about it.
+
+The repair cannot become a second grant: the expiry is the latest of
+what the purchase bought on its own, what the interrupted grant wrote and
+what the guild already holds, and the user's subscription counter is
+recounted from the transactions rather than incremented. A subscription
+that has already run out is not resurrected — the repair's expiry is
+anchored on `paid_at`.
 
 ### The buyer's details
 
@@ -343,8 +395,11 @@ it and therefore needs it before the transaction is created.
    code survives a reseed. This is also why the tests do not say "the
    cheapest plan" — another test file inserts a temporary plan with a
    lower price.
-8. **The free-tier config lives in `modules/premium/limits.ts`**, as the
-   brief asked. `core/premium.ts` carries a second copy; see below.
+8. **The free-tier config is canonical in `core/premium.ts`** and
+   `modules/premium/limits.ts` re-exports it. `core/` is the lower layer —
+   `modules/` may import from `core/`, never the other way round — so the
+   table has to live there; the module keeps the labels and the perk list,
+   which are words for people rather than for the compiler.
 9. **The perk list is generated from `FREE_TIER` *and* the feature
    union**, in that order: the entitlements are what premium unlocks, and
    the counts are what stop being limits.
@@ -434,14 +489,19 @@ it and therefore needs it before the transaction is created.
    the routes (a parser added inside an ordinary plugin would be
    encapsulated and the routes would never see it).
 
-5. **Reconcile the two copies of `FREE_TIER`.** `core/premium.ts`
-   declares one and `modules/premium/limits.ts` declares the other. The
-   canonical one is `modules/premium/limits.ts` (as the brief asked), and
-   `modules/premium/limits.test.ts` fails the moment they drift. The
-   clean fix is to delete `FREE_TIER` and `freeTierLimit` from
-   `core/premium.ts` — nothing in the codebase imports them (only the
-   *types* are used, by `core/guards.ts`) — and have the other engineers
-   import the limits from `modules/premium/limits.ts`.
+5. **The two copies of `FREE_TIER` are reconciled.** The table is
+   canonical in `core/premium.ts` and `modules/premium/limits.ts`
+   re-exports it, so there is one copy and one place it is written down.
+   `modules/premium/limits.test.ts` used to compare the two; it now pins
+   the **numbers** instead, because the numbers are the business data
+   every area reads.
+
+   The key type is fixed as well: `FreeTierKey` names every **gated
+   feature**, and the table is a *partial* record over it, so a feature
+   the free tier does not cap has no entry and `freeTierLimit` answers
+   `null` for it. The labels in `modules/premium/limits.ts` are keyed by
+   the capped features only, so a new allowance still cannot be added
+   without a name, and a new gated feature does not demand one.
 
 6. **`types/command.ts` has no `guards` field yet** (D28 promises one).
    My gates are therefore called from module code, not from a command's
@@ -465,8 +525,8 @@ it and therefore needs it before the transaction is created.
 
 | | |
 |---|---|
-| `npm run typecheck` | **My files are clean** — zero errors in `modules/premium/` or `commands/premium/`. The repository as a whole does **not** typecheck right now, because of other areas in flight: `modules/identity/`, `modules/ssverify/ocr/`, `modules/scrims/`, `modules/community/`. Not mine, not touched. |
-| `npm test` | **My 8 test files, 133 tests, all pass.** The repository's suite is green as well — 38 files, 548 tests. |
+| `npm run typecheck` | **My files are clean** — zero errors in `modules/premium/` or `commands/premium/`. The repository typechecks as a whole as well. |
+| `npm test` | **My 8 test files, 161 tests, all pass.** The repository's suite is green as well — 82 files, 1199 tests. |
 | `npm run smoke` | Not re-run for this change; my two command files load and serialise correctly on their own. |
 | `deploy.ts` | No change needed — it scans `commands/<folder>/*.ts` one level deep and picks up both premium commands. |
 
@@ -477,10 +537,10 @@ it and therefore needs it before the transaction is created.
 | `payu.test.ts` | 48 | the pinned hash vectors for every layout, PayU's **own SDK** known-answer vectors, the request and the response differing for every layout, the status being inside the signature, the constant-time comparison, the decimal amounts ("29" vs "29.00"), the origin check (missing, hostile, genuine), and that a tampered amount, email, name, a wrong key, a wrong salt, Quotient's swapped form, a non-`success` status, a missing origin and a request-hash-used-as-a-response-hash are all refused |
 | `env.test.ts` | 12 | the environment reader: nothing throws, everything unset is `null`, the numbers are parsed strictly, and the warnings say what is missing |
 | `entitlements.test.ts` | 14 | the gate: allowed, no expiry, expired without a sweep, disabled, unknown feature, the refusal's wording, that an expired entitlement is not deleted, and the expiry rule at the boundary second |
-| `purchase.test.ts` | 16 | the state machine, the retry, the idempotent grant, the extension of an existing subscription, the real email and name, and that a late failure does not un-buy a subscription |
-| `server/server.test.ts` | 19 | the routes: the health check, the payment page and its request hash, a genuine callback, a missing `Origin`, a hostile `Origin`, the other field layout, the tampered forms, the wrong key, the webhook, the repeated webhook, the failure and the retry, and the already-paid page |
+| `purchase.test.ts` | 21 | the state machine, the retry, the idempotent grant, the extension of an existing subscription, the real email and name, that a late failure does not un-buy a subscription, **the grant being one transaction**, two concurrent callbacks granting once, a replay granting nothing extra, the repair of a paid-but-ungranted purchase, and a lapsed subscription not being resurrected |
+| `server/server.test.ts` | 30 | the routes: the health check, the payment page and its request hash, a genuine callback, a missing `Origin`, a hostile `Origin`, the other field layout, the tampered forms, the wrong key, the webhook, the repeated webhook, the failure and the retry, the already-paid page, **the failure redirect being verified**, and **the notification** (after the commit, and a failure to tell not undoing the purchase) |
 | `gate.test.ts` | 7 | one presentation, one button, and the reason naming the feature and the way out |
-| `limits.test.ts` | 11 | the free-tier table, the generated perk list, the "no Pro bot" promise, the feature union against the schema's `CHECK` list and the runtime union, and that the two copies of the table have not drifted |
+| `limits.test.ts` | 11 | the free-tier **numbers** (business data, pinned), that the module's table is the canonical one in `core/premium.ts` and not a copy of it, that a name with no entry is unlimited, the generated perk list, the "no Pro bot" promise, and the feature union against the schema's `CHECK` list and the runtime union |
 | `views.test.ts` | 6 | the custom ids are namespaced and carry their token, the select offers one option per plan, the transaction id is unguessable, and the email check |
 
 The database tests run against the local Postgres on `:5433`, like

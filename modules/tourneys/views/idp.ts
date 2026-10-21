@@ -17,12 +17,13 @@
  * description is the copy block, so the two can never disagree.
  */
 
-import { EmbedBuilder, MessageFlags } from "discord.js";
+import { EmbedBuilder } from "discord.js";
 import type {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonInteraction,
 } from "discord.js";
+import { respond } from "../../../core/context.js";
 import { EMBED_COLOR } from "../../../core/constants.js";
 import { button, buttonRow } from "./components.js";
 import { fail } from "./handlers.js";
@@ -144,8 +145,5 @@ export async function handleIdpCopy(
     return;
   }
 
-  await interaction.reply({
-    content: description,
-    flags: MessageFlags.Ephemeral,
-  });
+  await respond(interaction, { content: description }, true);
 }

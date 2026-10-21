@@ -3,8 +3,8 @@
  *
  * Quotient's `constants.perks` advertised limits the code did not enforce
  * (autorole: "1 free", easytags: "1 free"), and its perk table and its
- * socket perk list had drifted from each other. The table below is the
- * **code's** behaviour, not the marketing's:
+ * socket perk list had drifted from each other. The table is the **code's**
+ * behaviour, not the marketing's:
  *
  * ```
  * freeTier: { scrims: 3, tourneys: 1, tagcheckChannels: 1, easytagChannels: 1,
@@ -12,51 +12,59 @@
  *             autopurgeChannels: 1 }
  * ```
  *
- * The perk list is generated from this object, so the two cannot disagree.
- * A gate for a thing with no entry here is **unlimited** — that is the
- * rule, and {@link freeTierLimit} returns `null` for it.
+ * **The table lives in `core/premium.ts` and is re-exported here.** It used
+ * to be defined twice — once in `core/`, once here — with a test as the
+ * only thing stopping the two copies from drifting. A documented invariant
+ * that nothing enforces is worse than none, so there is now one table and
+ * one place it is written down.
+ *
+ * `core/` is the lower layer: `modules/` may import from `core/`, never the
+ * other way round, so the canonical table has to live there. This module
+ * still owns what the core layer cannot: the **labels**, which are words
+ * for people rather than for the compiler, and the perk list generated from
+ * the table.
+ *
+ * The table is a **partial** record over the gated features: it has an
+ * entry for the things the free tier caps and none for the ones it does
+ * not. A feature with no entry is **unlimited** — that is the rule, and
+ * {@link freeTierLimit} returns `null` for it.
  *
  * Nothing may hard-code `3` or `1`: read the number from here.
  */
 
+import { FREE_TIER, freeTierLimit } from "../../core/premium.js";
+import type { FreeTierKey, FreeTierLimits } from "../../core/premium.js";
 import { FEATURE_LABELS, PREMIUM_FEATURES } from "./types.js";
 
-/**
- * How many of each thing a guild may have without paying.
- *
- * The numbers are the ones the ported code enforces. The perk list is
- * generated from them, so the advertised limit and the enforced limit are
- * the same number by construction.
- */
-export const FREE_TIER = {
-  /** Scrims a guild may have at once. */
-  scrims: 3,
-  /** Tournaments a guild may have at once. */
-  tourneys: 1,
-  /** Tag-check channels a guild may have. */
-  tagcheckChannels: 1,
-  /** Easy-tag channels a guild may have. */
-  easytagChannels: 1,
-  /** Slot managers a guild may have. */
-  slotManagers: 1,
-  /** Screenshot-verification setups a guild may have. */
-  ssverifyConfigs: 1,
-  /** Media-partner entries a guild may have. */
-  mediaPartners: 1,
-  /** Auto-purge channels a guild may have. */
-  autopurgeChannels: 1,
-} as const;
+export { FREE_TIER, freeTierLimit };
+export type { FreeTierKey };
 
-/** The names of the allowances in {@link FREE_TIER}. */
-export type FreeTierKey = keyof typeof FREE_TIER;
+/**
+ * The gated things the free tier actually caps.
+ *
+ * {@link FreeTierKey} names **every** gated feature, so it is wider than
+ * the table: the features the free tier does not cap have no entry in it
+ * and are unlimited. The keys the table has an entry for are the ones an
+ * allowance can be read for, and the ones the perk list is generated from.
+ *
+ * The table types the capped features with their exact number and the
+ * uncapped ones as `undefined`, so this is the set of keys that do not
+ * read as `undefined`.
+ */
+export type CappedFreeTierKey = {
+  [K in keyof FreeTierLimits]-?: undefined extends FreeTierLimits[K]
+    ? never
+    : K;
+}[keyof FreeTierLimits];
 
 /**
  * What each allowance is called in the perk list.
  *
- * The keys are the allowance names, so an allowance cannot be added without
- * also being given a name.
+ * The keys are the allowances the table caps, so an allowance cannot be
+ * added without also being given a name: the record type makes the
+ * compiler say so.
  */
-export const FREE_TIER_LABELS: Record<FreeTierKey, string> = {
+export const FREE_TIER_LABELS: Record<CappedFreeTierKey, string> = {
   scrims: "scrims",
   tourneys: "tournaments",
   tagcheckChannels: "tag-check channels",
@@ -68,25 +76,15 @@ export const FREE_TIER_LABELS: Record<FreeTierKey, string> = {
 };
 
 /**
- * The free-tier limit for a thing.
- *
- * @param key the name of the allowance.
- * @returns the limit, or `null` when the thing has no allowance entry and
- *          is therefore unlimited.
- */
-export function freeTierLimit(key: string): number | null {
-  if (!Object.hasOwn(FREE_TIER, key)) return null;
-
-  return FREE_TIER[key as FreeTierKey];
-}
-
-/**
  * The perk list, generated from the configuration.
  *
  * Two halves:
  *
  *  - the features premium unlocks, taken from the closed feature union;
  *  - the counts that stop being limits, taken from {@link FREE_TIER}.
+ *
+ * Only the capped things are in the second half: the features the free
+ * tier does not cap are unlimited already, so there is no count to say.
  *
  * Quotient's list advertised "Access to the Quotient Pro bot", a second
  * bot application that does not exist in the source repository (D40). The
@@ -100,7 +98,7 @@ export function buildPerkLines(): string[] {
     lines.push(`✅ ${FEATURE_LABELS[feature]}`);
   }
 
-  for (const key of Object.keys(FREE_TIER) as FreeTierKey[]) {
+  for (const key of Object.keys(FREE_TIER) as CappedFreeTierKey[]) {
     lines.push(
       `✅ Unlimited ${FREE_TIER_LABELS[key]} (free tier: ${FREE_TIER[key]})`,
     );

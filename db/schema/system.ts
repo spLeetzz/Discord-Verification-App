@@ -323,7 +323,12 @@ export const tags = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [unique("tags_guild_id_name_unique").on(t.guildId, t.name)],
+  (t) => [
+    unique("tags_guild_id_name_unique").on(t.guildId, t.name),
+    // The per-member tag count runs on every /tag create, and without this
+    // it is a sequential scan.
+    index("tags_guild_id_owner_id_idx").on(t.guildId, t.ownerId),
+  ],
 );
 
 /**
