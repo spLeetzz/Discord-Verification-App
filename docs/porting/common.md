@@ -239,44 +239,34 @@ one is listed so a reviewer can check.
 - `idp` deletes the invoking message — kept as behaviour, but as an ephemeral
   reply (B19).
 
-## D20. OCR and image hashing are ours, not a third party's
+## D20. OCR is remote-only; there is no local engine
 
-Quotient calls an external service (`POST {FASTAPI_URL}/ocr`) that returns
-`{url, dhash, phash, text}`. The URL and key are in a gitignored config file,
-so **the service is not in the repository and cannot be run**. The entire
-screenshot-verification feature depends on it. The bot also links to
-`imagehash`, a Python-only library, for the duplicate check.
+**Revised.** The first version of this decision had the port ship a **local**
+OCR engine — Tesseract for the text, `sharp` for the perceptual hashes. The
+product owner rejected it: the bot runs on a 1-CPU, 2GB-RAM VPS, and a
+Tesseract worker plus a 15MB language model is not a cost worth paying for a
+feature that is not in use. `tesseract.js` and `sharp` are both **removed**.
 
-**Ours — an OCR adapter interface with two implementations:**
+**Ours now — one provider interface, two implementations:**
 
-```ts
-interface OcrProvider {
-  readonly name: string;
-  analyze(image: Buffer | string): Promise<OcrResult>;
-}
-interface OcrResult {
-  text: string;
-  dhash: string;   // 16 hex chars, 64 bits
-  phash: string;
-}
-```
+- `HttpOcrProvider` — the Quotient-compatible remote service. It posts
+  `[{ url }]` and reads back `{ url, dhash, phash, text }`. **The service
+  fetches the image itself**, so it needs the attachment's URL, not a buffer.
+- `DisabledOcrProvider` — used when no service is configured. Empty text, zero
+  hashes, no network call.
 
-- `LocalOcrProvider` — **default**. `tesseract.js` for text, `sharp` for
-  dHash/pHash over raw pixels. No API key, no network, works offline.
-- `HttpOcrProvider` — the Quotient-compatible remote service. Used only when
-  `OCR_PROVIDER_URL` is configured.
+**Behaviour:** with `OCR_PROVIDER_URL` unset, screenshot verification is
+**off** and every submission is refused. That is the fail-closed behaviour
+the feature already had; this makes the default explicit rather than changing
+the semantics. With a service configured the feature works as before.
 
-Two adapters make this a real seam rather than speculative indirection.
+**The duplicate check is unchanged** and still bit-exact with Python's
+`imagehash` 4.3.2, because the hashes come from the service and the
+comparison is over those hashes. `compareHashes` is **total** — it never
+throws, and a hash that cannot be compared verifies nothing, so the
+screenshot is refused rather than crashed on.
 
-The duplicate check does not need an image library at all: the service hands
-us a hex hash, and the comparison is a Hamming distance. Port it as
-`hexToHash` (16 hex chars → `bigint`) plus a 64-bit XOR popcount, ~15 lines.
-This is the one place `imagehash` leaks in, and it is trivially portable.
-
-**Open for the port:** confirm the exact hash the remote service produces
-before trusting a threshold. The `<= 7` Hamming distance on a 64-bit dHash is
-only meaningful for a 64-bit dHash. Our local implementation must produce
-the same shape, and the threshold is a config value, not a constant.
+**The free-tier, hashing and threshold decisions below are unchanged.**
 
 ## D21. In-memory caches: `Set`/`Map`, rebuilt at startup
 

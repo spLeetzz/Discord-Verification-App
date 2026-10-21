@@ -2,15 +2,14 @@
  * The provider that is switched off.
  *
  * A deployment that does not use screenshot verification should not pay for
- * OCR. The local provider starts a Tesseract worker, which downloads a
- * language model of about 15MB on the first run, keeps a worker process
- * alive for the rest of the bot's life, and costs about two seconds per
- * screenshot.
+ * OCR, and a deployment that has no OCR service configured has no engine
+ * to pay for at all: the service does the OCR and the hashing, and there is
+ * no local one behind it.
  *
  * This provider costs nothing. It starts no worker, downloads no model and
  * makes no network call. It answers with **empty text**, and every rule
  * that looks at the text refuses an empty text — so a screenshot submitted
- * while OCR is off is rejected rather than waved through.
+ * while the OCR is off is rejected rather than waved through.
  *
  * ## The one hole, and how it is closed
  *

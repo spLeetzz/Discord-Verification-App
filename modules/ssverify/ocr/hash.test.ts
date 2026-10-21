@@ -1,15 +1,14 @@
-import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_DUPLICATE_THRESHOLD,
   HASH_HEX_LENGTH,
-  computeDhash,
-  computeHashes,
-  computePhash,
+  UnusableHashError,
+  compareHashes,
   hashToHex,
   hexToHash,
   hammingDistance,
+  isHashHex,
   isPerceptualDuplicate,
 } from "./hash.js";
 
@@ -17,35 +16,13 @@ const HASH_A = "0123456789abcdef";
 const HASH_B = "0123456789abcdee";
 
 /**
- * A solid 16x16 image of one colour.
+ * The hashes the Quotient-compatible service answers with.
+ *
+ * The duplicate check is over hashes the service returns, so these are the
+ * values the comparison has to work with.
  */
-function solidImage(red: number, green: number, blue: number): Promise<Buffer> {
-  return sharp({
-    create: { width: 16, height: 16, channels: 3, background: { r: red, g: green, b: blue } },
-  })
-    .png()
-    .toBuffer();
-}
-
-/**
- * A 16x16 image whose colour changes from pixel to pixel.
- */
-function gradientImage(): Promise<Buffer> {
-  const width = 16;
-  const height = 16;
-  const pixels = Buffer.alloc(width * height * 3);
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const offset = (y * width + x) * 3;
-      pixels[offset] = (x * 13) % 256;
-      pixels[offset + 1] = (y * 7) % 256;
-      pixels[offset + 2] = (x * y) % 256;
-    }
-  }
-
-  return sharp(pixels, { raw: { width, height, channels: 3 } }).png().toBuffer();
-}
+const SERVICE_DHASH = "9c63949032868431";
+const SERVICE_PHASH = "c0c0bf3f3bf0f090";
 
 describe("hexToHash", () => {
   it("round-trips through hashToHex", () => {
@@ -93,6 +70,19 @@ describe("hexToHash", () => {
   it("does not silently truncate a longer hash", () => {
     expect(() => hexToHash("0123456789abcdef0123")).toThrow();
   });
+
+  it("throws an error that names the hash that was broken", () => {
+    // The caller has to know *which* hash was the broken one, so that is
+    // what the error carries.
+    expect(() => hexToHash("abc")).toThrow(UnusableHashError);
+
+    try {
+      hexToHash("abc");
+    } catch (error) {
+      expect(error).toBeInstanceOf(UnusableHashError);
+      expect((error as UnusableHashError).hash).toBe("abc");
+    }
+  });
 });
 
 describe("hashToHex", () => {
@@ -110,6 +100,23 @@ describe("hashToHex", () => {
 
   it("ignores bits above the 64th", () => {
     expect(hashToHex(0x1ffffffffffffffffn)).toBe("ffffffffffffffff");
+  });
+});
+
+describe("isHashHex", () => {
+  it("accepts sixteen hex characters", () => {
+    expect(isHashHex("0000000000000000")).toBe(true);
+    expect(isHashHex("ffffffffffffffff")).toBe(true);
+    expect(isHashHex("9C63949032868431")).toBe(true);
+  });
+
+  it("refuses anything else", () => {
+    expect(isHashHex("")).toBe(false);
+    expect(isHashHex("abc")).toBe(false);
+    expect(isHashHex("0123456789abcde")).toBe(false);
+    expect(isHashHex("0123456789abcdef0")).toBe(false);
+    expect(isHashHex("0123456789abcdeg")).toBe(false);
+    expect(isHashHex("0123456789abcde ")).toBe(false);
   });
 });
 
@@ -186,85 +193,78 @@ describe("isPerceptualDuplicate", () => {
   });
 });
 
-describe("computeHashes", () => {
-  it("returns 16 hex characters for both hashes", async () => {
-    const image = await solidImage(51, 102, 204);
+describe("compareHashes", () => {
+  it("compares the hashes the service returns", () => {
+    const comparison = compareHashes(SERVICE_DHASH, SERVICE_PHASH);
 
-    const { dhash, phash } = await computeHashes(image);
+    expect(comparison.ok).toBe(true);
 
-    expect(dhash).toMatch(/^[0-9a-f]{16}$/);
-    expect(phash).toMatch(/^[0-9a-f]{16}$/);
+    if (!comparison.ok) return;
+
+    expect(comparison.distance).toBe(
+      hammingDistance(SERVICE_DHASH, SERVICE_PHASH),
+    );
+    expect(comparison.duplicate).toBe(
+      comparison.distance <= DEFAULT_DUPLICATE_THRESHOLD,
+    );
   });
 
-  it("gives the same answer for the same image every time", async () => {
-    const image = await gradientImage();
+  it("is 0 for the same hash twice", () => {
+    const comparison = compareHashes(SERVICE_DHASH, SERVICE_DHASH);
 
-    const first = await computeHashes(image);
-    const second = await computeHashes(image);
-
-    expect(second).toEqual(first);
+    expect(comparison).toEqual({ ok: true, distance: 0, duplicate: true });
   });
 
-  it("gives different answers for different images", async () => {
-    const solid = await solidImage(51, 102, 204);
-    const gradient = await gradientImage();
+  it("finds the duplicate when the hashes are close enough", () => {
+    // Seven bits set: at the threshold.
+    const comparison = compareHashes("0000000000000000", "000000000000007f");
 
-    const a = await computeHashes(solid);
-    const b = await computeHashes(gradient);
-
-    expect(a.dhash).not.toBe(b.dhash);
-    expect(a.phash).not.toBe(b.phash);
+    expect(comparison).toEqual({ ok: true, distance: 7, duplicate: true });
   });
 
-  it("reads a file path as well as a buffer", async () => {
-    const image = await gradientImage();
+  it("does not find the duplicate one bit further away", () => {
+    const comparison = compareHashes("0000000000000000", "00000000000000ff");
 
-    const fromBuffer = await computeHashes(image);
-
-    const { mkdtemp, writeFile } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
-
-    const directory = await mkdtemp(join(tmpdir(), "ocr-hash-"));
-    const file = join(directory, "image.png");
-    await writeFile(file, image);
-
-    const fromFile = await computeHashes(file);
-
-    expect(fromFile).toEqual(fromBuffer);
+    expect(comparison).toEqual({ ok: true, distance: 8, duplicate: false });
   });
 
-  it("computes the same hashes through the single hash helpers", async () => {
-    const image = await gradientImage();
+  it("takes the threshold as a parameter", () => {
+    const a = "0000000000000000";
+    const b = "00000000000000ff";
 
-    const both = await computeHashes(image);
-
-    expect(await computeDhash(image)).toBe(both.dhash);
-    expect(await computePhash(image)).toBe(both.phash);
-  });
-});
-
-describe("the reference hashes", () => {
-  // These are the hashes the Python `imagehash` library produces for the
-  // same two images, with Pillow doing the resampling. They are pinned here
-  // because the duplicate check inherits a threshold that was calibrated
-  // against that implementation: a hash that drifts away from it makes the
-  // measured distance between two screenshots larger than it should be.
-  it("matches imagehash for a solid image", async () => {
-    const image = await solidImage(51, 102, 204);
-
-    const { dhash, phash } = await computeHashes(image);
-
-    expect(dhash).toBe("0000000000000000");
-    expect(phash).toBe("8000000000000000");
+    expect(compareHashes(a, b, 8).ok).toBe(true);
+    expect(compareHashes(a, b, 0).ok).toBe(true);
   });
 
-  it("matches imagehash for a gradient", async () => {
-    const image = await gradientImage();
+  it("refuses a hash it cannot read instead of throwing", () => {
+    // The judgement call: a service that answers with a hash of a
+    // different length must not crash the duplicate check. It has to
+    // refuse, because a hash that cannot be compared verifies nothing.
+    const comparison = compareHashes("abc", SERVICE_DHASH);
 
-    const { dhash, phash } = await computeHashes(image);
+    expect(comparison.ok).toBe(false);
 
-    expect(dhash).toBe("ffffffffffffffff");
-    expect(phash).toBe("a255e055ff555650");
+    if (comparison.ok) return;
+
+    expect(comparison.reason).toMatch(/16-character/);
+    expect(comparison.reason).toContain("abc");
+  });
+
+  it("refuses when the second hash is the broken one", () => {
+    const comparison = compareHashes(SERVICE_DHASH, "zzzzzzzzzzzzzzzz");
+
+    expect(comparison.ok).toBe(false);
+
+    if (comparison.ok) return;
+
+    expect(comparison.reason).toMatch(/not a valid hex/);
+    expect(comparison.reason).toContain("zzzzzzzzzzzzzzzz");
+  });
+
+  it("never throws, whatever it is given", () => {
+    for (const broken of ["", "abc", "0123456789abcdeg", "0123456789abcde"]) {
+      expect(() => compareHashes(broken, SERVICE_DHASH)).not.toThrow();
+      expect(() => compareHashes(SERVICE_DHASH, broken)).not.toThrow();
+    }
   });
 });

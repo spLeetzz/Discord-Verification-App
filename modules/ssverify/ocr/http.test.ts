@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { UnusableHashError } from "./hash.js";
 import { HttpOcrProvider } from "./http.js";
 
 const SERVICE_URL = "https://example.com/ocr";
@@ -17,6 +18,17 @@ function serviceAnswer(overrides: Record<string, unknown> = {}): unknown {
       ...overrides,
     },
   ];
+}
+
+/**
+ * A provider whose service always answers the same way.
+ */
+function providerAnswering(answer: unknown): HttpOcrProvider {
+  const fetchImpl = vi.fn<typeof fetch>(
+    async () => new Response(JSON.stringify(answer), { status: 200 }),
+  );
+
+  return new HttpOcrProvider({ url: SERVICE_URL, fetchImpl });
 }
 
 describe("HttpOcrProvider", () => {
@@ -55,8 +67,8 @@ describe("HttpOcrProvider", () => {
     const [, init] = fetchImpl.mock.calls[0] ?? [];
     // `RequestInit["headers"]` is a union of `Headers`, a list of pairs and
     // a record, and only the record can be read with a string key. The
-    // provider always sends a plain record of header names to values, so
-    // the cast names that shape instead of widening the check to `any`.
+    // provider always sends a plain record of header names to values, so the
+    // cast names that shape instead of widening the check to `any`.
     const headers = init?.headers as Record<string, string> | undefined;
 
     expect(headers?.["authorization"]).toBe("secret");
@@ -156,6 +168,37 @@ describe("HttpOcrProvider", () => {
     );
   });
 
+  it("refuses a hash of the wrong length with an error that names the hash", async () => {
+    // The judgement call: a service that answers with a hash of a
+    // different length must not crash the duplicate check. The provider
+    // refuses the result, and the error says which hash was broken.
+    const provider = providerAnswering(
+      serviceAnswer({ dhash: "9c6394903286843" }),
+    );
+
+    await expect(
+      provider.analyze("https://example.com/screenshot.png"),
+    ).rejects.toThrow(UnusableHashError);
+
+    await expect(
+      provider.analyze("https://example.com/screenshot.png"),
+    ).rejects.toThrow(/9c6394903286843/);
+  });
+
+  it("refuses a hash that is not hex with an error that names the hash", async () => {
+    const provider = providerAnswering(
+      serviceAnswer({ phash: "zzzzzzzzzzzzzzzz" }),
+    );
+
+    await expect(
+      provider.analyze("https://example.com/screenshot.png"),
+    ).rejects.toThrow(UnusableHashError);
+
+    await expect(
+      provider.analyze("https://example.com/screenshot.png"),
+    ).rejects.toThrow(/zzzzzzzzzzzzzzzz/);
+  });
+
   it("refuses an answer without text", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify(serviceAnswer({ text: 42 })), { status: 200 }),
@@ -181,5 +224,44 @@ describe("HttpOcrProvider", () => {
     const result = await provider.analyze("https://example.com/screenshot.png");
 
     expect(result.dhash).toBe("9c63949032868431");
+  });
+});
+
+describe("the lifecycle of the provider", () => {
+  it("ends the requests that are on the wire when it is shut down", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new Error("aborted"));
+          });
+        }),
+    );
+
+    const provider = new HttpOcrProvider({ url: SERVICE_URL, fetchImpl });
+
+    const pending = provider.analyze("https://example.com/screenshot.png");
+
+    // Let the request reach the wire before the provider is shut down.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    await provider.shutdown();
+
+    await expect(pending).rejects.toThrow(/could not be reached/);
+  });
+
+  it("refuses to work after it was shut down", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify(serviceAnswer()), { status: 200 }),
+    );
+
+    const provider = new HttpOcrProvider({ url: SERVICE_URL, fetchImpl });
+
+    await provider.shutdown();
+
+    await expect(
+      provider.analyze("https://example.com/screenshot.png"),
+    ).rejects.toThrow(/shut down/);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

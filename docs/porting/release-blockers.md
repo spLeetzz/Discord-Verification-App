@@ -113,16 +113,24 @@ premium expiry was to **delete** the surplus — which would delete
 participants' registrations. That is not ported (D15), and it should stay
 that way.
 
-## B10. The OCR engine's accuracy against each verification rule
+## B10. The OCR service, and its accuracy against each verification rule
 
-The duplicate check is bit-exact with Python's `imagehash`, so the threshold
-of 7 means the same thing it did. But the **text** rules were calibrated
-against Quotient's remote OCR service, and the port uses Tesseract locally.
-"Contains" rules are reliable; equality rules are not — an icon reading as a
-character between two words breaks an equality check a human would pass.
+**There is no local OCR engine.** The port ships a remote provider only
+(`HttpOcrProvider`), and with no `OCR_PROVIDER_URL` configured, screenshot
+verification refuses every submission. If the feature is wanted, it needs a
+service.
 
-**Validate each rule against the real screenshots** this bot's users will
-submit.
+The duplicate check is bit-exact with Python's `imagehash` 4.3.2, so the
+threshold of 7 means the same thing it did — the hashes come from the service
+and the comparison is over those hashes.
+
+But the **text** rules were calibrated against Quotient's own service, so
+they must be validated against whatever service is actually used. "Contains"
+rules are reliable; equality rules are not — an icon reading as a character
+between two words breaks an equality check a human would pass.
+
+**Validate each rule against the real screenshots this bot's users will
+submit.**
 
 ---
 

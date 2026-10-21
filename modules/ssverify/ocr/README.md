@@ -4,12 +4,30 @@ Everything the screenshot-verification feature needs to look at a picture:
 the text in it, and the two perceptual hashes the duplicate check compares.
 
 This replaces two things Quotient had. Its OCR was an external service
-(`POST {FASTAPI_URL}/ocr`) that is not in Quotient's repository, cannot be
-run, and cannot be pointed at. Its duplicate check leaned on the
-Python-only `imagehash` library. Both are replaced here: the service by the
-provider interface below, `imagehash` by `hash.ts`.
+(`POST {FASTAPI_URL}/ocr`) that is not in Quotient's repository and cannot
+be run. Its duplicate check leaned on the Python-only `imagehash` library.
+The service is what this module talks to, and the duplicate check is a
+Hamming distance over the hashes the service returns.
 
-Nothing in here imports from `core/` or `db/`. The module stands alone.
+Nothing in here imports from `core/`, `db/` or `utils/`. The module stands
+alone.
+
+## There is no local engine
+
+**The bot has no OCR of its own.** The service does the text recognition
+*and* the hashing, and there is no local fallback behind it: no Tesseract
+worker, no language model, no image library.
+
+So a deployment that has no service configured has **no OCR at all**, and
+the provider it gets is the `DisabledOcrProvider` — which refuses every
+screenshot rather than waving one through. The feature still exists; it
+just has nothing to do the work.
+
+| Configuration | Provider | What happens |
+| --- | --- | --- |
+| `OCR_PROVIDER_URL` set | `HttpOcrProvider` | The screenshot is sent to the service, and the answer is checked against the rules. |
+| `OCR_PROVIDER_URL` unset | `DisabledOcrProvider` | Every screenshot is refused. Nothing is stored. |
+| `OCR_ENABLED=false` | `DisabledOcrProvider` | Every screenshot is refused. Nothing is stored. |
 
 ## The interface
 
@@ -28,9 +46,9 @@ interface OcrResult {
 }
 ```
 
-`analyze` takes a `Buffer` of image data or a `string`. For the local
-provider a string is a file path; for the remote one it is a publicly
-reachable URL, because that service fetches the image itself.
+`analyze` takes a `Buffer` of image data or a `string`. The remote service
+fetches the image itself, so a `string` has to be a **publicly reachable
+URL**; a `Buffer` is refused.
 
 `text` is normalised: lowercased, with spaces and newlines removed. That is
 Quotient's `ImageResponse.lower_text`, the form every rule in Quotient's
@@ -39,63 +57,33 @@ Quotient's `ImageResponse.lower_text`, the form every rule in Quotient's
 Quotient's YouTube rule looked for the literal string `"SUBSCRIBE "`,
 trailing space included, which the normalisation removes.
 
+## The providers
+
+**`HttpOcrProvider`** talks to the Quotient-compatible service. It posts
+`[{"url": ...}]` with an `authorization` header and reads back
+`{url, dhash, phash, text}`.
+
+**`DisabledOcrProvider`** is the provider for a deployment that has no
+service, or that switches the OCR off. It answers with empty text, makes no
+network call and reads no image.
+
 `createOcrProvider()` builds the right one:
 
 ```ts
 const provider = createOcrProvider();
-// no OCR_PROVIDER_URL  -> LocalOcrProvider, no key, no network
-// OCR_PROVIDER_URL set -> HttpOcrProvider, the Quotient-compatible service
+// OCR_PROVIDER_URL set -> HttpOcrProvider
+// OCR_PROVIDER_URL unset -> DisabledOcrProvider
 ```
 
-Two helpers come with it: `ocrEnabledFromEnv()` reads the environment
-half of the on/off decision, and `isOcrDisabled(provider)` says whether the
-provider in hand is the switched-off one. Both are described under
-[Switching OCR off](#switching-ocr-off).
-
-## The providers
-
-**`LocalOcrProvider`** is the default. `tesseract.js` reads the text and
-`sharp` decodes the pixels. It needs no API key and no network once the
-Tesseract language model is on disk. The model is downloaded on the first
-run and cached in `.cache/tesseract` (override with `cachePath`).
-
-The worker is created lazily and reused, so only the first screenshot pays
-for the download. `warmup()` at boot moves that cost to startup. A worker
-that cannot be started does not fail the screenshot: the text comes back
-empty and the hashes are still computed — and every rule that checks the
-text rejects an empty text, so a broken OCR rejects a screenshot rather than
-waving it through. (The `any_ss` type has no rules at all; see
-[Switching OCR off](#switching-ocr-off).)
-
-Calls are serialised per provider. Quotient held one global lock around its
-OCR call; here the lock belongs to the provider, so a second provider or a
-second process is not slowed down by the first.
-
-**`HttpOcrProvider`** talks to the Quotient-compatible service and is only
-used when `OCR_PROVIDER_URL` is configured. It posts `[{"url": ...}]` with
-an `authorization` header and reads back `{url, dhash, phash, text}`.
-
-**`DisabledOcrProvider`** is the provider for a deployment that does not use
-OCR at all. It is described under [Switching OCR off](#switching-ocr-off).
+Two helpers come with it: `ocrEnabledFromEnv()` reads the environment half
+of the on/off decision, and `isOcrDisabled(provider)` says whether the
+provider in hand is the switched-off one.
 
 ## Switching OCR off
 
-A deployment that does not use screenshot verification should not pay for
-OCR. The local provider starts a Tesseract worker, which downloads a
-language model of about 15MB the first time it runs and keeps a worker
-process for the rest of the bot's life, and every screenshot costs about two
-seconds.
-
 `createOcrProvider({ enabled: false })` returns the `DisabledOcrProvider`
-instead. It **starts no worker, downloads no model and makes no network
-call** — the image is not even decoded.
-
-```ts
-const provider = createOcrProvider({ enabled: false });
-
-provider.name;                    // "disabled"
-await provider.analyze(buffer);  // { text: "", dhash: "0000000000000000", ... }
-```
+instead, whatever the environment says. It **makes no network call** — the
+image is not even read.
 
 ### What "off" means
 
@@ -122,25 +110,12 @@ whatever provider the caller holds.
 The hashes of a disabled result are sixteen zero characters. No image was
 looked at, so there is no hash — the caller must not store one.
 
-### What it saves
-
-- **No language model download.** The local provider fetches about 15MB of
-  Tesseract model the first time it runs and caches it in `.cache/tesseract`.
-  Off, there is no download and no cache directory.
-- **No worker process.** The Tesseract worker is created lazily and kept
-  for the life of the bot. Off, there is nothing to keep and nothing to
-  terminate.
-- **No two-second stalls.** Every screenshot costs about two seconds of
-  recognition. Off, the answer comes back immediately.
-
 ### How the decision is made
 
 Three ways:
 
 1. **Forced on** — `OCR_ENABLED=true` or `OCR_ENABLED=1`. OCR runs whatever
-   the database says. This is what a deployment that uses screenshot
-   verification sets, and it is also the right answer for a deployment with
-   `OCR_PROVIDER_URL` set: that deployment *is* using OCR.
+   the database says.
 2. **Forced off** — `OCR_ENABLED=false` or `OCR_ENABLED=0`. OCR does not run
    whatever the database says.
 3. **Automatic** — `OCR_ENABLED` is not set. The caller decides, and the
@@ -168,125 +143,127 @@ The module does not read `OCR_ENABLED` on its own, and it does not import
 from `db/`: it takes the decision as an argument, because only the caller
 can see the database.
 
-### Adding a third provider
-
-Implement `OcrProvider` and return it. The interface is two members:
+**The decision is not the last word.** `createOcrProvider({ enabled: true })`
+still returns the disabled provider when no service is configured, so the
+caller has to ask the provider it got rather than the flag it passed:
 
 ```ts
-class MyOcrProvider implements OcrProvider {
-  readonly name = "mine";
-
-  async analyze(image: Buffer | string): Promise<OcrResult> {
-    return { text: "whatever", dhash: "0000000000000000", phash: "0000000000000000" };
-  }
-}
+const provider = createOcrProvider({ enabled });
+const ocrRuns = !isOcrDisabled(provider);
 ```
 
-Rules the implementation has to keep:
+## A refusal is not a crash
 
-- `text` is normalised — call `normaliseText()` on whatever the engine
-  returned, and put the untouched text in `rawText`.
-- `dhash` and `phash` are 16 lower case hex characters. Use
-  `computeHashes()` if the hashes are yours to compute, and
-  `hashToHex(hexToHash(value))` to put a hash that came from somewhere else
-  into the canonical form.
-- The hashes must be computed by one implementation for all of them. A
-  duplicate check compares a new hash with stored ones, and the distance
-  only means something when both sides counted the same 64 bits the same
-  way.
+A provider that cannot do its job — the service is down, it answered with
+rubbish, it sent a hash nobody can compare — is a screenshot that **cannot
+be verified**. It has to be refused, and a refusal is a decision rather than
+an exception: the member gets an answer, and nothing is stored.
+
+`analyzeImage()` is the call that makes that decision:
+
+```ts
+import { analyzeImage } from "../ssverify/ocr/index.js";
+
+const analysis = await analyzeImage(provider, imageUrl);
+
+if (!analysis.ok) {
+  // refuse the screenshot, and say why
+  logger.warn(`[Identity] The screenshot could not be verified: ${analysis.reason}`);
+  return { accepted: 0, lines: [OCR_UNAVAILABLE_MESSAGE], verified: false };
+}
+
+const result = analysis.result;
+```
+
+It never throws. The reason says what went wrong.
 
 ## The hashes
 
-Both hashes are 64 bits, rendered as **16 lower case hex characters**,
-zero padded: `0000000000000000` through `ffffffffffffffff`. A hash that is
-not exactly 16 characters is rejected rather than truncated — a truncated
-hash would compare as "a different picture", which is a bug that hides
-itself.
+Both hashes are 64 bits, rendered as **16 lower case hex characters**, zero
+padded: `0000000000000000` through `ffffffffffffffff`. A hash that is not
+exactly 16 characters is refused rather than truncated — a truncated hash
+would compare as "a different picture", which is a bug that hides itself.
 
-**dHash** — the image is greyscaled, resized to 9x8, and every pixel is
-compared with the one to its right. 64 comparisons, 64 bits.
-
-**pHash** — the image is greyscaled, resized to 32x32, and the discrete
-cosine transform is taken. The 8x8 corner of the low-frequency part is
-compared against its own median. 64 coefficients, 64 bits.
-
-### Why the threshold is 7
-
-The duplicate check is a Hamming distance: the number of bits that differ
-between the new hash and a stored one. A distance only means something for
-a fixed number of bits, so the threshold of 7 is a statement about a **64-bit**
-hash: two screenshots count as the same picture when at most 7 of their 64
-bits differ.
-
-That number is Quotient's, and it was calibrated against hashes produced by
-the Python `imagehash` library. So this implementation reproduces
-`imagehash` 4.x exactly:
-
-- the dHash bit is set when the pixel on the **right** is brighter than the
-  one on the left (`imagehash` computes `pixels[:, 1:] > pixels[:, :-1]`);
-- the first comparison is the **most significant bit** of the 64-bit value,
-  and the hash is written as 16 hex characters the way `imagehash` 4.x writes
-  it (`imagehash` 3.x wrote the bits of every byte the other way round; the
-  distance between two hashes is the same either way, only the stored text
-  differs);
-- the greyscale conversion, the resampling and the transform are the ones
-  `imagehash` used, which means Pillow does the resampling. `resample.ts`
-  is a port of Pillow's Lanczos resampler for that reason, and
-  `hash.test.ts` pins the result against the reference values.
-
-Both hashes are verified against `imagehash` 4.3.2 with Pillow 13 on a
-corpus of images, and match bit for bit. That is what keeps the threshold
-meaning what it meant: a resampler that drifts from Pillow's makes the
-measured distance between two screenshots of the same thing larger than
-the reference measures it. The reference measures 0 for the same
-screenshot saved as a different JPEG and 4 for a slightly cropped one; a
-resampler that drifts measures 0 and 11, and 11 is over the threshold.
-
-**The threshold is a parameter, not a constant.** `isPerceptualDuplicate(a,
-b, threshold)` takes it, and `DEFAULT_DUPLICATE_THRESHOLD` is 7. The
-number only means something for a 64-bit hash, so it has to move with the
-hash implementation rather than being baked into a comparison.
+The service produces them, so this module does not read pixels. It holds
+the comparison:
 
 ```ts
 hammingDistance("0000000000000000", "000000000000007f"); // 7 -> duplicate
 hammingDistance("0000000000000000", "00000000000000ff"); // 8 -> not a duplicate
 ```
 
+### The threshold of 7
+
+The duplicate check is a Hamming distance: the number of bits that differ
+between the new hash and a stored one. A distance only means something for
+a fixed number of bits, so the threshold of 7 is a statement about a
+**64-bit** hash: two screenshots count as the same picture when at most 7 of
+their 64 bits differ.
+
+That number is Quotient's, and it was calibrated against the Python
+`imagehash` library. The service has to produce hashes of the same shape —
+64 bits, 16 hex characters — for the threshold to mean what it meant.
+
+**The threshold is a parameter, not a constant.** `isPerceptualDuplicate(a,
+b, threshold)` takes it, and `DEFAULT_DUPLICATE_THRESHOLD` is 7.
+
+### A hash that cannot be compared
+
+`hexToHash` and `hammingDistance` **throw** `UnusableHashError` on a hash
+that is not sixteen hex characters. That is right for a parser, but a
+service that changed its hash length would then crash the duplicate check
+instead of being handled.
+
+So there is a second way in, and it is the one a caller that must not crash
+wants:
+
+```ts
+const comparison = compareHashes(a, b);
+
+if (!comparison.ok) {
+  // a hash we cannot compare is a hash that verifies nothing:
+  // refuse the screenshot
+  return { ok: false, reason: comparison.reason };
+}
+
+if (comparison.duplicate) {
+  // the same picture
+}
+```
+
+`compareHashes()` never throws. It answers "I cannot compare these" and
+says why, and the caller refuses. A hash the service sent that cannot be
+compared is a hash the screenshot cannot be verified with, and an
+unverifiable screenshot must not be accepted.
+
 ## Known limitations
 
-**The local OCR is not the remote service.** The text quality depends on
-the Tesseract model that is on disk, and Tesseract and Quotient's service
-read a screenshot differently. The same picture can come back with
-different text — Tesseract mis-reads small or low-contrast text, and it
-inserts line breaks of its own. Any rule that compares the text literally
-(a channel name, a keyword) has to be tested against the text this provider
-actually produces, not against the text the old service produced.
+**The service is not in the repository.** It is not Quotient's, it is not
+ours, and it is not configured by default. A deployment without one refuses
+every screenshot.
 
-**The hashes are the compatible part.** They match `imagehash` bit for bit,
-so the duplicate check behaves the way Quotient's did.
+**The service needs a public URL.** It fetches the image itself, so the
+image cannot be a buffer. A caller that has the picture as a buffer — the
+Discord attachment, say — has to give the service somewhere to fetch it
+from.
 
-**The pHash of a blank image is not meaningful.** The median comparison
-decides every bit, and for a uniform image all the coefficients but the
-first are zero. This implementation drops the rounding errors out of the
-transform so that the result is the same one the reference produces, but a
-blank screenshot still has no perceptual structure to speak of.
+**The hashes are the service's.** The duplicate check inherits the
+threshold that was calibrated against `imagehash`, and the service has to
+produce hashes of the same shape for it to mean anything. The two hashes
+stored per submission have to come from one implementation: a database
+mixing conventions compares two different things.
 
-**The resampling is not free.** Both hashes take about 30ms for a phone
-screenshot, of which about 11ms is decoding the picture and about 17ms is
-the JavaScript resampling. `sharp`'s own resampler does the same work in
-about 11ms, but it is not compatible, and that is the trade this module
-makes.
+**The pHash of a blank image is not meaningful.** A blank screenshot has no
+perceptual structure to speak of, whatever produced the hash.
 
 ## The files
 
 | File | What it holds |
 | --- | --- |
-| `index.ts` | `OcrProvider`, `OcrResult`, `createOcrProvider`, `ocrEnabledFromEnv` |
-| `local.ts` | `LocalOcrProvider` — Tesseract and sharp |
+| `index.ts` | `OcrProvider`, `OcrResult`, `OcrAnalysis`, `createOcrProvider`, `analyzeImage`, `ocrEnabledFromEnv` |
 | `http.ts` | `HttpOcrProvider` — the Quotient-compatible service |
 | `disabled.ts` | `DisabledOcrProvider` — the provider that is switched off |
-| `hash.ts` | `computeHashes`, `computeDhash`, `computePhash`, `hexToHash`, `hashToHex`, `hammingDistance`, `isPerceptualDuplicate` |
-| `resample.ts` | Pillow-compatible Lanczos resampling |
+| `hash.ts` | `hexToHash`, `hashToHex`, `hammingDistance`, `isPerceptualDuplicate`, `compareHashes` |
 | `text.ts` | `normaliseText` — Quotient's `lower_text` |
 | `queue.ts` | `SerialQueue` — one analysis at a time per provider |
 
@@ -296,13 +273,6 @@ makes.
 npx vitest run modules/ssverify/ocr/
 ```
 
-The tests never start Tesseract: the text extractor is injected, so the
-suite does not depend on the language model being downloadable. The text
-content is never asserted either, only that it is a string.
-
-`disabled.test.ts` is the exception: it mocks `tesseract.js` so that the
-worker factory can be watched, and asserts that the switched-off provider
-never calls it, never calls `fetch`, and never creates the cache directory
-the language model would be downloaded into. A control test starts a worker
-on purpose, so that "no worker was started" is a fact about the provider and
-not about a spy that never fires.
+The tests never talk to a service: the `fetch` is replaced, so the suite
+needs no network and no service. The answers the fake service gives are
+the ones a real service gives, hashes included.
