@@ -93,6 +93,14 @@ export interface ReminderJobPayload {
    * one `/reminder list` shows.
    */
   readonly reminderId?: string;
+  /**
+   * When the reminder was set, as an ISO timestamp.
+   *
+   * The source's embed showed the *creation* time of the timer row, not
+   * the delivery time, and the row's creation time is not in the payload
+   * the dispatcher hands over — so it travels with the payload too.
+   */
+  readonly createdAt?: string;
 }
 
 /** The payload of an `autopurge` job. */
@@ -101,6 +109,24 @@ export interface AutoPurgeJobPayload {
   readonly channelId: string;
   /** The message to delete when the job comes due. */
   readonly messageId: string;
+}
+
+/**
+ * A row of the durable scheduler, as the area sees it.
+ *
+ * The event is the string the `jobs` table holds: `reminder`,
+ * `autopurge` or `community_daily`.
+ */
+export interface JobRecord {
+  readonly id: string;
+  /** The event name, e.g. `community_daily`. */
+  readonly event: string;
+  /** When the job comes due. */
+  readonly expiresAt: Date;
+  /** When the row was written. */
+  readonly createdAt: Date;
+  /** The payload, as it was written. */
+  readonly payload: unknown;
 }
 
 /** How many times one member has used the tag command in a guild. */

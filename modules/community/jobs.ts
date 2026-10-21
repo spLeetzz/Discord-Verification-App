@@ -6,10 +6,11 @@
  * message is never deleted or a channel is locked forever.
  *
  *  - `reminder` — posts a reminder in the channel it was created in;
- *  - `autopurge` — deletes a message once its channel's delay is up;
- *  - `msg_delete` — the daily housekeeping pass: it prunes the snipes
- *    that are older than ten days and the command-usage rows that are
- *    older than thirty, and re-arms itself for the next day.
+ *  - `autopurge` — deletes one message once its channel's delay is up;
+ *  - `community_daily` — the daily housekeeping pass.
+ *
+ * Each event means exactly one thing, and the payload says nothing about
+ * *which* event it is: the event name says it.
  *
  * The dispatcher deletes the row before it dispatches it, which makes the
  * handler idempotent under restarts: a job that fires twice cannot post
@@ -25,7 +26,11 @@ import { deliverReminder } from "./views/reminder.js";
 import type { AutoPurgeJobPayload, ReminderJobPayload } from "./types.js";
 
 /** The job events this area owns. */
-export const COMMUNITY_JOB_EVENTS = ["reminder", "autopurge", "msg_delete"] as const;
+export const COMMUNITY_JOB_EVENTS = [
+  "reminder",
+  "autopurge",
+  "community_daily",
+] as const;
 
 /** One of this area's job events. */
 export type CommunityJobEvent = (typeof COMMUNITY_JOB_EVENTS)[number];
@@ -34,7 +39,21 @@ export type CommunityJobEvent = (typeof COMMUNITY_JOB_EVENTS)[number];
 export const SNIPE_RETENTION_DAYS = 10;
 
 /** How often the daily housekeeping pass runs, in milliseconds. */
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+export const DAILY_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The id of the daily housekeeping row.
+ *
+ * The daily pass is a **singleton**: one row, one known id. The row is
+ * what the scheduler picks up, and the id is how the area finds and
+ * replaces it — so "there is exactly one daily row" is a fact about the
+ * primary key rather than a convention about deleting every row of an
+ * event.
+ *
+ * The id is a fixed uuid, not a fresh one per run: the daily job is a
+ * named thing, and a reader of the `jobs` table can recognise it.
+ */
+export const DAILY_JOB_ID = "00000000-0000-4000-8000-00000000da17";
 
 /**
  * Handles one job.
@@ -73,8 +92,8 @@ export async function handleCommunityJobEvent(
     case "autopurge":
       await onAutoPurge(client, payload);
       return true;
-    case "msg_delete":
-      await onDailyMaintenance(payload);
+    case "community_daily":
+      await onCommunityDaily(payload);
       return true;
     default:
       return false;
@@ -107,6 +126,7 @@ export function parseReminderPayload(
 
   const sourceMessageId = candidate["sourceMessageId"];
   const reminderId = candidate["reminderId"];
+  const createdAt = candidate["createdAt"];
 
   return {
     channelId,
@@ -116,6 +136,7 @@ export function parseReminderPayload(
       ? { sourceMessageId }
       : {}),
     ...(typeof reminderId === "string" && reminderId ? { reminderId } : {}),
+    ...(typeof createdAt === "string" && createdAt ? { createdAt } : {}),
   };
 }
 
@@ -136,9 +157,11 @@ export async function onReminder(
     return;
   }
 
+  const createdAt = parsed.createdAt ? new Date(parsed.createdAt) : new Date();
+
   await deliverReminder(client, parsed, {
     reminderId: parsed.reminderId ?? "unknown",
-    createdAt: new Date(),
+    createdAt: Number.isNaN(createdAt.getTime()) ? new Date() : createdAt,
   });
 }
 
@@ -168,10 +191,16 @@ export function parseAutoPurgePayload(
 }
 
 /**
- * Deletes a message whose channel is set to auto-purge.
+ * Deletes the message an `autopurge` job is about.
  *
- * The config is checked again when the job fires: the channel may have
- * been taken off the auto-purge list while the message was waiting.
+ * The event means one thing and one thing only: "delete this message
+ * after this delay". The daily housekeeping pass has an event of its
+ * own (`community_daily`), so there is no payload kind to tell two
+ * kinds of work apart.
+ *
+ * A row left over from before that change — an `autopurge` row whose
+ * payload says `kind: "daily"` — has no channel and no message, so it
+ * is dropped with a warning and the new daily row takes over.
  */
 export async function onAutoPurge(
   client: Client,
@@ -190,9 +219,11 @@ export async function onAutoPurge(
 
   if (!config) return;
 
-  const channel = await client.channels
-    .fetch(parsed.channelId)
-    .catch(() => null);
+  // The cache first: fetching a channel is an API call, and this runs
+  // once per deleted message.
+  const channel =
+    client.channels.cache.get(parsed.channelId) ??
+    (await client.channels.fetch(parsed.channelId).catch(() => null));
 
   if (!channel || !channel.isTextBased() || channel.isDMBased()) return;
 
@@ -213,7 +244,7 @@ export async function onAutoPurge(
 }
 
 /* ------------------------------------------------------------------ *
- * msg_delete — the daily housekeeping pass
+ * The daily housekeeping pass
  * ------------------------------------------------------------------ */
 
 /**
@@ -225,8 +256,14 @@ export async function onAutoPurge(
  *    **once at startup**, which is a one-shot task and not a loop, so the
  *    rows accumulated for weeks. This runs every day;
  *  - the command-usage rows that are older than thirty days (S10).
+ *
+ * Both are deletes, so the pass is idempotent: running it twice in a row
+ * removes nothing the second time.
+ *
+ * The pass has no arguments, so the payload is empty. The event name is
+ * the whole message.
  */
-export async function onDailyMaintenance(payload: unknown): Promise<void> {
+export async function onCommunityDaily(payload: unknown): Promise<void> {
   void payload;
 
   try {
@@ -242,22 +279,33 @@ export async function onDailyMaintenance(payload: unknown): Promise<void> {
     );
   }
 
-  await rearmDailyJob();
+  // The next run is armed here, in the database. A timer would die with
+  // the process, and a daily sweep that only runs until the next restart
+  // is not a daily sweep.
+  try {
+    await rearmDailyJob();
+  } catch (error) {
+    logger.error(
+      `[Community] The daily pass could not arm its next run: ${String(error)}`,
+    );
+  }
 }
 
 /**
  * Makes sure there is exactly one daily housekeeping row, due tomorrow.
  *
  * The row is replaced rather than added, so the pass cannot end up
- * running twice a day after a restart.
+ * running twice a day after a restart. Only the daily row is touched:
+ * the message-deletion rows are other people's business.
  */
 export async function rearmDailyJob(now: Date = new Date()): Promise<void> {
-  await repo.deleteJobsByEvent("msg_delete");
+  await repo.deleteJob(DAILY_JOB_ID);
 
   await repo.insertJob({
-    expiresAt: new Date(now.getTime() + ONE_DAY_MS),
-    event: "msg_delete",
-    payload: { kind: "daily" },
+    id: DAILY_JOB_ID,
+    expiresAt: new Date(now.getTime() + DAILY_INTERVAL_MS),
+    event: "community_daily",
+    payload: {},
   });
 }
 
@@ -265,16 +313,31 @@ export async function rearmDailyJob(now: Date = new Date()): Promise<void> {
  * Makes sure the daily housekeeping row exists.
  *
  * Called at startup: without it the pass would never run, because the
- * row is what the scheduler picks up.
+ * row is what the scheduler picks up. It also heals a pass whose re-arm
+ * failed while the process was up.
  */
 export async function ensureDailyJob(now: Date = new Date()): Promise<void> {
-  const count = await repo.countJobs("msg_delete");
+  const existing = await repo.findJob(DAILY_JOB_ID);
 
-  if (count > 0) return;
+  if (existing) return;
 
   await repo.insertJob({
-    expiresAt: new Date(now.getTime() + ONE_DAY_MS),
-    event: "msg_delete",
-    payload: { kind: "daily" },
+    id: DAILY_JOB_ID,
+    expiresAt: new Date(now.getTime() + DAILY_INTERVAL_MS),
+    event: "community_daily",
+    payload: {},
   });
+}
+
+/**
+ * Prunes the command-usage log.
+ *
+ * The daily pass calls this itself. It is exported as well, so the
+ * manager can wire it to a cron of its own if it prefers — the prune is
+ * idempotent, so running it twice deletes nothing the second time.
+ *
+ * @returns how many rows were removed.
+ */
+export async function handleRetentionJob(): Promise<number> {
+  return pruneCommandUsage();
 }

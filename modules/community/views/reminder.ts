@@ -16,7 +16,7 @@ import {
   ButtonStyle,
   EmbedBuilder,
 } from "discord.js";
-import type { Client, TextBasedChannel } from "discord.js";
+import type { Client } from "discord.js";
 import { EMBED_COLOR } from "../../../core/constants.js";
 import { discordTimestamp, formatTimestamp } from "../../../core/time.js";
 import { logger } from "../../../utils/logger.js";
@@ -81,9 +81,11 @@ export async function deliverReminder(
   payload: ReminderJobPayload,
   options: { reminderId: string; createdAt: Date },
 ): Promise<ReminderDelivery> {
-  const channel = await client.channels
-    .fetch(payload.channelId)
-    .catch(() => null);
+  // The cache first: fetching a channel is an API call, and a reminder
+  // is delivered the moment it comes due.
+  const channel =
+    client.channels.cache.get(payload.channelId) ??
+    (await client.channels.fetch(payload.channelId).catch(() => null));
 
   if (!channel) {
     logger.warn(
@@ -96,6 +98,14 @@ export async function deliverReminder(
   if (!channel.isTextBased() || channel.isDMBased()) {
     logger.warn(
       `[Community] The channel ${payload.channelId} cannot hold messages, so reminder ${options.reminderId} was dropped.`,
+    );
+
+    return "not_postable";
+  }
+
+  if (!channel.isSendable()) {
+    logger.warn(
+      `[Community] The channel ${payload.channelId} cannot be posted in, so reminder ${options.reminderId} was dropped.`,
     );
 
     return "not_postable";
@@ -114,7 +124,7 @@ export async function deliverReminder(
   );
 
   try {
-    await (channel as TextBasedChannel).send({
+    await channel.send({
       content: `<@${payload.userId}>`,
       embeds: [embed],
       ...(jumpUrl ? { components: [buildJumpRow(jumpUrl)] } : {}),

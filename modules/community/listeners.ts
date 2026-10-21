@@ -13,7 +13,7 @@
  */
 
 import { ChannelType, PermissionFlagsBits } from "discord.js";
-import type { Client, GuildMember, Message } from "discord.js";
+import type { Client, GuildMember, Message, PartialMessage } from "discord.js";
 import { run } from "../../core/fire-and-forget.js";
 import { logger } from "../../utils/logger.js";
 import { autoPurgeChannels } from "./cache.js";
@@ -24,6 +24,19 @@ import { staleRoleIds } from "./rules.js";
 
 /** The text a message with no content is remembered as. */
 const NO_CONTENT = "*[Content Unavailable]*";
+
+/**
+ * The channels a deleted message is remembered in.
+ *
+ * The source remembered text channels and the two kinds of thread, and
+ * nothing else.
+ */
+const SNIPEABLE_CHANNELS = new Set<ChannelType>([
+  ChannelType.GuildText,
+  ChannelType.GuildAnnouncement,
+  ChannelType.GuildPublicThread,
+  ChannelType.GuildPrivateThread,
+]);
 
 /**
  * Is this channel NSFW?
@@ -42,22 +55,14 @@ export function isNsfwChannel(channel: unknown): boolean {
 }
 
 /**
- * The channels a deleted message is remembered in.
- *
- * The source remembered text channels and the two kinds of thread, and
- * nothing else.
+ * Is this a channel a deleted message is remembered in?
  */
-export function isSnipeableChannel(channel: {
-  type?: ChannelType;
-}): boolean {
-  return (
-    channel.type === ChannelType.GuildText ||
-    channel.type === ChannelType.GuildAnnouncement ||
-    channel.type === ChannelType.GuildPublicThread ||
-    channel.type === ChannelType.GuildPrivateThread ||
-    channel.type === ChannelType.PublicThread ||
-    channel.type === ChannelType.PrivateThread
-  );
+export function isSnipeableChannel(channel: { type?: ChannelType }): boolean {
+  const type = channel.type;
+
+  if (type === undefined) return false;
+
+  return SNIPEABLE_CHANNELS.has(type);
 }
 
 /**
@@ -102,9 +107,7 @@ export function registerCommunityListeners(client: Client): void {
     await ensureDailyJob();
   }, "community.ensureDailyJob");
 
-  logger.info(
-    `[Community] Registered. The auto-purge cache holds ${autoPurgeChannels.size} channel(s).`,
-  );
+  logger.info("[Community] Registered.");
 }
 
 /**
@@ -114,6 +117,10 @@ export async function rebuildAutoPurgeCache(): Promise<void> {
   const ids = await repo.listAutoPurgeChannelIds();
 
   autoPurgeChannels.replace(ids);
+
+  logger.info(
+    `[Community] The auto-purge cache holds ${autoPurgeChannels.size} channel(s).`,
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -126,9 +133,14 @@ export async function rebuildAutoPurgeCache(): Promise<void> {
  * The source skipped bot messages and channels that are not text
  * channels, and so does this.
  */
-export async function onMessageDelete(message: Message): Promise<void> {
+export async function onMessageDelete(
+  message: Message | PartialMessage,
+): Promise<void> {
   if (!message.guild) return;
-  if (message.author.bot) return;
+
+  const author = message.author;
+
+  if (!author || author.bot) return;
 
   const channel = message.channel;
 
@@ -136,7 +148,7 @@ export async function onMessageDelete(message: Message): Promise<void> {
 
   await service.recordSnipe({
     channelId: channel.id,
-    authorId: message.author.id,
+    authorId: author.id,
     content: message.content || NO_CONTENT,
     nsfw: isNsfwChannel(channel),
   });
@@ -210,7 +222,7 @@ export async function onGuildMemberAdd(member: GuildMember): Promise<void> {
 
   if (!config) return;
 
-  const kind = member.bot ? "bots" : "humans";
+  const kind = member.user.bot ? "bots" : "humans";
 
   const configured = config[kind];
 

@@ -29,9 +29,9 @@ import type { JobEvent } from "../../db/schema.js";
 import type {
   AutoroleConfig,
   AutoPurgeConfig,
-  AutoPurgeJobPayload,
   CommandUsageEntry,
   GuildTagStats,
+  JobRecord,
   MemberTagStat,
   ReminderJobPayload,
   ReminderRecord,
@@ -44,6 +44,20 @@ import type {
 /* ------------------------------------------------------------------ *
  * Tags
  * ------------------------------------------------------------------ */
+
+/**
+ * Is this error a unique-constraint violation?
+ *
+ * Postgres reports it as SQLSTATE `23505`, and `pg` puts the error in
+ * the `cause` of the one it throws.
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  const candidate = error as
+    | { code?: string; cause?: { code?: string } }
+    | undefined;
+
+  return (candidate?.cause?.code ?? candidate?.code) === "23505";
+}
 
 /** A tag row, as the area sees it. */
 function toTagRecord(row: typeof tags.$inferSelect): TagRecord {
@@ -242,6 +256,20 @@ export async function incrementTagUsage(
  * ------------------------------------------------------------------ */
 
 /**
+ * The command names the tag statistics count.
+ *
+ * The source filtered on `cmd='tag'`, and its `tag` group was invoked
+ * without a subcommand, so that was every *use* of a tag.
+ *
+ * The port's `/tag` is a group with fourteen subcommands, so the row may
+ * hold either the top-level name (`tag`) or the qualified one
+ * (`tag show`), depending on what the dispatcher writes. Both are
+ * counted, and nothing else is: `like 'tag %'` needs the space, so
+ * `tagcheck` is not a tag command.
+ */
+const TAG_COMMAND_FILTER = sql`(${commandUsage.cmd} = 'tag' or ${commandUsage.cmd} like 'tag %')`;
+
+/**
  * How many times each member used the tag command in a guild.
  *
  * The source's raw SQL:
@@ -265,12 +293,7 @@ export async function countTagUsesByUser(
       uses: sql<number>`count(*)::int`,
     })
     .from(commandUsage)
-    .where(
-      and(
-        eq(commandUsage.guildId, guildId),
-        eq(commandUsage.cmd, "tag"),
-      ),
-    )
+    .where(and(eq(commandUsage.guildId, guildId), TAG_COMMAND_FILTER))
     .groupBy(commandUsage.userId)
     .orderBy(sql`count(*) DESC`)
     .limit(limit);
@@ -298,8 +321,8 @@ export async function countTagCommandUses(
     .where(
       and(
         eq(commandUsage.guildId, guildId),
-        eq(commandUsage.cmd, "tag"),
         eq(commandUsage.userId, userId),
+        TAG_COMMAND_FILTER,
       ),
     );
 
@@ -632,13 +655,16 @@ export async function toggleAutoroleRole(
 ): Promise<string[]> {
   const column = kind === "humans" ? "humans" : "bots";
 
+  // The column is qualified with the table name in the `DO UPDATE`
+  // clause: an unqualified name there is ambiguous between the row that
+  // is being updated and the row that is being inserted.
   const rows = await db.execute<{ humans: string[]; bots: string[] }>(sql`
     INSERT INTO ${autoroleConfigs} (guild_id, ${sql.raw(column)}, created_at, updated_at)
     VALUES (${guildId}, ARRAY[${roleId}]::text[], now(), now())
     ON CONFLICT (guild_id) DO UPDATE SET
       ${sql.raw(column)} = CASE
-        WHEN ${roleId} = ANY(${sql.raw(column)}) THEN array_remove(${sql.raw(column)}, ${roleId}::text)
-        ELSE array_append(${sql.raw(column)}, ${roleId}::text)
+        WHEN ${roleId} = ANY(autorole_configs.${sql.raw(column)}) THEN array_remove(autorole_configs.${sql.raw(column)}, ${roleId}::text)
+        ELSE array_append(autorole_configs.${sql.raw(column)}, ${roleId}::text)
       END,
       updated_at = now()
     RETURNING humans, bots
@@ -666,7 +692,7 @@ export async function removeAutoroleRole(
 
   await db.execute(sql`
     UPDATE ${autoroleConfigs}
-       SET ${sql.raw(column)} = array_remove(${sql.raw(column)}, ${roleId}::text),
+       SET ${sql.raw(column)} = array_remove(${autoroleConfigs}.${sql.raw(column)}, ${roleId}::text),
            updated_at = now()
      WHERE guild_id = ${guildId}
   `);
@@ -711,24 +737,36 @@ export async function deleteJob(id: string): Promise<void> {
   await db.delete(jobs).where(eq(jobs.id, id));
 }
 
-/** Deletes every job row of an event. */
-export async function deleteJobsByEvent(event: JobEvent): Promise<number> {
-  const deleted = await db
-    .delete(jobs)
-    .where(eq(jobs.event, event))
-    .returning({ id: jobs.id });
-
-  return deleted.length;
-}
-
-/** How many job rows of an event exist. */
-export async function countJobs(event: JobEvent): Promise<number> {
+/**
+ * The job row with this id, if it is there.
+ *
+ * The id is the row's identity, so this is how the area finds the one
+ * daily housekeeping row it owns.
+ */
+export async function findJob(id: string): Promise<JobRecord | null> {
   const rows = await db
-    .select({ count: sql<number>`count(*)::int` })
+    .select({
+      id: jobs.id,
+      event: jobs.event,
+      expiresAt: jobs.expiresAt,
+      createdAt: jobs.createdAt,
+      payload: jobs.payload,
+    })
     .from(jobs)
-    .where(eq(jobs.event, event));
+    .where(eq(jobs.id, id))
+    .limit(1);
 
-  return rows[0]?.count ?? 0;
+  const row = rows[0];
+
+  return row
+    ? {
+        id: row.id,
+        event: row.event,
+        expiresAt: row.expiresAt,
+        createdAt: row.createdAt,
+        payload: row.payload,
+      }
+    : null;
 }
 
 /**
@@ -741,8 +779,7 @@ export async function countJobs(event: JobEvent): Promise<number> {
 export async function listUserReminders(
   userId: string,
   limit = 10,
-): Promise<ReminderRecord[]> {
-  const rows = await db
+): Promise<ReminderRecord[]> {  const rows = await db
     .select({
       id: jobs.id,
       expiresAt: jobs.expiresAt,
@@ -770,10 +807,19 @@ export async function listUserReminders(
   });
 }
 
+/** How many reminders a user has running. */
+export async function countUserReminders(userId: string): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(jobs)
+    .where(and(eq(jobs.event, "reminder"), eq(jobs.userId, userId)));
+
+  return rows[0]?.count ?? 0;
+}
+
 /* ------------------------------------------------------------------ *
  * The command-usage log
  * ------------------------------------------------------------------ */
-
 /**
  * Writes one row of the command-usage log.
  *

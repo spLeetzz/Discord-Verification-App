@@ -18,12 +18,13 @@
 import { SlashCommandBuilder } from "discord.js";
 import type { ChatInputCommandInteraction } from "discord.js";
 import { respond, sendFile } from "../../../core/context.js";
-import { denialMessage, InputError } from "../../../core/errors.js";
-import { embedTemplateToBuilder, embedTemplateToJSON, parseEmbedTemplate } from "../../../core/embed-builder.js";
+import { InputError } from "../../../core/errors.js";
+import { embedTemplateToBuilder } from "../../../core/embed-builder.js";
 import { escapeMarkdown, escapeMentions } from "../../../core/escape.js";
 import { Paginator } from "../../../core/paginator.js";
-import { plural, truncate } from "../../../core/text.js";
+import { plural } from "../../../core/text.js";
 import * as repo from "../repo.js";
+import * as rules from "../rules.js";
 import * as service from "../service.js";
 import { TAG_CONTENT_MAX_LENGTH, TAG_NAME_MAX_LENGTH } from "../rules.js";
 import { buildGuildTagStatsEmbed, buildMemberTagStatsEmbed, buildTagInfoEmbed } from "../views/embeds.js";
@@ -34,6 +35,7 @@ import {
   runCommand,
 } from "./shared.js";
 import type { CommunityCommand } from "./shared.js";
+import type { TagRecord } from "../types.js";
 
 /** The longest a raw tag body may be before it is sent as a file. */
 const RAW_FILE_THRESHOLD = 1990;
@@ -76,7 +78,7 @@ function namespace(...parts: string[]): string {
 async function requireTag(
   guildId: string,
   name: string,
-): Promise<import("../types.js").TagRecord> {
+): Promise<TagRecord> {
   const tag = await service.findTag(guildId, name);
 
   if (tag) return tag;
@@ -117,39 +119,6 @@ function refuseNsfwTag(
   if (isNsfw && !channelIsNsfw(interaction)) {
     throw new InputError("This tag can only be used in NSFW channels.");
   }
-}
-
-/**
- * The body of a tag, ready to be stored.
- *
- * An embed tag's body is a **JSON template** (D32), never a Python
- * literal string: the source re-parsed the column with
- * `ast.literal_eval` on every use, so any other code path that wrote the
- * column crashed the next render.
- */
-function buildTagBody(
-  content: string,
-  isEmbed: boolean,
-): { body: string; isEmbed: boolean } {
-  if (!isEmbed) {
-    if (content.length > TAG_CONTENT_MAX_LENGTH) {
-      throw new InputError(
-        `A tag may hold at most ${TAG_CONTENT_MAX_LENGTH} characters.`,
-      );
-    }
-
-    return { body: content, isEmbed: false };
-  }
-
-  const template = parseEmbedTemplate(content);
-
-  if (!template) {
-    throw new InputError(
-      "That is not a valid embed template. It has to be a JSON object, for example `{\"title\": \"Rules\", \"description\": \"Be nice.\"}`.",
-    );
-  }
-
-  return { body: embedTemplateToJSON(template), isEmbed: true };
 }
 
 const tagCommand: CommunityCommand = {
@@ -396,16 +365,16 @@ async function showTag(interaction: ChatInputCommandInteraction): Promise<void> 
 
   refuseNsfwTag(interaction, tag.isNsfw);
 
-  if (tag.isEmbed) {
-    const template = parseEmbedTemplate(tag.content);
+  const render = rules.renderTagBody(tag);
 
-    if (!template) {
-      throw new InputError(
-        "This tag's embed template is broken, so it cannot be shown. Its owner has to edit it.",
-      );
-    }
+  if (render.kind === "broken") {
+    throw new InputError(render.reason);
+  }
 
-    await respond(interaction, { embeds: [embedTemplateToBuilder(template)] });
+  if (render.kind === "embed") {
+    await respond(interaction, {
+      embeds: [embedTemplateToBuilder(render.template)],
+    });
 
     // The source fell through here and sent the raw content as well, so
     // every embed tag was posted twice (D44).
@@ -413,11 +382,11 @@ async function showTag(interaction: ChatInputCommandInteraction): Promise<void> 
     return;
   }
 
-  if (!tag.content) {
+  if (!render.content) {
     throw new InputError("That tag does not have any content.");
   }
 
-  await respond(interaction, { content: tag.content });
+  await respond(interaction, { content: render.content });
 
   await service.countTagUse(guild.id, tag.name);
 }
@@ -464,12 +433,9 @@ async function listTags(interaction: ChatInputCommandInteraction): Promise<void>
   const ownerId = member?.id ?? null;
 
   const pager = new Paginator({
-    namespace: namespace(
-      "tags",
-      ownerId ? "of" : "all",
-      guild.id,
-      ownerId ?? "",
-    ),
+    namespace: ownerId
+      ? namespace("tags", "of", guild.id, ownerId)
+      : namespace("tags", "all", guild.id),
     perPage: 12,
     title: ownerId ? "Tags owned by a member" : "Total Tags",
     loadPages: async () => {
@@ -537,13 +503,11 @@ async function createTag(interaction: ChatInputCommandInteraction): Promise<void
   const content = requiredString(interaction, "content");
   const isEmbed = interaction.options.getBoolean("embed") ?? false;
 
-  const body = buildTagBody(content, isEmbed);
-
   const tag = await service.createTag({
     guildId: guild.id,
     name,
-    content: body.body,
-    isEmbed: body.isEmbed,
+    content,
+    isEmbed,
     ownerId: interaction.user.id,
   });
 
@@ -681,17 +645,18 @@ async function editTag(interaction: ChatInputCommandInteraction): Promise<void> 
   const guild = requireGuild(interaction);
   const name = requiredString(interaction, "name");
   const content = requiredString(interaction, "content");
-  const isEmbed = interaction.options.getBoolean("embed") ?? false;
 
-  const body = buildTagBody(content, isEmbed);
+  // `null` when the option was not given: the tag keeps the kind it
+  // had, so editing an embed tag's JSON does not turn it into text.
+  const isEmbed = interaction.options.getBoolean("embed");
 
   const canManage = await canManageGuild(interaction);
 
   await service.editTag({
     guildId: guild.id,
     name,
-    content: body.body,
-    isEmbed: body.isEmbed,
+    content,
+    isEmbed,
     callerId: interaction.user.id,
     canManage,
   });
@@ -787,12 +752,3 @@ function chunk(lines: string[], perPage: number): string[][] {
 }
 
 export default tagCommand;
-
-/** The message a name that is too long gets. */
-export const TOO_LONG_MESSAGE = truncate(
-  `A tag name may be at most ${TAG_NAME_MAX_LENGTH} characters.`,
-  100,
-);
-
-/** Re-exported so the command layer does not have to import the errors. */
-export { denialMessage };

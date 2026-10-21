@@ -20,7 +20,7 @@ import { PremiumFeature } from "../../core/constants.js";
 import { logger } from "../../utils/logger.js";
 import * as repo from "./repo.js";
 import {
-  TAG_CONTENT_MAX_LENGTH,
+  buildTagBody,
   checkAutoPurgeAdmission,
   normaliseTagName,
   validateTagName,
@@ -75,11 +75,7 @@ export async function createTag(input: {
     throw new InputError(validation.message);
   }
 
-  if (input.content.length > TAG_CONTENT_MAX_LENGTH) {
-    throw new InputError(
-      `A tag may hold at most ${TAG_CONTENT_MAX_LENGTH} characters.`,
-    );
-  }
+  const body = buildTagBody(input.content, input.isEmbed);
 
   const existing = await repo.findTagByName(input.guildId, validation.name);
 
@@ -87,21 +83,56 @@ export async function createTag(input: {
     throw new InputError("That tag name is already taken.");
   }
 
-  return repo.insertTag({
-    guildId: input.guildId,
-    name: validation.name,
-    content: input.content,
-    isEmbed: input.isEmbed,
-    ownerId: input.ownerId,
-  });
+  try {
+    return await repo.insertTag({
+      guildId: input.guildId,
+      name: validation.name,
+      content: body.body,
+      isEmbed: body.isEmbed,
+      ownerId: input.ownerId,
+    });
+  } catch (error) {
+    // Two members creating the same tag at the same moment: the
+    // database refused the second one, and the refusal is the same
+    // answer the read above would have given.
+    if (repo.isUniqueViolation(error)) {
+      throw new InputError("That tag name is already taken.");
+    }
+
+    throw error;
+  }
 }
 
-/** Finds a tag by name, whatever case the user typed it in. */
+/**
+ * The shape of a uuid.
+ *
+ * The source let a tag be called by its id as well as by its name
+ * (`TagConverter` tried `int(argument)` first). Our ids are uuids, so
+ * this is what "by its id" looks like now.
+ */
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Finds a tag by name, whatever case the user typed it in.
+ *
+ * A uuid is looked up by its id, as the source's converter did.
+ */
 export async function findTag(
   guildId: string,
   name: string,
 ): Promise<TagRecord | null> {
-  return repo.findTagByName(guildId, normaliseTagName(name));
+  const canonical = normaliseTagName(name);
+
+  const byName = await repo.findTagByName(guildId, canonical);
+
+  if (byName) return byName;
+
+  if (UUID_PATTERN.test(canonical)) {
+    return repo.findTagById(guildId, canonical);
+  }
+
+  return null;
 }
 
 /** Finds a tag by its id. */
@@ -115,13 +146,17 @@ export async function findTagById(
 /**
  * Replaces a tag's body.
  *
+ * `isEmbed` is `null` when the caller did not say: the tag keeps the
+ * kind it had, so editing an embed tag's JSON does not quietly turn it
+ * into a text tag.
+ *
  * @param canManage whether the caller may edit a tag they do not own.
  */
 export async function editTag(input: {
   guildId: string;
   name: string;
   content: string;
-  isEmbed: boolean;
+  isEmbed: boolean | null;
   callerId: string;
   canManage: boolean;
 }): Promise<TagRecord> {
@@ -135,15 +170,13 @@ export async function editTag(input: {
     throw new OwnershipError("That tag does not belong to you.");
   }
 
-  if (input.content.length > TAG_CONTENT_MAX_LENGTH) {
-    throw new InputError(
-      `A tag may hold at most ${TAG_CONTENT_MAX_LENGTH} characters.`,
-    );
-  }
+  const isEmbed = input.isEmbed ?? tag.isEmbed;
 
-  await repo.updateTagContent(tag.id, input.content, input.isEmbed);
+  const body = buildTagBody(input.content, isEmbed);
 
-  return { ...tag, content: input.content, isEmbed: input.isEmbed };
+  await repo.updateTagContent(tag.id, body.body, body.isEmbed);
+
+  return { ...tag, content: body.body, isEmbed: body.isEmbed };
 }
 
 /**
@@ -476,6 +509,7 @@ export async function createReminder(input: {
       userId: input.userId,
       message: input.message,
       reminderId: id,
+      createdAt: new Date().toISOString(),
       ...(input.sourceMessageId
         ? { sourceMessageId: input.sourceMessageId }
         : {}),
@@ -492,6 +526,11 @@ export async function listReminders(
   limit = 10,
 ): Promise<ReminderRecord[]> {
   return repo.listUserReminders(userId, limit);
+}
+
+/** How many reminders a user has running. */
+export async function countReminders(userId: string): Promise<number> {
+  return repo.countUserReminders(userId);
 }
 
 /* ------------------------------------------------------------------ *

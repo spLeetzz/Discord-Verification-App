@@ -49,6 +49,24 @@ export function missingPermission(permission: string): string {
   return `You need the \`${permission}\` permission to use this command.`;
 }
 
+/**
+ * Refuses unless the caller holds a permission.
+ *
+ * The guard list (D28) is where the dispatcher will enforce this, but the
+ * check is made here as well: the dispatcher does not run the guards yet,
+ * and a command that quietly let anybody through in the meantime would be
+ * a hole.
+ */
+export async function requirePermission(
+  interaction: ChatInputCommandInteraction,
+  permission: PermissionResolvable,
+  name: string,
+): Promise<void> {
+  if (await hasGuildPermissions(interaction, permission)) return;
+
+  throw new InputError(missingPermission(name));
+}
+
 /** The guild the command was run in. */
 export function requireGuild(interaction: ChatInputCommandInteraction): Guild {
   const guild = interaction.guild;

@@ -20,6 +20,12 @@
 import * as chrono from "chrono-node";
 import { parseDuration, parseNaturalTime, parseTimedText } from "../../core/time.js";
 import type { ParseTimeOptions } from "../../core/time.js";
+import { InputError } from "../../core/errors.js";
+import {
+  embedTemplateToJSON,
+  parseEmbedTemplate,
+} from "../../core/embed-builder.js";
+import type { EmbedTemplate } from "../../core/embed-builder.js";
 
 /* ------------------------------------------------------------------ *
  * Tag names
@@ -214,6 +220,86 @@ export function checkAutoPurgeAdmission(options: {
 }
 
 /* ------------------------------------------------------------------ *
+ * The tag body
+ * ------------------------------------------------------------------ */
+
+/**
+ * What a tag's stored body turns into.
+ *
+ * The union is closed: a tag renders as text, as an embed, or it is
+ * broken. A broken template is a third state and not an error — the
+ * source re-parsed the column with `ast.literal_eval` on every use, so a
+ * template written by any other code path crashed the next render.
+ */
+export type TagRender =
+  /** A plain-text tag. */
+  | { readonly kind: "text"; readonly content: string }
+  /** An embed tag, with a template that parsed. */
+  | { readonly kind: "embed"; readonly template: EmbedTemplate }
+  /** An embed tag whose stored template does not parse. */
+  | { readonly kind: "broken"; readonly reason: string };
+
+/**
+ * Works out what a tag renders as.
+ *
+ * @param tag the stored body and whether it is an embed.
+ */
+export function renderTagBody(tag: {
+  content: string;
+  isEmbed: boolean;
+}): TagRender {
+  if (!tag.isEmbed) {
+    return { kind: "text", content: tag.content };
+  }
+
+  const template = parseEmbedTemplate(tag.content);
+
+  if (!template) {
+    return {
+      kind: "broken",
+      reason:
+        "This tag's embed template is broken, so it cannot be shown. Its owner has to edit it.",
+    };
+  }
+
+  return { kind: "embed", template };
+}
+
+/**
+ * The body a new tag is stored with.
+ *
+ * An embed tag's body is a **JSON template** (D32), never a Python
+ * literal string.
+ *
+ * @throws {InputError} when the body is too long, or when an embed
+ *         template does not parse.
+ */
+export function buildTagBody(
+  content: string,
+  isEmbed: boolean,
+): { body: string; isEmbed: boolean } {
+  if (!isEmbed) {
+    if (content.length > TAG_CONTENT_MAX_LENGTH) {
+      throw new InputError(
+        `A tag may hold at most ${TAG_CONTENT_MAX_LENGTH} characters.`,
+      );
+    }
+
+    return { body: content, isEmbed: false };
+  }
+
+  const template = parseEmbedTemplate(content);
+
+  if (!template) {
+    throw new InputError(
+      "That is not a valid embed template. It has to be a JSON object, for example `{\"title\": \"Rules\", \"description\": \"Be nice.\"}`.",
+    );
+  }
+
+  return { body: embedTemplateToJSON(template), isEmbed: true };
+}
+
+/* ------------------------------------------------------------------ *
  * The reminder's time and text
  * ------------------------------------------------------------------ */
 
@@ -353,6 +439,42 @@ export function splitTimedText(
  */
 function cleanLeftover(text: string): string {
   return text.replace(LEADING_PUNCTUATION, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The message a reminder carries when nothing else was said.
+ */
+export const NO_REMINDER_TEXT = "(no text)";
+
+/**
+ * Reads the time and the message out of a reminder's options.
+ *
+ * When the `text` option is given it wins; the leftover of the time
+ * option is ignored. When it is not, the leftover is the message — which
+ * is what makes `"2d unmute someone"` work.
+ *
+ * @throws {InputError} when the input holds no time.
+ */
+export function readReminder(
+  when: string,
+  text: string | null,
+  options: ParseTimeOptions = {},
+): { time: Date; message: string } {
+  const split = splitTimedText(when, options);
+
+  if (!split.time) {
+    throw new InputError(
+      "I could not find a time in your input. Try something like `2d`, `9pm` or `tomorrow at 7pm`.",
+    );
+  }
+
+  const explicit = text?.trim();
+
+  return {
+    time: split.time,
+    message:
+      explicit && explicit.length > 0 ? explicit : (split.text || NO_REMINDER_TEXT),
+  };
 }
 
 /* ------------------------------------------------------------------ *
