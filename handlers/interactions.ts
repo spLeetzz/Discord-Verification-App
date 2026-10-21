@@ -30,6 +30,26 @@ const commandRateLimit = new RateLimiter({
   bucket: "member",
 });
 
+/**
+ * The rate limit for component interactions — buttons, select menus and
+ * modal submissions.
+ *
+ * The command limiter only ever saw chat-input commands, so a member could
+ * press a button on a published panel as fast as Discord allowed. Every
+ * panel flow — claiming a slot, cancelling one, purging a list — is an
+ * action, and the ceiling on it should be the bot's, not Discord's.
+ *
+ * The allowance is looser than the command one, because a legitimate flow
+ * does use several components in a row: open a panel, pick a select, submit
+ * a modal. Ten per ten seconds leaves room for a flow and still stops a
+ * panel being spammed.
+ */
+const componentRateLimit = new RateLimiter({
+  limit: 10,
+  windowMs: 10_000,
+  bucket: "member",
+});
+
 function rateLimitMessage(waitMs: number): string {
   return `You are being rate limited for using commands too fast. Try again in **${(waitMs / 1000).toFixed(2)} seconds**.`;
 }
@@ -86,8 +106,33 @@ async function runGuards(
 export async function handleInteraction(interaction: Interaction): Promise<void> {
   await handleCommand(interaction, async () => {
     try {
+      // The block list is consulted for **every** interaction type, not
+      // just chat-input commands. A blocked member who cannot type a
+      // command but can press a button on a published panel is not blocked.
+      // The answer is silence: a blocked user learns nothing about why.
+      if (await isBlocked(interaction.user.id, BLOCK_ID_TYPE.user)) return;
+      if (
+        interaction.guildId &&
+        (await isBlocked(interaction.guildId, BLOCK_ID_TYPE.guild))
+      ) {
+        return;
+      }
+
       if (interaction.isChatInputCommand()) {
         await handleChatInput(interaction);
+        return;
+      }
+
+      // Component interactions get their own allowance. They are actions
+      // too, and the command limiter never saw them.
+      const waitMs = componentRateLimit.hit(interaction.user.id);
+      if (waitMs !== null) {
+        if (interaction.isRepliable()) {
+          await interaction.reply({
+            content: rateLimitMessage(waitMs),
+            flags: MessageFlags.Ephemeral,
+          });
+        }
         return;
       }
 
@@ -129,11 +174,6 @@ async function handleChatInput(interaction: ChatInputCommandInteraction): Promis
     logger.error(`No command matching ${interaction.commandName}.`);
     return;
   }
-
-  // The block list comes first and answers with silence: a blocked user
-  // learns nothing about why.
-  if (await isBlocked(interaction.user.id, BLOCK_ID_TYPE.user)) return;
-  if (interaction.guildId && (await isBlocked(interaction.guildId, BLOCK_ID_TYPE.guild))) return;
 
   const waitMs = commandRateLimit.hit(interaction.user.id);
   if (waitMs !== null) {

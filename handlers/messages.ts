@@ -1,6 +1,7 @@
 import { ChannelType } from "discord.js";
 import type { Message, PrivateThreadChannel } from "discord.js";
 import { getEventByChannelId } from "../config/events.js";
+import { isBlocked, BLOCK_ID_TYPE } from "../modules/moderation/register.js";
 import { errorMessage } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -36,6 +37,18 @@ export function selectMembersToAdd(
  */
 export async function handleMessage(message: Message): Promise<void> {
   if (message.author.bot) return;
+
+  // A blocked member is blocked everywhere, not only where they can type a
+  // command. The message listener is how a captain adds players to a
+  // private ticket thread, so a blocked user could otherwise keep pulling
+  // people into threads.
+  if (await isBlocked(message.author.id, BLOCK_ID_TYPE.user)) return;
+  if (
+    message.guildId &&
+    (await isBlocked(message.guildId, BLOCK_ID_TYPE.guild))
+  ) {
+    return;
+  }
 
   const channel = message.channel;
 
