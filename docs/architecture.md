@@ -156,10 +156,15 @@ Rules:
 - **discord.js v14**, `RESTPostAPIChatInputApplicationCommandsJSONBody` is what
   the deploy payload uses. Command names must be unique per guild, and the
   total must stay under 100.
-- **Components** carry a `custom_id`. Every custom_id is namespaced:
+- **Components** carry a `custom_id`. Every new custom_id is namespaced:
   `<module>:<action>:<...>` e.g. `scrims:claim_slot:<slot_id>`. The router
   splits on `:` and dispatches to the owning module. Never guess a custom_id's
   owner from its shape.
+  - **The existing `verify_btn:<eventKey>` custom_id keeps working as-is.**
+    The router must not break it, and the `verify_btn` prefix is not a module
+    name — the router needs an explicit legacy branch for it.
+  - New modules must not reuse the `verify_btn` prefix, and the router must
+    reject unknown prefixes with a logged error rather than guessing.
 - **Interaction routing** stays in `handlers/interactions.ts`, but it becomes a
   dispatcher to module routers rather than a growing if/else chain.
 - **Component collectors** must expire and must `deferUpdate()` where the
@@ -185,6 +190,10 @@ Waves 2 and 3 must not start until wave 1's output is merged into
 ---
 
 ## 8. Definition of done, per feature
+
+Baseline before the port started: `npm run typecheck` clean, `npm run smoke`
+**106/106 checks passing**. That baseline is the fence — if a feature change
+drops a single smoke check, the feature is not done, no matter what else works.
 
 An engineer is finished when:
 
