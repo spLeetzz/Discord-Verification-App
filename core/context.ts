@@ -43,6 +43,8 @@ import { escapeMentions } from "./escape.js";
 import { run } from "./fire-and-forget.js";
 import { EMBED_COLOR, ERROR_COLOR } from "./constants.js";
 import { assertComponentBudget } from "./ui.js";
+import { logger } from "../utils/logger.js";
+import { errorMessage } from "../utils/errors.js";
 
 /** How long Quotient watched for the invoking message to be deleted. */
 const DEFAULT_DELETE_WINDOW_MS = 30_000;
@@ -240,28 +242,34 @@ export async function clearComponentMenu(
 ): Promise<void> {
   try {
     await answer.update({ components: [] });
+    return;
   } catch (error) {
-    if (!isEphemeral(answer.message)) throw error;
-
-    await answer.editReply({ components: [] });
+    logger.warn(
+      `[Context] The menu could not be updated: ${errorMessage(error)}`,
+    );
   }
-}
 
-/**
- * Is this an ephemeral message?
- *
- * The ephemeral flag is on the message, and the flag is the only honest
- * answer: discord.js does not model the ephemeral property on a message
- * the way it does on an interaction.
- */
-function isEphemeral(message: Message | null): boolean {
-  if (!message) return false;
+  // The message is ephemeral, so it cannot be updated — but it *can* be
+  // deferred and then edited through the interaction, which is how an
+  // ephemeral response is changed.
+  try {
+    await answer.deferUpdate();
+    await answer.editReply({ components: [] });
+    return;
+  } catch (error) {
+    logger.warn(
+      `[Context] The menu could not be deferred and edited: ${errorMessage(error)}`,
+    );
+  }
 
-  const flags = message.flags;
-
-  if (!flags || typeof flags.has !== "function") return false;
-
-  return flags.has(MessageFlags.Ephemeral);
+  // The last resort. A component interaction that has not been answered
+  // can still be answered with a new message, and an answered
+  // interaction is the one thing that matters: an unanswered one
+  // expires, and the user is told the bot did not respond.
+  await answer.reply({
+    content: "Done.",
+    flags: MessageFlags.Ephemeral,
+  });
 }
 
 /**
@@ -279,11 +287,27 @@ export async function replaceComponentContent(
 ): Promise<void> {
   try {
     await answer.update(content);
+    return;
   } catch (error) {
-    if (!isEphemeral(answer.message)) throw error;
-
-    await answer.editReply(content);
+    logger.warn(
+      `[Context] The panel could not be updated: ${errorMessage(error)}`,
+    );
   }
+
+  try {
+    await answer.deferUpdate();
+    await answer.editReply(content);
+    return;
+  } catch (error) {
+    logger.warn(
+      `[Context] The panel could not be deferred and edited: ${errorMessage(error)}`,
+    );
+  }
+
+  await answer.reply({
+    content: "Done.",
+    flags: MessageFlags.Ephemeral,
+  });
 }
 
 /**
