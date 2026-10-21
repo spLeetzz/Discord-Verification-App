@@ -168,6 +168,35 @@ export function buildWizardPanel(draft: WizardDraft, token: string): Panel {
 }
 
 /**
+ * The draft property a wizard step writes to.
+ *
+ * The step keys are `set_*` because they double as custom-id actions,
+ * and the draft's properties are named after what they hold. The two
+ * have to be translated.
+ *
+ * **Why this exists.** The write used to be `{ ...draft, [key]: value }`
+ * with the key used verbatim — so the value was saved under
+ * `set_reg_channel` while the draft holds it in `registrationChannelId`.
+ * The write landed somewhere nothing reads, and the panel went on
+ * saying "Not set" for a value the user had just picked. A cast hid it
+ * from the compiler.
+ */
+export function draftPropertyFor(
+  key: string,
+): "registrationChannelId" | "confirmChannelId" | "roleId" | null {
+  switch (key) {
+    case "set_reg_channel":
+      return "registrationChannelId";
+    case "set_confirm_channel":
+      return "confirmChannelId";
+    case "set_role":
+      return "roleId";
+    default:
+      return null;
+  }
+}
+
+/**
  * Is the step's value already set?
  *
  * The steps that start with a default — the mentions, the reactions,

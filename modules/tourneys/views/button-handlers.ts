@@ -48,7 +48,13 @@ import { buildPartnerPanel } from "./partner.js";
 import { awaitChannelSelect, awaitRoleSelect } from "../../../core/select.js";
 import { buildSlotManagerPanel } from "./slotm.js";
 import { tourneysId } from "./ids.js";
-import { buildWizardPanel, parseOpenDays, wizardStore } from "./wizard.js";
+import {
+  buildWizardPanel,
+  draftPropertyFor,
+  parseOpenDays,
+  wizardStore,
+} from "./wizard.js";
+import type { WizardDraft } from "../service.js";
 
 /** The cooldown of the group list's Refresh button. */
 export const GROUP_REFRESH_COOLDOWN_MS = 120_000;
@@ -380,7 +386,15 @@ async function onWizard(
 
     if (!channelId) return;
 
-    const updated = { ...draft, [key]: channelId } as typeof draft;
+    const property = draftPropertyFor(key);
+
+    if (!property) {
+      await fail(interaction, "That button is no longer active.");
+
+      return;
+    }
+
+    const updated: WizardDraft = { ...draft, [property]: channelId };
 
     wizardStore.set(token, updated);
 
@@ -397,7 +411,15 @@ async function onWizard(
 
     if (!roleId) return;
 
-    const updated = { ...draft, [key]: roleId } as typeof draft;
+    const property = draftPropertyFor(key);
+
+    if (!property) {
+      await fail(interaction, "That button is no longer active.");
+
+      return;
+    }
+
+    const updated: WizardDraft = { ...draft, [property]: roleId };
 
     wizardStore.set(token, updated);
 
