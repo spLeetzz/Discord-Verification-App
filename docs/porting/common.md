@@ -500,6 +500,14 @@ Porting it as-is ships a free-premium button. **Ours:**
 - Explicit transaction status enum: `pending | paid | failed`. `failed` is
   retryable — Quotient closes the transaction on failure so it can never be
   retried.
+- `premium_plans.duration_days integer`, not an `INTERVAL` — Postgres
+  `INTERVAL` has no lossless JS mapping, and every plan is a whole number of
+  days.
+- `premium_transactions.plan_id` is nullable with `ON DELETE SET NULL`, and
+  the plan is **snapshotted** into `plan_snapshot jsonb` at purchase time.
+  Quotient's plan table is destructively reseeded on every startup; a
+  `RESTRICT` FK breaks that and a `CASCADE` destroys paid transactions. The
+  snapshot means the payment page still renders after a reseed.
 - Write the database rows **before** notifying. Quotient dispatches the
   purchase listener before the guild row is written, so the confirmation DM
   can show a stale expiry or crash on `None`.
