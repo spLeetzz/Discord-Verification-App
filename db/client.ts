@@ -37,7 +37,8 @@ import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { SQLiteTransactionConfig } from "drizzle-orm/sqlite-core";
 import type { SQLWrapper } from "drizzle-orm";
 import { mkdirSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PROJECT_ROOT } from "../utils/paths.js";
 import { applyMigrations } from "./migrate.js";
@@ -66,8 +67,22 @@ import {
 function defaultDatabaseFile(): string {
   const worker = process.env.VITEST_WORKER_ID ?? process.env.VITEST_POOL_ID;
 
+  /**
+   * **A test's database belongs in the system temporary directory.**
+   *
+   * It used to be `data/test-<worker>-<pid>.db`, which is inside the
+   * project — and a file named after the process id is never cleaned up,
+   * so every run of the suite left one behind. Two thousand eight
+   * hundred of them filled the disk, and the cleanup that removed them
+   * took the development database with it, because a glob over the
+   * directory cannot tell a test file from the real one.
+   *
+   * The temporary directory is the right home for it: the operating
+   * system clears it, and the development database in `data/` is left
+   * alone — which is the point.
+   */
   return worker
-    ? `data/test-${worker}-${process.pid}.db`
+    ? join(tmpdir(), `quotient-test-${worker}-${process.pid}.db`)
     : "data/quotient.db";
 }
 
