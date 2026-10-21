@@ -5,7 +5,7 @@
  * member could reserve a slot in any scrim. Ours has the mod guard.
  */
 
-import { ChannelType, SlashCommandBuilder } from "discord.js";
+import { ChannelType, SlashCommandSubcommandBuilder } from "discord.js";
 import { parseNaturalTime } from "../../../core/time.js";
 import { canUseScrimMod } from "../guards.js";
 import * as repo from "../repo.js";
@@ -14,7 +14,7 @@ import type { ScrimSubcommand } from "./types.js";
 
 /** The subcommand. */
 export const reserveSubcommand: ScrimSubcommand = {
-  data: new SlashCommandBuilder()
+  data: new SlashCommandSubcommandBuilder()
     .setName("reserve")
     .setDescription("Reserve a slot in a scrim.")
     .addChannelOption((option) =>

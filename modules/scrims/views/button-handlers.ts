@@ -12,11 +12,7 @@
  *  - the editor's "Skip to" button now does something.
  */
 
-import {
-  ButtonStyle,
-  ChannelType,
-  MessageFlags,
-} from "discord.js";
+import { ChannelType, MessageFlags } from "discord.js";
 import type { ButtonInteraction, EmbedBuilder } from "discord.js";
 import { awaitSelect } from "../../../core/select.js";
 import { prompt } from "../../../core/prompt.js";
@@ -29,27 +25,26 @@ import * as repo from "../repo.js";
 import * as service from "../service.js";
 import { slotNumbers } from "../slots.js";
 import { truncate } from "../../../core/text.js";
-import {
-  EDITOR_FIELDS,
-  buildModal,
-  modalText,
-} from "./components.js";
+import type { ScrimRecord } from "../types.js";
+import { EDITOR_FIELDS, buildModal } from "./components.js";
 import { scrimsId } from "./ids.js";
 import {
-  buildAutocleanPanel,
-  buildBanPanel,
-  buildDesignPanel,
-  buildListPanel,
-  buildReservePanel,
-  buildScrimPanel,
-  buildSlotlistEditorPanel,
   buildEditorPanel,
+  buildListPanel,
+  buildScrimPanel,
   buildWizardPanel,
   newWizardState,
   wizardIsComplete,
   wizardStore,
 } from "./manager.js";
 import type { PanelComponents } from "./manager.js";
+import {
+  buildAutocleanPanel,
+  buildBanPanel,
+  buildDesignPanel,
+  buildReservePanel,
+  buildSlotlistEditorPanel,
+} from "./panels.js";
 import {
   fail,
   refuseUnlessMod,
@@ -58,12 +53,9 @@ import {
 } from "./handlers.js";
 import { buildSlotlistPanel, publishSlotlist } from "./slotlist.js";
 import { openRegistrationFlow, closeRegistrationFlow } from "./lifecycle.js";
-import { punishSelection } from "./modal-handlers.js";
-
-/** The fields of the editor that are behind an entitlement. */
-const PREMIUM_FIELDS = new Set(
-  EDITOR_FIELDS.filter((field) => field.premium).map((field) => field.key),
-);
+import { punishSelection } from "./modal-handlers.js";import { awaitChannelSelect, awaitRoleSelect } from "./select-flow.js";
+import { slotSelection } from "./modal-handlers.js";
+import { randomId } from "../../../core/custom-id.js";
 
 /**
  * May the guild have one more scrim?
@@ -434,7 +426,12 @@ async function handleEditorButton(
   }
 
   if (field.kind === "toggle") {
-    await toggleField(interaction, scrim, field.key, field.applyToAll ?? false);
+    await toggleField(
+      interaction,
+      scrim,
+      field.column ?? field.key,
+      field.applyToAll ?? false,
+    );
 
     return;
   }
@@ -628,12 +625,12 @@ export function fieldModalFor(
  */
 async function toggleField(
   interaction: ButtonInteraction,
-  scrim: Awaited<ReturnType<typeof repo.getScrim>> & object,
-  key: string,
+  scrim: ScrimRecord,
+  column: string,
   applyToAll: boolean,
 ): Promise<void> {
   const current = Boolean(
-    (scrim as unknown as Record<string, unknown>)[key],
+    (scrim as unknown as Record<string, unknown>)[column],
   );
 
   const next = !current;
@@ -654,7 +651,7 @@ async function toggleField(
     }
   }
 
-  const patch = { [key]: next } as Parameters<typeof repo.updateScrim>[1];
+  const patch = { [column]: next } as Parameters<typeof repo.updateScrim>[1];
 
   if (all) {
     await service.applyToAllScrims(scrim.guildId, patch);
@@ -1320,6 +1317,24 @@ async function handleSlotlistButton(
     return;
   }
 
+  if (action === "add_team") {
+    await addTeam(interaction, scrim);
+
+    return;
+  }
+
+  if (action === "remove_team") {
+    await removeTeam(interaction, scrim);
+
+    return;
+  }
+
+  if (action === "change_team") {
+    await changeTeam(interaction, scrim);
+
+    return;
+  }
+
   if (action === "repost") {
     await repostSlotlist(interaction, scrim);
 
@@ -1340,6 +1355,179 @@ async function handleSlotlistButton(
 
   const slots = await repo.listSlots(scrim.id);
   await updatePanel(interaction, buildSlotlistPanel(scrim, slots));
+}
+
+/**
+ * The slotlist editor's "Add Team".
+ *
+ * The slots on offer are the scrim's **own** free slot numbers. The
+ * source offered `range(start_from, 30)`, so twenty numbers that did
+ * not exist were on offer (B4).
+ */
+async function addTeam(
+  interaction: ButtonInteraction,
+  scrim: ScrimRecord,
+): Promise<void> {
+  const slots = await repo.listSlots(scrim.id);
+  const free = slots.filter((slot) => slot.state === "free");
+
+  if (free.length === 0) {
+    await fail(interaction, "No slots available to add this time.");
+
+    return;
+  }
+
+  const chosen = await awaitSelect(
+    interaction,
+    free.slice(0, 25).map((slot) => ({
+      label: `Slot ${slot.num}`.slice(0, 100),
+      value: slot.id,
+      description: `Slot ${slot.num}`.slice(0, 100),
+    })),
+    {
+      maxValues: 1,
+      placeholder: "Select the slot to add a team to",
+      question: "Select the slot to add a team to.",
+      ephemeral: true,
+    },
+  );
+
+  const slotId = chosen[0];
+
+  if (!slotId) return;
+
+  const token = randomId();
+  slotSelection.set(token, { scrimId: scrim.id, slotId });
+
+  await interaction.showModal(
+    buildModal({
+      customId: scrimsId("modal", "slot_team", token),
+      title: "Add a team",
+      texts: [
+        {
+          id: "team_name",
+          label: "The team name",
+          maxLength: 25,
+        },
+        {
+          id: "leader",
+          label: "The team leader (optional)",
+          placeholder: "@leader",
+          maxLength: 64,
+        },
+      ],
+    }),
+  );
+}
+
+/** The slotlist editor's "Remove Team". */
+async function removeTeam(
+  interaction: ButtonInteraction,
+  scrim: ScrimRecord,
+): Promise<void> {
+  const slots = await repo.listSlots(scrim.id);
+  const claimed = slots.filter((slot) => slot.state === "claimed");
+
+  if (claimed.length === 0) {
+    await fail(interaction, "No slot available to remove.");
+
+    return;
+  }
+
+  const chosen = await awaitSelect(
+    interaction,
+    claimed.slice(0, 25).map((slot) => ({
+      label: `Slot ${slot.num}`.slice(0, 100),
+      value: slot.id,
+      description: (slot.teamName ?? "—").slice(0, 100),
+    })),
+    {
+      maxValues: 1,
+      placeholder: "Select the slot to remove",
+      question: "Select the slot to remove.",
+      ephemeral: true,
+    },
+  );
+
+  const slotId = chosen[0];
+
+  if (!slotId) return;
+
+  const slot = await repo.getSlot(slotId);
+
+  if (!slot) {
+    await fail(interaction, "That slot no longer exists.");
+
+    return;
+  }
+
+  // The slot goes back to being free. The source appended the number to
+  // `available_slots` and then deleted the row — two writes that could
+  // disagree. Here it is one state change.
+  await repo.setSlotState(slot.id, "free", {
+    teamName: null,
+    ownerUserId: null,
+    members: [],
+  });
+
+  await refresh(interaction, buildSlotlistEditorPanel(scrim));
+}
+
+/** The slotlist editor's "Change Team". */
+async function changeTeam(
+  interaction: ButtonInteraction,
+  scrim: ScrimRecord,
+): Promise<void> {
+  const slots = await repo.listSlots(scrim.id);
+  const claimed = slots.filter((slot) => slot.state === "claimed");
+
+  if (claimed.length === 0) {
+    await fail(interaction, "No slot available to replace.");
+
+    return;
+  }
+
+  const chosen = await awaitSelect(
+    interaction,
+    claimed.slice(0, 25).map((slot) => ({
+      label: `Slot ${slot.num}`.slice(0, 100),
+      value: slot.id,
+      description: (slot.teamName ?? "—").slice(0, 100),
+    })),
+    {
+      maxValues: 1,
+      placeholder: "Select the slot to change",
+      question: "Select the slot to change.",
+      ephemeral: true,
+    },
+  );
+
+  const slotId = chosen[0];
+
+  if (!slotId) return;
+
+  const token = randomId();
+  slotSelection.set(token, { scrimId: scrim.id, slotId });
+
+  await interaction.showModal(
+    buildModal({
+      customId: scrimsId("modal", "slot_team", token),
+      title: "Change the team",
+      texts: [
+        {
+          id: "team_name",
+          label: "The team name",
+          maxLength: 25,
+        },
+        {
+          id: "leader",
+          label: "The team leader (optional)",
+          placeholder: "@leader",
+          maxLength: 64,
+        },
+      ],
+    }),
+  );
 }
 
 /** Reposts the slotlist into the slotlist channel. */
@@ -1364,9 +1552,7 @@ async function repostSlotlist(
     return;
   }
 
-  const { publishSlotlist } = await import("./slotlist.js");
-
-  const message = await publishSlotlist(channel, scrim, claimed);
+  const message = await publishSlotlist(channel as never, scrim, claimed);
 
   await repo.updateScrim(scrim.id, { slotlistMessageId: message.id });
 

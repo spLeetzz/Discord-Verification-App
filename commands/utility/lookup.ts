@@ -5,6 +5,7 @@ import type { Command } from "../../types/command.js";
 
 const command: Command = {
   staffOnly: true,
+  ephemeral: true,
   data: new SlashCommandBuilder()
     .setName("lookup")
     .setDescription("Look up a registration email across all event sheets.")

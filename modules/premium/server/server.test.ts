@@ -3,16 +3,16 @@
  *
  * The properties that matter (D37, D42):
  *
- *  - the payment page renders the amount as a decimal string and signs it
- *    with the **request** hash;
+ *  - the payment page renders the amount as a decimal string and signs
+ *    it with the **request** hash;
  *  - a callback with a good signature grants the subscription;
  *  - a callback with a tampered amount, a tampered email or the wrong
  *    merchant key is refused, and the transaction stays `pending`;
- *  - the browser redirect works **without** an `Origin` header — Quotient
- *    raised a `TypeError` on a missing one — and is refused when the
- *    `Origin` is present but is not PayU's;
- *  - the server-to-server webhook grants the same way, and the grant is
- *    idempotent.
+ *  - the browser redirect must come from **PayU's** origin — a missing
+ *    one is a clean refusal, not a crash, and a foreign one is refused;
+ *  - the server-to-server webhook needs no origin at all (there is none
+ *    in a server-to-server call) and grants the same way;
+ *  - the grant is idempotent.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -24,8 +24,8 @@ import {
   premiumTransactions,
 } from "../../../db/schema.js";
 import { isEntitled } from "../entitlements.js";
-import { payuResponseHash } from "../payu.js";
-import type { PayuCredentials } from "../payu.js";
+import { payuRequestHash, payuResponseHash } from "../payu.js";
+import type { PayuCredentials, PayuFieldLayout } from "../payu.js";
 import { createTransaction, findPlanByCode, findTransaction } from "../repo.js";
 import { startPremiumServer } from "./index.js";
 import type { PremiumServerHandle } from "./index.js";
@@ -133,6 +133,7 @@ function makeForm(
   txnId: string,
   amount: string,
   overrides: Partial<GatewayForm> = {},
+  layout: PayuFieldLayout = "udf-with-blanks",
 ): GatewayForm {
   const fields: GatewayForm = {
     txnid: txnId,
@@ -145,13 +146,18 @@ function makeForm(
     ...overrides,
   };
 
-  fields.hash = payuResponseHash(CREDENTIALS, {
-    txnId: fields.txnid,
-    amount: fields.amount,
-    productInfo: fields.productinfo,
-    firstName: fields.firstname,
-    email: fields.email,
-  });
+  fields.hash = payuResponseHash(
+    CREDENTIALS,
+    {
+      txnId: fields.txnid,
+      amount: fields.amount,
+      productInfo: fields.productinfo,
+      firstName: fields.firstname,
+      email: fields.email,
+      status: fields.status,
+    },
+    layout,
+  );
 
   return fields;
 }
@@ -184,6 +190,27 @@ describe("modules/premium/server — the routes", () => {
     expect(response.body).toContain("hash");
   });
 
+  it("signs the payment page with the request hash", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    const response = await server.app.inject({
+      method: "GET",
+      url: `/getpremium?txnId=${txnId}`,
+    });
+
+    // The hash on the page has to be over the very bytes the gateway is
+    // given, or the gateway refuses the transaction before it starts.
+    const expected = payuRequestHash(CREDENTIALS, {
+      txnId,
+      amount: price.toFixed(2),
+      productInfo: "premium",
+      firstName: "Buyer",
+      email: "buyer@example.com",
+    });
+
+    expect(response.body).toContain(`name="hash" value="${expected}"`);
+  });
+
   it("refuses an unknown transaction on the payment page", async () => {
     const response = await server.app.inject({
       method: "GET",
@@ -200,7 +227,10 @@ describe("modules/premium/server — the routes", () => {
       method: "POST",
       url: `/premium_success?txnId=${txnId}`,
       payload: encode(makeForm(txnId, price.toFixed(2))),
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
     });
 
     expect(response.statusCode).toBe(200);
@@ -208,9 +238,10 @@ describe("modules/premium/server — the routes", () => {
     expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(true);
   });
 
-  it("works without an Origin header", async () => {
-    // Quotient: `if not "payu" in request.headers.get("origin")` — a
-    // missing header made it raise, and the request became a 500.
+  it("refuses a browser callback with no Origin header", async () => {
+    // A browser redirect has to come from PayU. A missing header is a
+    // clean refusal — Quotient raised a TypeError on it and the request
+    // became a 500.
     const { txnId, price } = await makeTransaction();
 
     const response = await server.app.inject({
@@ -220,8 +251,9 @@ describe("modules/premium/server — the routes", () => {
       headers: { "content-type": "application/x-www-form-urlencoded" },
     });
 
-    expect(response.statusCode).toBe(200);
-    expect((await findTransaction(txnId))?.status).toBe("paid");
+    expect(response.statusCode).toBe(403);
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+    expect(await isEntitled(GUILD_ID, "scrim_slots")).toBe(false);
   });
 
   it("refuses a callback from an origin that is not PayU", async () => {
@@ -257,6 +289,61 @@ describe("modules/premium/server — the routes", () => {
     expect(response.statusCode).toBe(200);
   });
 
+  it("accepts a callback signed with the other field layout", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_success?txnId=${txnId}`,
+      payload: encode(makeForm(txnId, price.toFixed(2), {}, "compact")),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((await findTransaction(txnId))?.status).toBe("paid");
+  });
+
+  it("refuses a callback that did not succeed", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_success?txnId=${txnId}`,
+      payload: encode(
+        makeForm(txnId, price.toFixed(2), { status: "failure" }),
+      ),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+  });
+
+  it("refuses a callback that names a different transaction", async () => {
+    const { txnId, price } = await makeTransaction();
+
+    const response = await server.app.inject({
+      method: "POST",
+      url: `/premium_success?txnId=${txnId}`,
+      payload: encode(
+        makeForm("premium-server-somebody-else", price.toFixed(2)),
+      ),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((await findTransaction(txnId))?.status).toBe("pending");
+  });
+
   it("refuses a callback with a tampered amount", async () => {
     const { txnId, price } = await makeTransaction();
 
@@ -267,7 +354,10 @@ describe("modules/premium/server — the routes", () => {
       method: "POST",
       url: `/premium_success?txnId=${txnId}`,
       payload: encode(form),
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
     });
 
     expect(response.statusCode).toBe(400);
@@ -285,7 +375,10 @@ describe("modules/premium/server — the routes", () => {
       method: "POST",
       url: `/premium_success?txnId=${txnId}`,
       payload: encode(form),
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
     });
 
     expect(response.statusCode).toBe(400);
@@ -296,6 +389,7 @@ describe("modules/premium/server — the routes", () => {
     const { txnId, price } = await makeTransaction();
 
     const form = makeForm(txnId, price.toFixed(2));
+
     form.hash = payuResponseHash(
       { key: "wrong-key", salt: CREDENTIALS.salt },
       {
@@ -304,6 +398,7 @@ describe("modules/premium/server — the routes", () => {
         productInfo: form.productinfo,
         firstName: form.firstname,
         email: form.email,
+        status: form.status,
       },
     );
 
@@ -311,7 +406,10 @@ describe("modules/premium/server — the routes", () => {
       method: "POST",
       url: `/premium_success?txnId=${txnId}`,
       payload: encode(form),
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
     });
 
     expect(response.statusCode).toBe(400);
@@ -323,7 +421,10 @@ describe("modules/premium/server — the routes", () => {
       method: "POST",
       url: "/premium_success?txnId=premium-server-unknown",
       payload: encode(makeForm("premium-server-unknown", "29.00")),
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
     });
 
     expect(response.statusCode).toBe(404);
@@ -397,7 +498,10 @@ describe("modules/premium/server — the routes", () => {
       method: "POST",
       url: `/premium_success?txnId=${txnId}`,
       payload: encode(makeForm(txnId, price.toFixed(2))),
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://secure.payu.in",
+      },
     });
 
     const page = await server.app.inject({

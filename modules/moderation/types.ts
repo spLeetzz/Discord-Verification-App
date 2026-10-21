@@ -11,11 +11,21 @@
  */
 
 import type { GuildMember } from "discord.js";
-import type { BlockIdType, LockdownType } from "../../db/schema.js";
+import type {
+  BlockIdType,
+  LockdownChannelState,
+  LockdownPriorState,
+  LockdownType,
+} from "../../db/schema.js";
 import type { Guard } from "../../core/guards.js";
 import type { Command } from "../../types/command.js";
 
-export type { BlockIdType, LockdownType };
+export type {
+  BlockIdType,
+  LockdownChannelState,
+  LockdownPriorState,
+  LockdownType,
+};
 
 /**
  * A command with the D28 guard list.
@@ -166,11 +176,19 @@ export type LockPermission = (typeof LOCK_PERMISSIONS)[number];
  * explicitly, and `existed` says whether the channel carried an explicit
  * overwrite for that target at all. Both are needed to put things back
  * exactly as they were.
+ *
+ * This is the schema's own shape. The `lockdowns.prior_state` column is
+ * typed with it, so the shape is written down once and there is no second
+ * copy to drift.
  */
-export interface PriorPermissionState {
-  readonly existed: boolean;
-  readonly value: boolean | null;
-}
+export type PriorPermissionState = LockdownChannelState;
+
+/**
+ * What every channel of a lockdown looked like before it was locked.
+ *
+ * Keyed by channel id. This is what `lockdowns.prior_state` holds.
+ */
+export type PriorStateByChannel = LockdownPriorState;
 
 /** One lockdown row, as the state machine sees it. */
 export interface LockRecord {
@@ -185,6 +203,14 @@ export interface LockRecord {
   readonly channelIds: readonly string[];
   /** When the lockdown lifts by itself, or `null` when it does not. */
   readonly expireTime: Date | null;
+  /**
+   * What each channel's permission looked like before the lock.
+   *
+   * `null` when the row was written without it — before the column
+   * existed, or by hand. The unlock then resets the permission to
+   * inherit rather than guessing what it was.
+   */
+  readonly priorState: PriorStateByChannel | null;
   readonly authorId: string;
   /** The channel the lockdown was started from, for the closing message. */
   readonly sourceChannelId: string | null;
@@ -193,10 +219,14 @@ export interface LockRecord {
 /**
  * The durable payload of a lockdown job.
  *
- * This is what the scheduler hands to the expiry handler, and it is the
- * only place the permission state that has to be restored is written down.
- * The `lockdowns` row says *that* a channel is locked; this says *what it
- * looked like before*.
+ * This is what the scheduler hands to the expiry handler. It says **which
+ * lockdown to lift** and where to say so — it is the timer's business, not
+ * the lockdown's.
+ *
+ * The permission state that has to be restored is **not** here: it lives on
+ * the `lockdowns` row, in `prior_state`, because it is a property of the
+ * lockdown and not of the timer. A lockdown with no duration has no job at
+ * all, and its state still survives a restart.
  */
 export interface LockdownJobPayload {
   /** The lockdown row this job belongs to. */
@@ -209,8 +239,6 @@ export interface LockdownJobPayload {
   readonly roleId: string | null;
   /** The channel the lockdown was started from, for the closing message. */
   readonly sourceChannelId: string | null;
-  /** The permission that was changed, per channel. */
-  readonly prior: Readonly<Record<string, PriorPermissionState>>;
   /** The maintenance channels `maintenance on` created. */
   readonly maintenanceChannelIds: readonly string[];
 }

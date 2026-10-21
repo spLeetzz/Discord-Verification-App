@@ -141,10 +141,14 @@ there is nothing that can fall out of sync with Discord.
    change. The channels it cannot edit are left alone and counted.
 
 **The expiry is a row in `jobs`, never a `setTimeout`.** A timer dies
-with the process and the channel stays locked forever. The job row
-carries the expiry *and* the permission state that has to be restored;
-the dispatcher deletes the row before it dispatches it, which makes the
-whole thing idempotent.
+with the process and the channel stays locked forever. The job row says
+**when** the lockdown lifts; the dispatcher deletes the row before it
+dispatches it, which makes the whole thing idempotent.
+
+**A lockdown with no duration has no job row.** There is nothing to
+schedule, and everything the unlock needs is on the lockdown row itself.
+A job row that never fires, used as a data store, would read as a design
+nobody meant.
 
 ### The maintenance mode
 
@@ -382,10 +386,10 @@ for "inherit".
 - The channel had one → the unlock puts the permission back to the value
   it had, `null` included.
 
-The record lives in the payload of the `jobs` row, which is the durable
-carrier of the expiry. A lockdown without a duration still gets a job
-row, with an expiry far in the future, precisely so that the state to
-restore survives a restart.
+The record lives on the lockdown row, in the `prior_state` column. It is
+a property of the lockdown and not of the timer, so a lockdown with no
+duration — which has no job row at all — still restores exactly after a
+restart.
 
 ### 6. The clear group was ambiguous
 

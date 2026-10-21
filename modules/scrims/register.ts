@@ -92,7 +92,7 @@ export function registerScrimsInteractions(): void {
       return;
     }
 
-    await handleScrimsSelect(interaction, id.action, id.parts);
+    await handleScrimsSelect(interaction, id.action);
   });
 
   registerModal("scrims", async (interaction, payload) => {

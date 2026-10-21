@@ -12,17 +12,21 @@
  *     whole model from `dict(self.record)` on every interaction, which
  *     wrote columns another writer may have changed. Ours writes what
  *     the button touched.
+ *
+ * The refusals are built here rather than taken from `core/context.ts`,
+ * because a modal submit is not a `RepliableInteraction` in discord.js
+ * and the shared helper cannot answer one.
  */
 
+import { EmbedBuilder, MessageFlags } from "discord.js";
 import type {
   ButtonInteraction,
-  EmbedBuilder,
   MessageComponentInteraction,
   ModalSubmitInteraction,
 } from "discord.js";
-import { MessageFlags } from "discord.js";
-import { replyError } from "../../../core/context.js";
+import { ERROR_COLOR } from "../../../core/constants.js";
 import { canUseScrimMod } from "../guards.js";
+import type { ScrimsInteraction } from "../guards.js";
 import * as repo from "../repo.js";
 import type { ScrimRecord } from "../types.js";
 import { parseScrimsId } from "./ids.js";
@@ -35,15 +39,20 @@ export interface Panel {
   readonly components: PanelComponents;
 }
 
+/** The interactions a panel handler sees. */
+export type PanelInteraction =
+  | MessageComponentInteraction
+  | ModalSubmitInteraction;
+
 /** Refuses an interaction from somebody who may not manage scrims. */
 export async function refuseUnlessMod(
-  interaction: MessageComponentInteraction | ModalSubmitInteraction,
+  interaction: PanelInteraction,
 ): Promise<boolean> {
-  const refusal = await canUseScrimMod(interaction);
+  const refusal = await canUseScrimMod(interaction as ScrimsInteraction);
 
   if (!refusal) return false;
 
-  await replyError(interaction, refusal, { ephemeral: true });
+  await fail(interaction, refusal);
 
   return true;
 }
@@ -74,7 +83,7 @@ export async function loadScrim(
  * arrive in different states.
  */
 export async function renderPanel(
-  interaction: MessageComponentInteraction | ModalSubmitInteraction,
+  interaction: PanelInteraction,
   panel: Panel,
 ): Promise<void> {
   const message = interaction.message;
@@ -122,14 +131,23 @@ export async function updatePanel(
 
 /** Tells the caller something went wrong. */
 export async function fail(
-  interaction: MessageComponentInteraction | ModalSubmitInteraction,
+  interaction: PanelInteraction,
   message: string,
 ): Promise<void> {
-  await replyError(interaction, message, { ephemeral: true });
-}
+  const embed = new EmbedBuilder().setDescription(message).setColor(ERROR_COLOR);
 
-/** The flags of an ephemeral follow-up. */
-export const EPHEMERAL = MessageFlags.Ephemeral;
+  if (interaction.deferred || interaction.replied) {
+    await interaction
+      .editReply({ embeds: [embed] })
+      .catch(() => undefined);
+
+    return;
+  }
+
+  await interaction
+    .reply({ embeds: [embed], flags: MessageFlags.Ephemeral })
+    .catch(() => undefined);
+}
 
 /**
  * The position of a scrim among the guild's scrims.

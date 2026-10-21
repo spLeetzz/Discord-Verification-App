@@ -293,32 +293,58 @@ in this codebase decides entitlement from it.
 
 ```
 request  hash = sha512(key|txnid|amount|productinfo|firstname|email|udf1|…|udf5||||||salt)
-response hash = sha512(salt|txnid|amount|productinfo|firstname|email|udf1|…|udf5||||||key)
+response hash = sha512(salt|status||||||udf5|…|udf1|email|firstname|productinfo|amount|txnid|key)
 ```
 
-The **salt and the key are swapped** between the two. The comparison is
-`timingSafeEqual` over the two SHA-512 digests, so the function does not
-leak how much of the hash matched and cannot throw on a malformed input.
+The **response** is the request's fields **in reverse order**, with the
+**status** added and the salt and the key at the two ends. Two things
+follow, and both matter:
 
-**2. The amount is checked, as a decimal.** `"29"` and `"29.00"` are the
+- the salt and the key are at opposite ends, so a request hash is never a
+  valid response hash;
+- the status is *inside* the signature, so a failed payment cannot be
+  replayed as a successful one.
+
+The comparison is `timingSafeEqual` over the two SHA-512 digests, so the
+function does not leak how much of the hash matched and cannot throw on a
+malformed input.
+
+**2. The field layout is one named thing.**
+
+`PAYU_FIELD_LAYOUTS` is `["udf-with-blanks", "compact"]`. The first is
+the layout PayU's own SDK produces (seventeen fields, eleven pipes after
+the email); the second is the twelve-field form several third-party
+guides publish. A callback is accepted if it verifies under **any** known
+layout. That is safe: both are computed over the same signed fields with
+the same secret, so an attacker who cannot forge one cannot forge the
+other. The pinned vectors live in `payu.test.ts` and include PayU's own
+SDK known-answer vectors.
+
+**3. The amount is checked, as a decimal.** `"29"` and `"29.00"` are the
 same money and the gateway is free to send either; a string comparison
 would refuse a real payment over a missing zero. The comparison is done
 with `BigInt` on the scaled value, so it is exact.
 
-**3. The transaction id must be ours.** A callback for somebody else's
-transaction is refused before anything else happens.
+**4. The transaction id must be ours.** The callback has to name a
+transaction that exists in the database, and that has to be the one the
+link said.
 
-**4. The `Origin` header cannot crash the server.** Quotient's
+**5. The status has to be `success`,** and it has to be the status the
+signature covers.
+
+**6. The `Origin` header cannot crash the server, and a browser
+callback has to have one.** Quotient's
 `if not "payu" in request.headers.get("origin")` raised a `TypeError` on
 a missing header, and `"payu" in origin` would also have passed for
 `https://payu.evil.example`. Here the hostname is checked against a
-suffix list (`.payu.in`, `.payu.com`) and a missing header is simply
-"not PayU" rather than an exception.
+suffix list (`.payu.in`, `.payu.com`), and a missing header is a clean
+refusal rather than an exception. The server-to-server webhook has no
+`Origin` at all and is not asked for one.
 
-**5. The webhook is the trustworthy path; the redirect is untrusted until
+**7. The webhook is the trustworthy path; the redirect is untrusted until
 it verifies.** Both are verified the same way and both are idempotent.
 
-**6. The buyer's real email and display name are used**, not
+**8. The buyer's real email and display name are used**, not
 `"abcd@gmail.com"` and the user id.
 
 ---
@@ -337,30 +363,34 @@ Fastify, in the bot's process, on the same connection pool as the bot.
 
 ### Configuration
 
-| Variable | Meaning |
-|---|---|
-| `PREMIUM_PUBLIC_URL` | the address the buyer's browser and the gateway can reach |
-| `PREMIUM_SERVER_PORT` | the port (default 8899) |
-| `PREMIUM_SERVER_HOST` | the host (default `0.0.0.0`) |
-| `PAYU_KEY` | the merchant key |
-| `PAYU_SALT` | the merchant salt |
-| `PAYU_ACTION` | the gateway's form endpoint (default `https://secure.payu.in/_payment`) |
+| Variable | Meaning | Required |
+|---|---|---|
+| `PREMIUM_PUBLIC_URL` | the address the buyer's browser and the gateway can reach | no — the checkout is disabled without it |
+| `PREMIUM_PORT` | the port (default 8899) | no |
+| `PREMIUM_SERVER_HOST` | the host (default `0.0.0.0`) | no |
+| `PAYU_KEY` | the merchant key | no — the payment routes refuse with a 503 |
+| `PAYU_SALT` | the merchant salt | no — the same |
+| `PAYU_ACTION` | the gateway's form endpoint (default `https://secure.payu.in/_payment`) | no |
 
-`PAYU_KEY` and `PAYU_SALT` are optional at start-up: without them the
-server still answers the health check and the payment routes refuse with
-a clear message, so a bot without a payment gateway still runs.
+**Nothing here throws.** A guild that never sells premium does not have a
+merchant key, and the bot still has to start. `readPremiumEnv` returns
+`null` for everything that is not set, and `premiumEnvWarnings` says
+what is missing; the server logs the warnings and the payment routes
+answer `503` until the gateway is configured.
 
-`PREMIUM_PUBLIC_URL` is **not** optional — the server has to know its own
-address, because the gateway redirects the buyer to it and posts to its
-webhook. `startPremiumServer` throws if it is missing.
+Without `PREMIUM_PUBLIC_URL` the server still starts and still answers
+the health check, but the checkout is switched off: the Discord side
+says "the premium checkout is not set up on this bot yet" rather than
+sending the buyer to a link that goes nowhere.
 
 ### The form body parser
 
 PayU posts `application/x-www-form-urlencoded`, and Fastify has no
-parser for it out of the box. The usual answer is `@fastify/formbody`,
-which **is not installed in this repository** — so `server/formbody.ts`
-is a twenty-line local parser. When the manager installs the plugin,
-that file and its one call site can be deleted.
+parser for it out of the box. The parser is the `@fastify/formbody`
+plugin, registered on the root instance — the plugin is a
+`fastify-plugin`, so the parser it adds is visible to the routes below.
+A parser registered inside an ordinary plugin would be encapsulated, and
+the routes would never see it.
 
 ---
 
@@ -402,8 +432,11 @@ unlimited.
 | the transaction is already paid | the payment page answers 409; a repeated callback answers "already paid" |
 | the signature does not verify | 400, and the transaction stays `pending` |
 | the amount is not the plan's price | 400, and the transaction stays `pending` |
-| the `Origin` is present and is not PayU's | 403 |
+| the status is not `success` | 400, and the transaction stays `pending` |
+| the `Origin` is missing, or is not PayU's | 403 |
+| the callback names a different transaction than the link | 400 |
 | the gateway is not configured | 503 |
+| the server does not know its own public address | 503 on the payment page; the checkout is off |
 | the buyer's DMs are closed | the purchase stands; the error is logged |
 
 ---
@@ -412,10 +445,11 @@ unlimited.
 
 | File | What it proves |
 |---|---|
-| `payu.test.ts` | the hash vectors (computed outside this code), the swapped salt/key, and that a tampered amount, a tampered email, a tampered name, a wrong key, a wrong salt and a request-hash-used-as-a-response-hash are all refused |
+| `payu.test.ts` | the pinned hash vectors for every layout, PayU's own SDK known-answer vectors, the request and the response differing for every layout, the status being inside the signature, and that a tampered amount, a tampered email, a tampered name, a wrong key, a wrong salt, a foreign origin, a missing origin, a non-`success` status and a request-hash-used-as-a-response-hash are all refused |
+| `env.test.ts` | the environment reader: nothing throws, everything unset is `null`, and the warnings say what is missing |
 | `entitlements.test.ts` | the gate: allowed, no expiry, expired without a sweep, disabled, unknown feature, and that an expired entitlement is not deleted |
 | `purchase.test.ts` | the state machine, the retry, the idempotent grant, the extension of an existing subscription, and the real email and name |
-| `server/server.test.ts` | the routes: the health check, the payment page, a genuine callback, a missing `Origin` header, a hostile `Origin`, the tampered forms, and the webhook |
+| `server/server.test.ts` | the routes: the health check, the payment page and its request hash, a genuine callback, a missing `Origin`, a hostile `Origin`, the other field layout, the tampered forms, the webhook, the repeated webhook, the failure and the retry, and the already-paid page |
 | `gate.test.ts` | one presentation, one button, and the reason naming the feature and the way out |
 | `limits.test.ts` | the free-tier table, the generated perk list, and that the table and the copy in `core/premium.ts` have not drifted |
 

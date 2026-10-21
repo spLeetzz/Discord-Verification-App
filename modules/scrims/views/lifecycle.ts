@@ -10,17 +10,13 @@
  * checks are made here.
  */
 
-import type { ButtonInteraction, Guild, TextBasedChannel } from "discord.js";
 import { ChannelType, PermissionFlagsBits } from "discord.js";
-import { MessageFlags } from "discord.js";
+import type { ButtonInteraction, Guild, TextChannel } from "discord.js";
 import { run } from "../../../core/fire-and-forget.js";
+import { logger } from "../../../utils/logger.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
-import {
-  renderCloseMessage,
-  renderOpenMessage,
-  slotListLines,
-} from "../render.js";
+import { renderCloseMessage, renderOpenMessage } from "../render.js";
 import type { ScrimRecord } from "../types.js";
 import { buildScrimPanel } from "./manager.js";
 import { publishSlotlist } from "./slotlist.js";
@@ -31,10 +27,7 @@ import { fail } from "./handlers.js";
  *
  * @returns the reason it may not, or `null` when it may.
  */
-export function checkCanOpen(
-  guild: Guild,
-  scrim: ScrimRecord,
-): string | null {
+export function checkCanOpen(guild: Guild, scrim: ScrimRecord): string | null {
   const channel = guild.channels.cache.get(scrim.registrationChannelId);
 
   if (!channel || channel.type !== ChannelType.GuildText) {
@@ -78,19 +71,14 @@ export function checkCanOpen(
 function registrationChannel(
   guild: Guild,
   scrim: ScrimRecord,
-): TextBasedChannel | null {
+): TextChannel | null {
   const channel = guild.channels.cache.get(scrim.registrationChannelId);
 
   if (!channel) return null;
 
-  if (
-    channel.type !== ChannelType.GuildText &&
-    channel.type !== ChannelType.GuildAnnouncement
-  ) {
-    return null;
-  }
+  if (channel.type !== ChannelType.GuildText) return null;
 
-  return channel as TextBasedChannel;
+  return channel;
 }
 
 /**
@@ -134,40 +122,40 @@ async function toggleChannel(
   }
 }
 
-/** Opens a scrim's registration. */
-export async function openRegistrationFlow(
-  interaction: ButtonInteraction,
-  scrim: ScrimRecord,
-): Promise<void> {
-  const guild = interaction.guild;
+/**
+ * Opens a scrim in a guild: the state change, the message, the channel.
+ *
+ * This is what the daily `scrim_open` job calls, and what the moderator
+ * button calls.
+ */
+export async function openScrimInGuild(
+  guild: Guild,
+  scrimId: string,
+): Promise<service.OpenResult | null> {
+  const scrim = await repo.getScrim(scrimId);
 
-  if (!guild) {
-    await fail(interaction, "This only works in a server.");
-
-    return;
-  }
+  if (!scrim) return null;
 
   const refusal = checkCanOpen(guild, scrim);
 
   if (refusal) {
-    await fail(interaction, refusal);
+    logger.warn(`[Scrims] ${refusal}`);
 
-    return;
+    return null;
   }
-
-  await interaction.deferUpdate().catch(() => undefined);
 
   let result: service.OpenResult;
 
   try {
     result = await service.openRegistration(scrim.id);
   } catch (error) {
-    await fail(
-      interaction,
-      error instanceof Error ? error.message : "The scrim could not be opened.",
+    logger.error(
+      `[Scrims] Could not open the scrim ${scrim.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     );
 
-    return;
+    return null;
   }
 
   const fresh = result.scrim;
@@ -206,40 +194,33 @@ export async function openRegistrationFlow(
 
   await toggleChannel(guild, fresh, true);
 
-  const panel = buildScrimPanel(fresh);
-
-  await interaction.message?.edit({
-    embeds: panel.embeds,
-    components: panel.components,
-  });
+  return result;
 }
 
-/** Closes a scrim's registration. */
-export async function closeRegistrationFlow(
-  interaction: ButtonInteraction,
-  scrim: ScrimRecord,
-): Promise<void> {
-  const guild = interaction.guild;
+/**
+ * Closes a scrim in a guild: the state change, the message, the channel
+ * and — when the scrim asked for it — the slotlist.
+ */
+export async function closeScrimInGuild(
+  guild: Guild,
+  scrimId: string,
+): Promise<service.CloseResult | null> {
+  const scrim = await repo.getScrim(scrimId);
 
-  if (!guild) {
-    await fail(interaction, "This only works in a server.");
-
-    return;
-  }
-
-  await interaction.deferUpdate().catch(() => undefined);
+  if (!scrim) return null;
 
   let result: service.CloseResult;
 
   try {
     result = await service.closeRegistration(scrim.id);
   } catch (error) {
-    await fail(
-      interaction,
-      error instanceof Error ? error.message : "The scrim could not be closed.",
+    logger.error(
+      `[Scrims] Could not close the scrim ${scrim.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     );
 
-    return;
+    return null;
   }
 
   const fresh = result.scrim;
@@ -261,11 +242,11 @@ export async function closeRegistrationFlow(
   if (fresh.autoslotlist && result.registered.length > 0) {
     const slotlistChannel = guild.channels.cache.get(fresh.slotlistChannelId);
 
-    if (slotlistChannel && "send" in slotlistChannel) {
+    if (slotlistChannel && slotlistChannel.type === ChannelType.GuildText) {
       run(
         async () => {
           const message = await publishSlotlist(
-            slotlistChannel as never,
+            slotlistChannel,
             fresh,
             result.registered,
           );
@@ -277,7 +258,72 @@ export async function closeRegistrationFlow(
     }
   }
 
-  const panel = buildScrimPanel(fresh);
+  return result;
+}
+
+/** Opens a scrim's registration, from a moderator's button. */
+export async function openRegistrationFlow(
+  interaction: ButtonInteraction,
+  scrim: ScrimRecord,
+): Promise<void> {
+  const guild = interaction.guild;
+
+  if (!guild) {
+    await fail(interaction, "This only works in a server.");
+
+    return;
+  }
+
+  const refusal = checkCanOpen(guild, scrim);
+
+  if (refusal) {
+    await fail(interaction, refusal);
+
+    return;
+  }
+
+  await interaction.deferUpdate().catch(() => undefined);
+
+  const result = await openScrimInGuild(guild, scrim.id);
+
+  if (!result) {
+    await fail(interaction, "The scrim could not be opened.");
+
+    return;
+  }
+
+  const panel = buildScrimPanel(result.scrim);
+
+  await interaction.message?.edit({
+    embeds: panel.embeds,
+    components: panel.components,
+  });
+}
+
+/** Closes a scrim's registration, from a moderator's button. */
+export async function closeRegistrationFlow(
+  interaction: ButtonInteraction,
+  scrim: ScrimRecord,
+): Promise<void> {
+  const guild = interaction.guild;
+
+  if (!guild) {
+    await fail(interaction, "This only works in a server.");
+
+    return;
+  }
+
+  await interaction.deferUpdate().catch(() => undefined);
+
+  const result = await closeScrimInGuild(guild, scrim.id);
+
+  if (!result) {
+    await fail(interaction, "The scrim could not be closed.");
+
+    return;
+  }
+
+  const panel = buildScrimPanel(result.scrim);
 
   await interaction.message?.edit({
     embeds: panel.embeds,
@@ -288,7 +334,11 @@ export async function closeRegistrationFlow(
 /** The text of a scrim's slotlist, as the source printed it in the log. */
 export function textSlotlist(
   scrim: ScrimRecord,
-  slots: readonly { num: number; teamName: string | null; ownerUserId: string | null }[],
+  slots: readonly {
+    num: number;
+    teamName: string | null;
+    ownerUserId: string | null;
+  }[],
 ): string {
   let text = `${scrim.name} Slot details:\n\n`;
 
@@ -300,9 +350,3 @@ export function textSlotlist(
 
   return text;
 }
-
-/** The slot lines of a slotlist, for the embed. */
-export { slotListLines };
-
-/** The flags of an ephemeral follow-up. */
-export const EPHEMERAL = MessageFlags.Ephemeral;

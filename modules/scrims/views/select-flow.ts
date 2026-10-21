@@ -16,11 +16,11 @@ import {
   ChannelSelectMenuBuilder,
   ChannelType,
   ComponentType,
-  MessageFlags,
   RoleSelectMenuBuilder,
 } from "discord.js";
-import type { Interaction, MessageComponentInteraction } from "discord.js";
+import type { RepliableInteraction } from "discord.js";
 import { randomId } from "../../../core/custom-id.js";
+import { respond } from "../../../core/context.js";
 
 /** How long the menu stays open. */
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -31,7 +31,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
  * @returns the channel id, or `null` when nobody chose anything.
  */
 export async function awaitChannelSelect(
-  interaction: Interaction,
+  interaction: RepliableInteraction,
   options: { placeholder?: string; timeoutMs?: number } = {},
 ): Promise<string | null> {
   const customId = randomId();
@@ -41,23 +41,33 @@ export async function awaitChannelSelect(
     .setPlaceholder(options.placeholder ?? "Pick a channel")
     .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement);
 
-  await interaction.reply({
-    components: [
-      new ActionRowBuilder<ChannelSelectMenuBuilder>().addComponents(menu),
-    ],
-    flags: MessageFlags.Ephemeral,
-  });
-
-  const answer = await collect(
+  const handle = await respond(
     interaction,
-    ComponentType.ChannelSelect,
-    customId,
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    {
+      components: [
+        new ActionRowBuilder<ChannelSelectMenuBuilder>().addComponents(menu),
+      ],
+    },
+    true,
   );
 
-  if (!answer) return null;
+  try {
+    const answer = await handle.awaitMessageComponent({
+      componentType: ComponentType.ChannelSelect,
+      time: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      filter: (candidate) =>
+        candidate.customId === customId &&
+        candidate.user.id === interaction.user.id,
+    });
 
-  return answer.values[0] ?? null;
+    const value = answer.isChannelSelectMenu() ? answer.values[0] : undefined;
+
+    await answer.update({ components: [] });
+
+    return value ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -66,7 +76,7 @@ export async function awaitChannelSelect(
  * @returns the role id, or `null` when nobody chose anything.
  */
 export async function awaitRoleSelect(
-  interaction: Interaction,
+  interaction: RepliableInteraction,
   options: { placeholder?: string; timeoutMs?: number } = {},
 ): Promise<string | null> {
   const customId = randomId();
@@ -75,44 +85,30 @@ export async function awaitRoleSelect(
     .setCustomId(customId)
     .setPlaceholder(options.placeholder ?? "Pick a role");
 
-  await interaction.reply({
-    components: [
-      new ActionRowBuilder<RoleSelectMenuBuilder>().addComponents(menu),
-    ],
-    flags: MessageFlags.Ephemeral,
-  });
-
-  const answer = await collect(
+  const handle = await respond(
     interaction,
-    ComponentType.RoleSelect,
-    customId,
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    {
+      components: [
+        new ActionRowBuilder<RoleSelectMenuBuilder>().addComponents(menu),
+      ],
+    },
+    true,
   );
 
-  if (!answer) return null;
-
-  return answer.values[0] ?? null;
-}
-
-/** Collects the answer, or `null` when the menu timed out. */
-async function collect(
-  interaction: Interaction,
-  componentType: ComponentType.ChannelSelect | ComponentType.RoleSelect,
-  customId: string,
-  timeoutMs: number,
-): Promise<MessageComponentInteraction | null> {
   try {
-    const answer = await interaction.awaitMessageComponent({
-      componentType,
-      time: timeoutMs,
+    const answer = await handle.awaitMessageComponent({
+      componentType: ComponentType.RoleSelect,
+      time: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       filter: (candidate) =>
         candidate.customId === customId &&
         candidate.user.id === interaction.user.id,
     });
 
-    await answer.update({ components: [] }).catch(() => undefined);
+    const value = answer.isRoleSelectMenu() ? answer.values[0] : undefined;
 
-    return answer;
+    await answer.update({ components: [] });
+
+    return value ?? null;
   } catch {
     return null;
   }

@@ -149,6 +149,11 @@ const maintenanceCommand: ModerationCommand = {
 
       // The record is read before the lockdown is lifted, because lifting
       // it deletes the record of the maintenance channels.
+      //
+      // The ids are only there when the lockdown has a duration: a
+      // lockdown with no duration has no timer row, and the timer row is
+      // where the ids live. Without them the channels are found by name,
+      // which is what `deleteMaintenanceChannels` falls back to.
       const record = await findLockdown(
         guild.id,
         "maintenance",

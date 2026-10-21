@@ -251,7 +251,7 @@ export async function armMatchTimer(
  * not opened. Opening it is a separate, explicit step.
  */
 export async function createScrimFromWizard(
-  state: import("./views/manager.js").WizardState,
+  state: WizardState,
 ): Promise<string> {
   if (!state.registrationChannelId || !state.slotlistChannelId) {
     throw new ScrimError("The scrim needs a registration channel.");

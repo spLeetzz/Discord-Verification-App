@@ -15,7 +15,6 @@ import { fail, refuseUnlessMod } from "./handlers.js";
 export async function handleScrimsSelect(
   interaction: AnySelectMenuInteraction,
   action: string,
-  parts: readonly string[],
 ): Promise<void> {
   if (await refuseUnlessMod(interaction)) return;
 
@@ -41,5 +40,7 @@ export async function handleScrimsSelect(
     return;
   }
 
-  await interaction.update({ embeds: buildScrimPanel(scrim).embeds, components: buildScrimPanel(scrim).components });
+  const panel = buildScrimPanel(scrim);
+
+  await interaction.update({ embeds: panel.embeds, components: panel.components });
 }

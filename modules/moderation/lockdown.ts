@@ -1,12 +1,15 @@
 /**
  * Lockdowns and maintenance mode.
  *
- * A lockdown is a row in the `lockdowns` table plus a row in the durable
- * `jobs` table. The `lockdowns` row is the *state* — it says which
- * channels are locked, by whom, and until when. The `jobs` row is the
- * *undo data* and the expiry: it says what the permissions looked like
- * before the lockdown, so the unlock can put them back, and it fires when
- * the lockdown is meant to lift by itself.
+ * A lockdown is a row in the `lockdowns` table. The row *is* the state: it
+ * says which channels are locked, by whom, until when, and what their
+ * permissions looked like before. Nothing is stored anywhere else.
+ *
+ * A lockdown with a duration also has a row in the durable `jobs` table.
+ * That row is the **timer** and nothing else: it says when the lockdown
+ * lifts by itself. A lockdown with no duration has no job row at all —
+ * there is nothing to schedule, and the state it needs is on the
+ * lockdown row already.
  *
  * **The expiry is never a `setTimeout`.** A timer dies with the process,
  * and the channel stays locked forever. The job row is in the database,
@@ -21,7 +24,7 @@
  *     is written with a null expiry, which the column allows.
  *  3. The unlock set `send_messages = True` unconditionally, opening a
  *     channel that had been write-locked before. The previous state is
- *     recorded and restored exactly.
+ *     recorded on the lockdown row and restored exactly.
  */
 
 import { ChannelType, PermissionFlagsBits } from "discord.js";
@@ -36,15 +39,7 @@ import type {
 import { PermissionDeniedError } from "../../core/errors.js";
 import { readOverwriteState, planRestore } from "./permissions.js";
 import { evaluateLock, evaluateUnlock } from "./lock-state.js";
-import {
-  INDEFINITE_JOB_EXPIRY,
-  deleteLockdown,
-  deleteLockdownJob,
-  findLockdownJob,
-  insertLockdown,
-  insertLockdownJob,
-  listLockdowns,
-} from "./repo.js";
+import { createLockdown, listLockdowns, removeLockdown } from "./repo.js";
 import type {
   LockPermission,
   LockRecord,
@@ -249,7 +244,7 @@ async function applyLock(input: ApplyLockInput): Promise<LockApplyResult> {
     );
   }
 
-  const record = await insertLockdown({
+  const record = await createLockdown({
     guildId: guild.id,
     type: input.type,
     roleId: input.roleId,
@@ -257,23 +252,10 @@ async function applyLock(input: ApplyLockInput): Promise<LockApplyResult> {
     channelIds: lockedChannels,
     expireTime: input.expireTime,
     authorId: context.author.id,
-  });
-
-  const payload: LockdownJobPayload = {
-    lockdownId: record.id,
-    type: input.type,
-    guildId: guild.id,
-    channelIds: lockedChannels,
-    roleId: input.roleId,
+    priorState: prior,
     sourceChannelId: context.sourceChannelId,
-    prior,
     maintenanceChannelIds: input.maintenanceChannelIds ?? [],
-  };
-
-  await insertLockdownJob(
-    payload,
-    input.expireTime ?? INDEFINITE_JOB_EXPIRY,
-  );
+  });
 
   return {
     lockdownId: record.id,
@@ -308,8 +290,10 @@ export async function releaseLock(
   const { context, record, permission, target } = input;
   const { guild } = context;
 
-  const job = await findLockdownJob(record.id);
-  const prior = job?.payload.prior ?? {};
+  // The prior state is on the lockdown row. It is the property of the
+  // lockdown, not of the timer, so it is there whether the lockdown has
+  // an expiry or not.
+  const prior = record.priorState ?? {};
 
   let restored = 0;
   let failed = 0;
@@ -367,8 +351,7 @@ export async function releaseLock(
     }
   }
 
-  await deleteLockdownJob(record.id);
-  await deleteLockdown(record.id);
+  await removeLockdown(record.id);
 
   return { restored, failed, withoutRecord };
 }

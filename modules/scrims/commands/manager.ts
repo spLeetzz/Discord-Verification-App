@@ -6,7 +6,7 @@
  * id (D18) — so a panel survives a restart.
  */
 
-import { SlashCommandBuilder } from "discord.js";
+import { SlashCommandSubcommandBuilder } from "discord.js";
 import { canUseScrimMod } from "../guards.js";
 import * as repo from "../repo.js";
 import { buildListPanel } from "../views/manager.js";
@@ -15,7 +15,7 @@ import type { ScrimSubcommand } from "./types.js";
 
 /** The subcommand. */
 export const managerSubcommand: ScrimSubcommand = {
-  data: new SlashCommandBuilder()
+  data: new SlashCommandSubcommandBuilder()
     .setName("manager")
     .setDescription("Open the scrims management panel."),
 

@@ -2,6 +2,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { TextChannel } from "discord.js";
 import type { Client } from "discord.js";
 import { EVENTS, enabledEvents } from "../config/events.js";
+import { startJobDispatcher } from "./jobs.js";
+import { registerAreas } from "./listeners.js";
 import { buildVerificationButtonRow, buildVerificationEmbed } from "../utils/embeds.js";
 import { logger } from "../utils/logger.js";
 import { MESSAGE_IDS_PATH } from "../utils/paths.js";
@@ -59,4 +61,35 @@ export async function restoreVerificationEmbeds(client: Client): Promise<void> {
       logger.info(`[Startup] Sent fresh embed for ${eventKey}.`);
     }
   }
+}
+
+/**
+ * Brings up everything that runs alongside the Discord client.
+ *
+ * The order matters: the areas register their router handlers before the
+ * job dispatcher starts, so a job that fires in the first second finds a
+ * handler rather than being dropped with a warning.
+ */
+export async function startAreas(client: Client): Promise<void> {
+  await registerAreas(client);
+
+  // The block list is a cache that has to be warm before the first command.
+  const { startModeration } = await import("../modules/moderation/register.js");
+  await startModeration();
+
+  // The payment server runs in this process (D42) so the purchase
+  // completion can reach the bot directly. It is optional: a guild with no
+  // payment credentials does not get one.
+  try {
+    const { startPremiumServer } = await import(
+      "../modules/premium/index.js"
+    );
+    await startPremiumServer();
+  } catch (err) {
+    logger.warn(
+      `[Startup] Premium server not started: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  startJobDispatcher(client);
 }

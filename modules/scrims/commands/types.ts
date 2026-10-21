@@ -7,13 +7,13 @@
 
 import type {
   ChatInputCommandInteraction,
-  SlashCommandOptionsOnlyBuilder,
+  SlashCommandSubcommandBuilder,
 } from "discord.js";
 
 /** One subcommand of `/scrims`. */
 export interface ScrimSubcommand {
   /** The definition the deploy script registers. */
-  readonly data: SlashCommandOptionsOnlyBuilder;
+  readonly data: SlashCommandSubcommandBuilder;
   /** What it does when it is run. */
   readonly run: (interaction: ChatInputCommandInteraction) => Promise<void>;
 }

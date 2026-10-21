@@ -14,7 +14,6 @@ import {
   EmbedBuilder,
   StringSelectMenuBuilder,
 } from "discord.js";
-import type { InteractionReplyOptions } from "discord.js";
 import { EMBED_COLOR } from "../../../core/constants.js";
 import { discordTimestamp, formatTimestamp } from "../../../core/time.js";
 import { TokenStore } from "../../../core/custom-id.js";
@@ -31,10 +30,16 @@ import { scrimsId } from "./ids.js";
 import { formatDuration } from "../render.js";
 import type { ScrimRecord } from "../types.js";
 
-/** The components of a panel. */
-export type PanelComponents = NonNullable<
-  InteractionReplyOptions["components"]
->;
+/**
+ * The components of a panel.
+ *
+ * A panel is a list of rows; every row is either a row of buttons or a
+ * row that holds one select menu.
+ */
+export type PanelComponents = (
+  | ActionRowBuilder<ButtonBuilder>
+  | ActionRowBuilder<StringSelectMenuBuilder>
+)[];
 
 /* ------------------------------------------------------------------ *
  * The list panel

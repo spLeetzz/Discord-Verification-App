@@ -4,7 +4,7 @@
  * Posts the slotlist into the current channel.
  */
 
-import { ChannelType, SlashCommandBuilder } from "discord.js";
+import { ChannelType, SlashCommandSubcommandBuilder } from "discord.js";
 import { canUseScrimMod } from "../guards.js";
 import * as repo from "../repo.js";
 import { renderSlotlist, slotListLines } from "../render.js";
@@ -13,7 +13,7 @@ import type { ScrimSubcommand } from "./types.js";
 
 /** The subcommand. */
 export const slotListSubcommand: ScrimSubcommand = {
-  data: new SlashCommandBuilder()
+  data: new SlashCommandSubcommandBuilder()
     .setName("slotlist")
     .setDescription("Post a scrim's slotlist here.")
     .addChannelOption((option) =>

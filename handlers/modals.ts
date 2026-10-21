@@ -1,6 +1,7 @@
 import { ChannelType } from "discord.js";
 import type { ModalSubmitInteraction } from "discord.js";
 import { EVENTS, isEventKey } from "../config/events.js";
+import { dispatch } from "../core/router.js";
 import { findParticipant, isEmailVerified } from "../repo/sheet.js";
 import type { TicketSubmission } from "../types/ticket.js";
 import { errorMessage } from "../utils/errors.js";
@@ -13,7 +14,13 @@ export async function handleModal(
 ): Promise<void> {
   const [type, eventKey] = interaction.customId.split(":");
 
-  if (type !== "verify_modal") return;
+  // `verify_modal:<eventKey>` is the frozen verification flow. It predates
+  // the router, so it keeps its own branch — the router has a legacy hook for
+  // buttons but not for modals, and the flow is frozen either way.
+  if (type !== "verify_modal") {
+    await dispatch(interaction);
+    return;
+  }
 
   if (!eventKey || !isEventKey(eventKey)) {
     // Note: Since we globally defer, we must use editReply here

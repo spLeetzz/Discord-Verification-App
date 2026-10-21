@@ -86,8 +86,15 @@ export interface EntitlementLookup {
 /**
  * The free-tier allowances (D45).
  *
- * One object, read by every count gate, so the perk table and the code
- * cannot disagree. A feature with no entry here is unlimited.
+ * **The canonical table is `modules/premium/limits.ts`** — it is the one
+ * the perk list is generated from. The copy here mirrors it, and a test in
+ * the premium module fails the moment the two drift apart.
+ *
+ * `core/guards.ts` never reads a number from either table: `countLimitGuard`
+ * takes the limit as a parameter, so no allowance is hard-coded in the
+ * runtime layer.
+ *
+ * A feature with no entry in the table is unlimited.
  *
  * These are the limits the *code* enforces, not the ones the old perk
  * table advertised — the two had drifted apart, and the code is the one

@@ -96,12 +96,16 @@ describe("reading a stored template", () => {
     expect(parseTemplate({ fields: [{ name: "a" }] })).toEqual({});
   });
 
-  it("knows when a template is empty enough to fall back to the default", () => {
-    // The source used `len(template) <= 1`, so a template with a single
-    // key still counted as "unset". Preserved.
+  it("knows when a template holds no content", () => {
+    // The source asked `len(template) <= 1`, which was a proxy for "the
+    // template holds no content" — it worked because discord.py's
+    // `Embed.to_dict()` always carried a `type: 'rich'` key. Ours is
+    // `jsonb` and does not, so the question is asked directly.
     expect(isEmptyTemplate({})).toBe(true);
-    expect(isEmptyTemplate({ title: "x" })).toBe(true);
-    expect(isEmptyTemplate({ title: "x", description: "y" })).toBe(false);
+    expect(isEmptyTemplate({ title: "x" })).toBe(false);
+    expect(isEmptyTemplate({ description: "y" })).toBe(false);
+    expect(isEmptyTemplate({ fields: [{ name: "a", value: "b" }] })).toBe(false);
+    expect(isEmptyTemplate({ footer: { text: "f" } })).toBe(false);
   });
 });
 

@@ -11,7 +11,7 @@
 import {
   ChannelType,
   PermissionFlagsBits,
-  SlashCommandBuilder,
+  SlashCommandSubcommandBuilder,
 } from "discord.js";
 import { parseNaturalTime } from "../../../core/time.js";
 import { FREE_SCrim_LIMIT, isEntitled, PremiumFeature } from "../entitlements.js";
@@ -22,7 +22,7 @@ import type { ScrimSubcommand } from "./types.js";
 
 /** The subcommand. */
 export const createSubcommand: ScrimSubcommand = {
-  data: new SlashCommandBuilder()
+  data: new SlashCommandSubcommandBuilder()
     .setName("create")
     .setDescription("Create a scrim.")
     .addChannelOption((option) =>
@@ -135,6 +135,8 @@ export const createSubcommand: ScrimSubcommand = {
     }
 
     for (const channel of [registrationChannel, slotlistChannel]) {
+      if (!("permissionsFor" in channel)) continue;
+
       const permissions = channel.permissionsFor(me);
 
       if (
@@ -187,15 +189,16 @@ export const createSubcommand: ScrimSubcommand = {
 
     const caller = interaction.member;
 
-    if (
-      "roles" in caller &&
-      successRole.position >= caller.roles.highest.position
-    ) {
-      await interaction.editReply({
-        content: `❌ You can't set a success role (${successRole.toString()}) higher than your top role (${caller.roles.highest.toString()}).`,
-      });
+    if (caller && "roles" in caller && "highest" in caller.roles) {
+      const top = caller.roles.highest;
 
-      return;
+      if (top && successRole.position >= top.position) {
+        await interaction.editReply({
+          content: `❌ You can't set a success role (${successRole.toString()}) higher than your top role (${top.toString()}).`,
+        });
+
+        return;
+      }
     }
 
     const openTime = parseNaturalTime(openTimeText);

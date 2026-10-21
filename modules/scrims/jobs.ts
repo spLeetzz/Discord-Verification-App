@@ -16,7 +16,7 @@
  */
 
 import { ChannelType, PermissionFlagsBits } from "discord.js";
-import type { Client, Guild, TextBasedChannel } from "discord.js";
+import type { Client, Guild, TextChannel } from "discord.js";
 import { run } from "../../core/fire-and-forget.js";
 import { dayName } from "../../core/time.js";
 import { logger } from "../../utils/logger.js";
@@ -26,6 +26,7 @@ import * as service from "./service.js";
 import { shouldRunAutoclean } from "./schedule.js";
 import { shouldAutoOpen } from "./state.js";
 import { publishSlotlist, refreshSlotlistMessage } from "./views/slotlist.js";
+import { openScrimInGuild } from "./views/lifecycle.js";
 
 /** The events this area handles. */
 export const SCRIM_JOB_EVENTS = [
@@ -122,55 +123,6 @@ export async function onScrimOpen(
   await openScrimInGuild(guild, rearmed.id);
 }
 
-/** Opens a scrim and posts its open message. */
-export async function openScrimInGuild(
-  guild: Guild,
-  scrimId: string,
-): Promise<void> {
-  const scrim = await repo.getScrim(scrimId);
-
-  if (!scrim) return;
-
-  let result: service.OpenResult;
-
-  try {
-    result = await service.openRegistration(scrim.id);
-  } catch (error) {
-    logger.error(
-      `[Scrims] Could not open the scrim ${scrim.id}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-
-    return;
-  }
-
-  const fresh = result.scrim;
-  const channel = guild.channels.cache.get(fresh.registrationChannelId);
-
-  if (!channel || channel.type !== ChannelType.GuildText) return;
-
-  const { renderOpenMessage } = await import("./render.js");
-
-  const reserved = await repo.listReservedSlots(fresh.id);
-
-  const embed = renderOpenMessage(fresh, {
-    mentions: fresh.requiredMentions,
-    totalSlots: fresh.totalSlots,
-    reservedCount: reserved.length,
-    slotlistMention: `<#${fresh.slotlistChannelId}>`,
-    multiregister: fresh.multiregister,
-    teamnameCompulsion: fresh.teamnameCompulsion,
-    bannedMentions: "",
-    reservedMentions: reserved
-      .filter((slot) => slot.userId)
-      .map((slot) => `<@${slot.userId}>`)
-      .join(", "),
-  });
-
-  await channel.send({ embeds: [embed] }).catch(() => undefined);
-}
-
 /* ------------------------------------------------------------------ *
  * autoclean
  * ------------------------------------------------------------------ */
@@ -230,10 +182,9 @@ export async function purgeChannel(
 
   if (!messages) return;
 
-  const doomed = messages
+  const doomed = [...messages.values()]
     .filter((message) => !message.pinned)
-    .filter((message) => message.author.id !== guild.client.user.id)
-    .filter((message) => message.id !== guild.client.user.id);
+    .filter((message) => message.author.id !== guild.client.user.id);
 
   if (doomed.length === 0) return;
 
@@ -376,19 +327,14 @@ export async function rebuildChannelCache(): Promise<void> {
 export function slotlistChannel(
   guild: Guild,
   channelId: string,
-): TextBasedChannel | null {
+): TextChannel | null {
   const channel = guild.channels.cache.get(channelId);
 
   if (!channel) return null;
 
-  if (
-    channel.type !== ChannelType.GuildText &&
-    channel.type !== ChannelType.GuildAnnouncement
-  ) {
-    return null;
-  }
+  if (channel.type !== ChannelType.GuildText) return null;
 
-  return channel as TextBasedChannel;
+  return channel;
 }
 
 /** Refreshes a published slotlist message. */

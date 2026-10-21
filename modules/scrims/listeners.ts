@@ -36,6 +36,7 @@ import { evaluateRegistration } from "./requirements.js";
 import { scrimChannelCache } from "./channel-cache.js";
 import * as repo from "./repo.js";
 import * as service from "./service.js";
+import { closeScrimInGuild } from "./views/lifecycle.js";
 import { truncate } from "../../core/text.js";
 import { TEAM_NAME_MAX_LENGTH } from "../../core/team-name.js";
 
@@ -140,7 +141,7 @@ export async function handleRegistrationMessage(
     return true;
   }
 
-  await acceptRegistration(message, scrim, claimed.id);
+  await acceptRegistration(message, scrim);
 
   return true;
 }
@@ -187,7 +188,7 @@ export function canRegister(message: Message, scrim: { roleId: string | null }):
 /** Is this member a scrim moderator? */
 export function isScrimMod(member: {
   roles: { cache: { some(predicate: (role: { name: string }) => boolean): boolean } };
-  permissions: { has(permission: PermissionFlagsBits): boolean };
+  permissions: { has(permission: bigint): boolean };
 }): boolean {
   if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
 
@@ -202,7 +203,6 @@ export function isScrimMod(member: {
 async function acceptRegistration(
   message: Message,
   scrim: { id: string; roleId: string | null; emojis: { tick: string } },
-  slotId: string,
 ): Promise<void> {
   const guild = message.guild;
 
@@ -225,19 +225,18 @@ async function acceptRegistration(
   // The last slot was taken: the scrim closes itself.
   const free = await repo.countFreeSlots(scrim.id);
 
-  if (free === 0) {
-    run(async () => {
+  if (free !== 0) return;
+
+  run(
+    async () => {
       const fresh = await repo.getScrim(scrim.id);
 
       if (!fresh || fresh.status !== "open") return;
 
-      await service.closeRegistration(scrim.id);
-    }, "scrims.closeWhenFull");
-
-    return;
-  }
-
-  void slotId;
+      await closeScrimInGuild(guild, scrim.id);
+    },
+    "scrims.closeWhenFull",
+  );
 }
 
 /** Refuses a registration and says why. */

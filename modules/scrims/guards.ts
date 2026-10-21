@@ -21,7 +21,7 @@
  */
 
 import { PermissionFlagsBits } from "discord.js";
-import type { Interaction } from "discord.js";
+import type { Interaction, ModalSubmitInteraction } from "discord.js";
 import { STAFF_DENIAL_MESSAGE, isStaff } from "../../core/guards.js";
 import { getGuildMember } from "../../utils/member.js";
 
@@ -33,14 +33,22 @@ export const SCRIM_MOD_DENIAL_MESSAGE =
   "You need the **scrims-mod** role or **Manage Server** permissions to use this command.";
 
 /**
+ * The interactions a scrims guard sees.
+ *
+ * A modal submit is not an `Interaction` in discord.js — it extends
+ * `BaseInteraction` — so the union is spelled out here.
+ */
+export type ScrimsInteraction = Interaction | ModalSubmitInteraction;
+
+/**
  * May the caller manage scrims?
  *
  * @returns `null` when they may, the refusal message when they may not.
  */
 export async function canUseScrimMod(
-  interaction: Interaction,
+  interaction: ScrimsInteraction,
 ): Promise<string | null> {
-  const member = await getGuildMember(interaction);
+  const member = await getGuildMember(interaction as Interaction);
 
   if (!member) return SCRIM_MOD_DENIAL_MESSAGE;
 
@@ -57,7 +65,7 @@ export async function canUseScrimMod(
   }
 
   // The staff role this guild already uses.
-  if (await isStaff(interaction)) return null;
+  if (await isStaff(interaction as Interaction)) return null;
 
   return SCRIM_MOD_DENIAL_MESSAGE;
 }

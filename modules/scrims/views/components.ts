@@ -20,6 +20,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
+import type { ModalSubmitInteraction } from "discord.js";
 import { EMBED_COLOR } from "../../../core/constants.js";
 
 /** Discord's own limits. */
@@ -58,6 +59,14 @@ export interface EditorField {
   /** What the button and the embed call it. */
   readonly label: string;
   readonly kind: FieldKind;
+  /**
+   * The column a toggle writes.
+   *
+   * The custom-id fragment and the column are different names — the
+   * button says `toggle_multireg`, the column says `multiregister` —
+   * and this is where the two are joined.
+   */
+  readonly column?: string;
   /** Is the field behind a premium entitlement? */
   readonly premium?: boolean;
   /**
@@ -83,19 +92,67 @@ export const EDITOR_FIELDS: readonly EditorField[] = [
   { key: "set_mentions", label: "Mentions", kind: "number" },
   { key: "set_slots", label: "Slots", kind: "number" },
   { key: "set_open_time", label: "Open Time", kind: "time" },
-  { key: "set_emojis", label: "Reactions", kind: "emojis", premium: true, applyToAll: true },
+  {
+    key: "set_emojis",
+    label: "Reactions",
+    kind: "emojis",
+    premium: true,
+    applyToAll: true,
+  },
   { key: "set_ping_role", label: "Ping Role", kind: "role" },
   { key: "set_open_role", label: "Open Role", kind: "role" },
-  { key: "toggle_multireg", label: "Multi-Register", kind: "toggle", applyToAll: true },
-  { key: "toggle_teamname", label: "Team Compulsion", kind: "toggle", applyToAll: true },
-  { key: "toggle_dup_name", label: "Duplicate Team Name", kind: "toggle", applyToAll: true },
-  { key: "toggle_del_reject", label: "Autodelete Rejected", kind: "toggle", applyToAll: true },
-  { key: "toggle_del_late", label: "Autodelete Late Messages", kind: "toggle", applyToAll: true },
-  { key: "set_start_from", label: "Slotlist Start From", kind: "number", applyToAll: true },
+  {
+    key: "toggle_multireg",
+    label: "Multi-Register",
+    kind: "toggle",
+    column: "multiregister",
+    applyToAll: true,
+  },
+  {
+    key: "toggle_teamname",
+    label: "Team Compulsion",
+    kind: "toggle",
+    column: "teamnameCompulsion",
+    applyToAll: true,
+  },
+  {
+    key: "toggle_dup_name",
+    label: "Duplicate Team Name",
+    kind: "toggle",
+    column: "noDuplicateName",
+    applyToAll: true,
+  },
+  {
+    key: "toggle_del_reject",
+    label: "Autodelete Rejected",
+    kind: "toggle",
+    column: "autodeleteRejects",
+    applyToAll: true,
+  },
+  {
+    key: "toggle_del_late",
+    label: "Autodelete Late Messages",
+    kind: "toggle",
+    column: "autodeleteExtras",
+    applyToAll: true,
+  },
+  {
+    key: "set_start_from",
+    label: "Slotlist Start From",
+    kind: "number",
+    applyToAll: true,
+  },
   { key: "set_autoclean", label: "Autoclean", kind: "panel" },
   { key: "set_days", label: "Scrim Days", kind: "days" },
   { key: "set_lines", label: "Required Lines", kind: "number", premium: true },
-  { key: "toggle_dup_tags", label: "Duplicate / Fake Tags", kind: "toggle", premium: true, applyToAll: true },
+  {
+    key: "toggle_dup_tags",
+    label: "Duplicate / Fake Tags",
+    kind: "toggle",
+    column: "allowDuplicateTags",
+    premium: true,
+    applyToAll: true,
+  },
 ];
 
 /** The letter a field's button carries. */
@@ -227,11 +284,11 @@ export function buildModal(spec: ModalSpec): ModalBuilder {
 
 /** A text input's value, or an empty string. */
 export function modalText(
-  interaction: { fields: { getCustomId(id: string): { value: string } } },
+  interaction: ModalSubmitInteraction,
   id = "value",
 ): string {
   try {
-    return interaction.fields.getCustomId(id).value.trim();
+    return interaction.fields.getTextInputValue(id).trim();
   } catch {
     return "";
   }

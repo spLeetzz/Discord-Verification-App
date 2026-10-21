@@ -16,11 +16,11 @@
  *    the custom id. The panel survives a restart, the message being moved
  *    and the message being edited.
  *
- * The two never share a custom id: the wizard's ids start with
- * `identity:ssmod:setup:` and the editor's with `identity:ssmod:`. The
- * router matches on segment boundaries and the more specific prefix is
- * registered first, so the wizard's ids are never mistaken for the
- * editor's.
+ * The two never share a custom id and never share a handler: the wizard's
+ * ids start with `identity:ssmod:setup:` and the editor's with
+ * `identity:ssmod:`. The router matches on segment boundaries and the more
+ * specific prefix is registered first, so a wizard id is never mistaken
+ * for an editor id.
  *
  * ## What was fixed rather than ported
  *
@@ -46,7 +46,6 @@ import {
   ChannelSelectMenuBuilder,
   ChannelType,
   EmbedBuilder,
-  MessageFlags,
   ModalBuilder,
   RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
@@ -56,16 +55,15 @@ import {
 import type {
   AnySelectMenuInteraction,
   ButtonInteraction,
-  InteractionReplyOptions,
   MessageActionRowComponentBuilder,
   ModalSubmitInteraction,
 } from "discord.js";
 import { TokenStore } from "../../../core/custom-id.js";
+import { makeCustomId } from "../../../core/custom-id.js";
 import { EMBED_COLOR, ERROR_COLOR } from "../../../core/constants.js";
 import { respond } from "../../../core/context.js";
-import { makeCustomId } from "../../../core/custom-id.js";
-import { logger } from "../../../utils/logger.js";
 import { errorMessage } from "../../../utils/errors.js";
+import { logger } from "../../../utils/logger.js";
 import * as service from "../service.js";
 import type { ScreenshotType, SsConfig } from "../types.js";
 import { SCREENSHOT_TYPE_LABELS } from "../types.js";
@@ -116,8 +114,9 @@ export type SsModAction = (typeof SSMOD_ACTIONS)[keyof typeof SSMOD_ACTIONS];
 /**
  * Builds a custom id of the panel.
  *
- * @param action what the button does.
+ * @param action what the component does.
  * @param target the row id, or the wizard's token.
+ * @param setup whether the id belongs to the wizard.
  */
 export function ssModCustomId(
   action: SsModAction,
@@ -126,7 +125,8 @@ export function ssModCustomId(
 ): string {
   const prefix = setup ? "setup:" : "";
 
-  const payload = target === undefined ? `${prefix}${action}` : `${prefix}${action}:${target}`;
+  const payload =
+    target === undefined ? `${prefix}${action}` : `${prefix}${action}:${target}`;
 
   return makeCustomId("identity", "ssmod", payload);
 }
@@ -236,10 +236,14 @@ export function stopSsWizardStore(): void {
 
 /** What the panel is currently editing. */
 export type SsTarget =
-  | { readonly kind: "setup"; readonly token: string; readonly draft: SsDraft }
+  | {
+      readonly kind: "setup";
+      readonly token: string;
+      readonly draft: SsDraft;
+    }
   | { readonly kind: "edit"; readonly configId: string; readonly config: SsConfig };
 
-/** The rows the panel shows. */
+/** The panel, as it is sent to Discord. */
 export interface SsPanel {
   readonly embed: EmbedBuilder;
   readonly components: ActionRowBuilder<MessageActionRowComponentBuilder>[];
@@ -301,9 +305,7 @@ export function buildSsPanel(target: SsTarget): SsPanel {
     },
     {
       name: "Screenshot type",
-      value: view.ssType
-        ? `\`${SCREENSHOT_TYPE_LABELS[view.ssType]}\``
-        : "`Not-Set`",
+      value: view.ssType ? `\`${SCREENSHOT_TYPE_LABELS[view.ssType]}\`` : "`Not-Set`",
       inline: true,
     },
     {
@@ -313,7 +315,9 @@ export function buildSsPanel(target: SsTarget): SsPanel {
     },
     {
       name: "Page link",
-      value: view.channelLink ? `[Click Here](${view.channelLink})` : "`Not-Set`",
+      value: view.channelLink
+        ? `[Click Here](${view.channelLink})`
+        : "`Not-Set`",
       inline: true,
     },
     {
@@ -332,84 +336,89 @@ export function buildSsPanel(target: SsTarget): SsPanel {
 
   const isSetup = target.kind === "setup";
 
-  const target_ = isSetup ? target.token : target.configId;
+  const id = isSetup ? target.token : target.configId;
 
-  const channelRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    new ChannelSelectMenuBuilder()
-      .setCustomId(ssModCustomId(SSMOD_ACTIONS.setChannel, target_, isSetup))
-      .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-      .setMaxValues(1)
-      .setPlaceholder("The channel the screenshots are posted in"),
-  );
+  const channelRow =
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new ChannelSelectMenuBuilder()
+        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setChannel, id, isSetup))
+        .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setMaxValues(1)
+        .setPlaceholder("The channel the screenshots are posted in"),
+    );
 
-  const roleRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    new RoleSelectMenuBuilder()
-      .setCustomId(ssModCustomId(SSMOD_ACTIONS.setRole, target_, isSetup))
-      .setMaxValues(1)
-      .setPlaceholder("The role the bot grants when the verification succeeds"),
-  );
+  const roleRow =
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new RoleSelectMenuBuilder()
+        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setRole, id, isSetup))
+        .setMaxValues(1)
+        .setPlaceholder(
+          "The role the bot grants when the verification succeeds",
+        ),
+    );
 
-  const typeRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId(ssModCustomId(SSMOD_ACTIONS.setType, target_, isSetup))
-      .setPlaceholder("The kind of screenshot")
-      .setMaxValues(1)
-      .addOptions(
-        SCREENSHOT_TYPE_OPTIONS.map((type) => ({
-          label: SCREENSHOT_TYPE_LABELS[type],
-          value: type,
-        })),
-      ),
-  );
+  const typeRow =
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setType, id, isSetup))
+        .setPlaceholder("The kind of screenshot")
+        .setMaxValues(1)
+        .addOptions(
+          SCREENSHOT_TYPE_OPTIONS.map((type) => ({
+            label: SCREENSHOT_TYPE_LABELS[type],
+            value: type,
+          })),
+        ),
+    );
 
-  const countRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId(ssModCustomId(SSMOD_ACTIONS.setCount, target_, isSetup))
-      .setPlaceholder("How many screenshots are required")
-      .setMaxValues(1)
-      .addOptions(
-        REQUIRED_SS_OPTIONS.map((count) => ({
-          label: `${count} screenshot${count === 1 ? "" : "s"}`,
-          value: String(count),
-        })),
-      ),
-  );
+  const countRow =
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setCount, id, isSetup))
+        .setPlaceholder("How many screenshots are required")
+        .setMaxValues(1)
+        .addOptions(
+          REQUIRED_SS_OPTIONS.map((count) => ({
+            label: `${count} screenshot${count === 1 ? "" : "s"}`,
+            value: String(count),
+          })),
+        ),
+    );
 
-  const buttonRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(ssModCustomId(SSMOD_ACTIONS.pageDetails, target_, isSetup))
-      .setLabel("Page details")
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(ssModCustomId(SSMOD_ACTIONS.allowSame, target_, isSetup))
-      .setLabel("Allow same")
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(ssModCustomId(SSMOD_ACTIONS.successMessage, target_, isSetup))
-      .setLabel("Success message")
-      .setStyle(ButtonStyle.Secondary),
-  );
+  const fieldRow =
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(ssModCustomId(SSMOD_ACTIONS.pageDetails, id, isSetup))
+        .setLabel("Page details")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(ssModCustomId(SSMOD_ACTIONS.allowSame, id, isSetup))
+        .setLabel("Allow same")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(ssModCustomId(SSMOD_ACTIONS.successMessage, id, isSetup))
+        .setLabel("Success message")
+        .setStyle(ButtonStyle.Secondary),
+    );
 
   const components: ActionRowBuilder<MessageActionRowComponentBuilder>[] = [
     channelRow,
     roleRow,
     typeRow,
     countRow,
-    buttonRow,
+    fieldRow,
   ];
 
   if (isSetup) {
-    const complete = isDraftComplete(target.draft);
-
     components.push(
       new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(ssModCustomId(SSMOD_ACTIONS.save, target_))
+          .setCustomId(ssModCustomId(SSMOD_ACTIONS.save, id))
           .setLabel("Save & setup")
           .setStyle(ButtonStyle.Success)
-          .setDisabled(!complete),
+          .setDisabled(!isDraftComplete(target.draft)),
         new ButtonBuilder()
-          .setCustomId(ssModCustomId(SSMOD_ACTIONS.close, target_))
+          .setCustomId(ssModCustomId(SSMOD_ACTIONS.close, id))
           .setLabel("Cancel")
           .setStyle(ButtonStyle.Danger),
       ),
@@ -418,7 +427,7 @@ export function buildSsPanel(target: SsTarget): SsPanel {
     components.push(
       new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(ssModCustomId(SSMOD_ACTIONS.delete, target_))
+          .setCustomId(ssModCustomId(SSMOD_ACTIONS.delete, id))
           .setLabel("Delete setup")
           .setStyle(ButtonStyle.Danger),
         new ButtonBuilder()
@@ -499,7 +508,7 @@ export function pageDetailsModalId(target: string, setup: boolean): string {
   return ssModCustomId(SSMOD_ACTIONS.pageDetails, target, setup);
 }
 
-/** The custom id of the success-message modal. */
+/** The custom id of the-success-message modal. */
 export function successMessageModalId(target: string, setup: boolean): string {
   return ssModCustomId(SSMOD_ACTIONS.successMessage, target, setup);
 }
@@ -591,16 +600,17 @@ export function buildSsListPanel(configs: readonly SsConfig[]): SsPanel {
     );
   }
 
-  const setupRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(ssModCustomId(SSMOD_ACTIONS.setup))
-      .setLabel("Setup")
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(ssModCustomId(SSMOD_ACTIONS.faq))
-      .setLabel("FAQ")
-      .setStyle(ButtonStyle.Secondary),
-  );
+  const setupRow =
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(ssModCustomId(SSMOD_ACTIONS.setup))
+        .setLabel("Setup")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(ssModCustomId(SSMOD_ACTIONS.faq))
+        .setLabel("FAQ")
+        .setStyle(ButtonStyle.Secondary),
+    );
 
   const components: ActionRowBuilder<MessageActionRowComponentBuilder>[] = [setupRow];
 
@@ -642,267 +652,121 @@ export function buildSsFaqEmbed(): EmbedBuilder {
 }
 
 /* ------------------------------------------------------------------ *
- * Handlers
+ * The targets
  * ------------------------------------------------------------------ */
 
 /**
- * Answers a button of the panel.
+ * A target the panel can write to.
+ *
+ * The setup variant holds the draft by reference so a change is visible to
+ * the renderer without another lookup.
  */
-export async function handleSsModButton(
+export type ResolvedTarget =
+  | {
+      readonly kind: "setup";
+      readonly token: string;
+      readonly guildId: string | null;
+      readonly draft: SsDraft;
+      keywords(): readonly string[];
+    }
+  | {
+      readonly kind: "edit";
+      readonly configId: string;
+      readonly guildId: string;
+      config: SsConfig;
+      keywords(): readonly string[];
+    };
+
+/**
+ * Resolves a wizard's token.
+ */
+export function resolveSetupTarget(
+  token: string,
+  guildId: string | null,
+): ResolvedTarget | null {
+  const draft = readSsDraft(token);
+
+  if (!draft) return null;
+
+  return {
+    kind: "setup",
+    token,
+    guildId,
+    draft,
+    keywords: () => draft.keywords,
+  };
+}
+
+/**
+ * Resolves a setup's row id.
+ */
+export async function resolveEditTarget(
+  configId: string,
+): Promise<ResolvedTarget | null> {
+  const config = await service.findSsConfig(configId);
+
+  if (!config) return null;
+
+  return {
+    kind: "edit",
+    configId,
+    guildId: config.guildId,
+    config,
+    keywords: () => config.keywords,
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Handlers — the wizard
+ * ------------------------------------------------------------------ */
+
+/**
+ * Answers a button of the **wizard**.
+ *
+ * Registered for the prefix `identity:ssmod:setup`.
+ */
+export async function handleSsSetupButton(
   interaction: ButtonInteraction,
   payload: string | null,
 ): Promise<void> {
   const { action, target } = parseSsModPayload(payload);
 
-  switch (action) {
-    case SSMOD_ACTIONS.setup:
-      return handleStartWizard(interaction);
-    case SSMOD_ACTIONS.faq:
-      return handleFaq(interaction);
-    case SSMOD_ACTIONS.edit:
-      return handleOpenEditor(interaction, target);
-    case SSMOD_ACTIONS.allowSame:
-      return handleAllowSame(interaction, target);
-    case SSMOD_ACTIONS.save:
-      return handleSaveWizard(interaction, target);
-    case SSMOD_ACTIONS.close:
-      return handleClose(interaction, target);
-    case SSMOD_ACTIONS.delete:
-      return handleDelete(interaction, target);
-    default:
-      logger.debug(`[Identity] Unknown ssmod button action "${action}".`);
-      return undefined;
+  try {
+    switch (action) {
+      case SSMOD_ACTIONS.setup:
+        return await startWizard(interaction);
+      case SSMOD_ACTIONS.save:
+        return await saveWizard(interaction, target);
+      case SSMOD_ACTIONS.close:
+        return await closePanel(interaction, target);
+      case SSMOD_ACTIONS.allowSame:
+        return await toggleAllowSame(interaction, target);
+      case SSMOD_ACTIONS.pageDetails:
+        return await openPageDetailsModal(interaction, target);
+      case SSMOD_ACTIONS.successMessage:
+        return await openSuccessMessageModal(interaction, target);
+      default:
+        logger.debug(`[Identity] Unknown ssmod wizard action "${action}".`);
+
+        return undefined;
+    }
+  } catch (error) {
+    await respond(interaction, { content: errorMessage(error) }, true);
   }
 }
 
 /**
- * Answers a select menu of the panel.
+ * Answers a select menu of the **wizard**.
  */
-export async function handleSsModSelect(
+export async function handleSsSetupSelect(
   interaction: AnySelectMenuInteraction,
   payload: string | null,
 ): Promise<void> {
   const { action, target } = parseSsModPayload(payload);
 
-  if (!target) {
-    await respond(interaction, { content: "This panel has expired." }, true);
-
-    return;
-  }
-
-  const isSetup = action.startsWith("setup:") || isSetupPayload(action, payload);
-
-  const resolved = isSetup
-    ? resolveSetupTarget(target)
-    : await resolveEditTarget(target);
+  const resolved = resolveSetupTarget(target ?? "", interaction.guildId);
 
   if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This panel has expired. Please run the command again." },
-      true,
-    );
-
-    return;
-  }
-
-  switch (action) {
-    case SSMOD_ACTIONS.setChannel: {
-      const channelId = interaction.values[0];
-
-      if (channelId) await applyChannel(resolved, channelId);
-
-      break;
-    }
-    case SSMOD_ACTIONS.setRole: {
-      const roleId = interaction.values[0];
-
-      if (roleId) await applyRole(resolved, roleId);
-
-      break;
-    }
-    case SSMOD_ACTIONS.setType: {
-      const value = interaction.values[0];
-
-      if (value) await applyType(interolved, value);
-
-      break;
-    }
-    case SSMOD_ACTIONS.setCount: {
-      const value = interaction.values[0];
-
-      if (value) await applyCount(resolved, value);
-
-      break;
-    }
-    default:
-      logger.debug(`[Identity] Unknown ssmod select action "${action}".`);
-
-      return;
-  }
-
-  await renderPanel(interaction, resolved);
-}
-
-/**
- * Answers a modal of the panel.
- */
-export async function handleSsModModal(
-  interaction: ModalSubmitInteraction,
-  payload: string | null,
-): Promise<void> {
-  const { action, target } = parseSsModPayload(payload);
-
-  if (!target) {
-    await respond(interaction, { content: "This panel has expired." }, true);
-
-    return;
-  }
-
-  const isSetup = isSetupPayload(action, payload);
-
-  const resolved = isSetup
-    ? resolveSetupTarget(target)
-    : await resolveEditTarget(target);
-
-  if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This panel has expired. Please run the command again." },
-      true,
-    );
-
-    return;
-  }
-
-  if (action === SSMOD_ACTIONS.pageDetails) {
-    const name = interaction.fields.getTextInputValue("name").trim();
-    const link = interaction.fields.getTextInputValue("link").trim();
-
-    await applyPageDetails(resolved, name, link);
-  } else if (action === SSMOD_ACTIONS.successMessage) {
-    const message = interaction.fields.getTextInputValue("message").trim();
-
-    await applySuccessMessage(resolved, message);
-  }
-
-  await renderPanel(interaction, resolved);
-}
-
-/* ------------------------------------------------------------------ *
- * The handlers, one by one
- * ------------------------------------------------------------------ */
-
-async function handleStartWizard(interaction: ButtonInteraction): Promise<void> {
-  const guildId = interaction.guildId;
-
-  if (!guildId) {
-    await respond(interaction, { content: "This only works in a server." }, true);
-
-    return;
-  }
-
-  try {
-    await service.assertSsConfigAllowance(guildId);
-  } catch (error) {
-    await respond(interaction, { content: errorMessage(error) }, true);
-
-    return;
-  }
-
-  const token = startSsWizard();
-
-  const panel = buildSsPanel({ kind: "setup", token, draft: emptySsDraft() });
-
-  await interaction.update({
-    embeds: [panel.embed],
-    components: panel.components,
-  });
-}
-
-async function handleFaq(interaction: ButtonInteraction): Promise<void> {
-  await respond(interaction, { embeds: [buildSsFaqEmbed()] }, true);
-}
-
-async function handleOpenEditor(
-  interaction: ButtonInteraction,
-  configId: string | null,
-): Promise<void> {
-  if (!configId) {
-    await respond(interaction, { content: "This panel has expired." }, true);
-
-    return;
-  }
-
-  const config = await service.findSsConfig(configId);
-
-  if (!config) {
-    await respond(interaction, { content: "That setup no longer exists." }, true);
-
-    return;
-  }
-
-  const panel = buildSsPanel({ kind: "edit", configId, config });
-
-  await interaction.update({
-    embeds: [panel.embed],
-    components: panel.components,
-  });
-}
-
-async function handleAllowSame(
-  interaction: ButtonInteraction,
-  target: string | null,
-): Promise<void> {
-  if (!target) {
-    await respond(interaction, { content: "This panel has expired." }, true);
-
-    return;
-  }
-
-  const resolved = resolveSetupTarget(target) ?? (await resolveEditTarget(target));
-
-  if (!resolved) {
-    await respond(
-      interaction,
-      { content: "This panel has expired. Please run the command again." },
-      true,
-    );
-
-    return;
-  }
-
-  if (resolved.kind === "setup") {
-    resolved.draft.allowSame = !resolved.draft.allowSame;
-
-    writeSsDraft(target, resolved.draft);
-  } else {
-    await service.updateSsConfig(resolved.configId, {
-      allowSame: !resolved.config.allowSame,
-    });
-
-    resolved.config = {
-      ...resolved.config,
-      allowSame: !resolved.config.allowSame,
-    };
-  }
-
-  await renderPanel(interaction, resolved);
-}
-
-async function handleSaveWizard(
-  interaction: ButtonInteraction,
-  target: string | null,
-): Promise<void> {
-  if (!target) {
-    await respond(interaction, { content: "This panel has expired." }, true);
-
-    return;
-  }
-
-  const draft = readSsDraft(target);
-
-  if (!draft) {
     await respond(
       interaction,
       { content: "This wizard has expired. Please run the command again." },
@@ -912,7 +776,282 @@ async function handleSaveWizard(
     return;
   }
 
-  if (!isDraftComplete(draft)) {
+  try {
+    switch (action) {
+      case SSMOD_ACTIONS.setChannel: {
+        const value = interaction.values[0];
+
+        if (value) await applyChannel(resolved, value);
+
+        break;
+      }
+      case SSMOD_ACTIONS.setRole: {
+        const value = interaction.values[0];
+
+        if (value) await applyRole(resolved, value);
+
+        break;
+      }
+      case SSMOD_ACTIONS.setType: {
+        const value = interaction.values[0];
+
+        if (value) await applyType(resolved, value);
+
+        break;
+      }
+      case SSMOD_ACTIONS.setCount: {
+        const value = interaction.values[0];
+
+        if (value) await applyCount(resolved, value);
+
+        break;
+      }
+      default:
+        logger.debug(`[Identity] Unknown ssmod wizard select "${action}".`);
+
+        return;
+    }
+  } catch (error) {
+    await respond(interaction, { content: errorMessage(error) }, true);
+
+    return;
+  }
+
+  await renderPanel(interaction, resolved);
+}
+
+/**
+ * Answers a modal of the **wizard**.
+ */
+export async function handleSsSetupModal(
+  interaction: ModalSubmitInteraction,
+  payload: string | null,
+): Promise<void> {
+  const { action, target } = parseSsModPayload(payload);
+
+  const resolved = resolveSetupTarget(target ?? "", interaction.guildId);
+
+  if (!resolved) {
+    await respond(
+      interaction,
+      { content: "This wizard has expired. Please run the command again." },
+      true,
+    );
+
+    return;
+  }
+
+  try {
+    if (action === SSMOD_ACTIONS.pageDetails) {
+      const name = interaction.fields.getTextInputValue("name").trim();
+      const link = interaction.fields.getTextInputValue("link").trim();
+
+      await applyPageDetails(resolved, name, link);
+    } else if (action === SSMOD_ACTIONS.successMessage) {
+      const message = interaction.fields.getTextInputValue("message").trim();
+
+      await applySuccessMessage(resolved, message);
+    }
+  } catch (error) {
+    await respond(interaction, { content: errorMessage(error) }, true);
+
+    return;
+  }
+
+  await renderPanel(interaction, resolved);
+}
+
+/* ------------------------------------------------------------------ *
+ * Handlers — the editor
+ * ------------------------------------------------------------------ */
+
+/**
+ * Answers a button of the **editor** and of the list panel.
+ *
+ * Registered for the prefix `identity:ssmod`.
+ */
+export async function handleSsModButton(
+  interaction: ButtonInteraction,
+  payload: string | null,
+): Promise<void> {
+  const { action, target } = parseSsModPayload(payload);
+
+  try {
+    switch (action) {
+      case SSMOD_ACTIONS.edit:
+        return await openEditor(interaction, target);
+      case SSMOD_ACTIONS.faq:
+        return await respond(interaction, { embeds: [buildSsFaqEmbed()] }, true);
+      case SSMOD_ACTIONS.allowSame:
+        return await toggleAllowSame(interaction, target);
+      case SSMOD_ACTIONS.pageDetails:
+        return await openPageDetailsModal(interaction, target);
+      case SSMOD_ACTIONS.successMessage:
+        return await openSuccessMessageModal(interaction, target);
+      case SSMOD_ACTIONS.delete:
+        return await deleteSetup(interaction, target);
+      case SSMOD_ACTIONS.close:
+        return await closePanel(interaction, null);
+      default:
+        logger.debug(`[Identity] Unknown ssmod button action "${action}".`);
+
+        return undefined;
+    }
+  } catch (error) {
+    await respond(interaction, { content: errorMessage(error) }, true);
+  }
+}
+
+/**
+ * Answers a select menu of the **editor**.
+ */
+export async function handleSsModSelect(
+  interaction: AnySelectMenuInteraction,
+  payload: string | null,
+): Promise<void> {
+  const { action, target } = parseSsModPayload(payload);
+
+  const resolved = await resolveEditTarget(target ?? "");
+
+  if (!resolved) {
+    await respond(
+      interaction,
+      { content: "This panel has expired. Please run the command again." },
+      true,
+    );
+
+    return;
+  }
+
+  try {
+    switch (action) {
+      case SSMOD_ACTIONS.setChannel: {
+        const value = interaction.values[0];
+
+        if (value) await applyChannel(resolved, value);
+
+        break;
+      }
+      case SSMOD_ACTIONS.setRole: {
+        const value = interaction.values[0];
+
+        if (value) await applyRole(resolved, value);
+
+        break;
+      }
+      case SSMOD_ACTIONS.setType: {
+        const value = interaction.values[0];
+
+        if (value) await applyType(resolved, value);
+
+        break;
+      }
+      case SSMOD_ACTIONS.setCount: {
+        const value = interaction.values[0];
+
+        if (value) await applyCount(resolved, value);
+
+        break;
+      }
+      default:
+        logger.debug(`[Identity] Unknown ssmod select "${action}".`);
+
+        return;
+    }
+  } catch (error) {
+    await respond(interaction, { content: errorMessage(error) }, true);
+
+    return;
+  }
+
+  await renderPanel(interaction, resolved);
+}
+
+/**
+ * Answers a modal of the **editor**.
+ */
+export async function handleSsModModal(
+  interaction: ModalSubmitInteraction,
+  payload: string | null,
+): Promise<void> {
+  const { action, target } = parseSsModPayload(payload);
+
+  const resolved = await resolveEditTarget(target ?? "");
+
+  if (!resolved) {
+    await respond(
+      interaction,
+      { content: "This panel has expired. Please run the command again." },
+      true,
+    );
+
+    return;
+  }
+
+  try {
+    if (action === SSMOD_ACTIONS.pageDetails) {
+      const name = interaction.fields.getTextInputValue("name").trim();
+      const link = interaction.fields.getTextInputValue("link").trim();
+
+      await applyPageDetails(resolved, name, link);
+    } else if (action === SSMOD_ACTIONS.successMessage) {
+      const message = interaction.fields.getTextInputValue("message").trim();
+
+      await applySuccessMessage(resolved, message);
+    }
+  } catch (error) {
+    await respond(interaction, { content: errorMessage(error) }, true);
+
+    return;
+  }
+
+  await renderPanel(interaction, resolved);
+}
+
+/* ------------------------------------------------------------------ *
+ * The handlers, one by one
+ * ------------------------------------------------------------------ */
+
+async function startWizard(interaction: ButtonInteraction): Promise<void> {
+  const guildId = interaction.guildId;
+
+  if (!guildId) {
+    await respond(interaction, { content: "This only works in a server." }, true);
+
+    return;
+  }
+
+  // Refuse before the wizard is opened, so the user is not walked through
+  // a setup that cannot be saved.
+  await service.assertSsConfigAllowance(guildId);
+
+  const token = startSsWizard();
+
+  const panel = buildSsPanel({
+    kind: "setup",
+    token,
+    draft: emptySsDraft(),
+  });
+
+  await interaction.update({
+    embeds: [panel.embed],
+    components: panel.components,
+  });
+}
+
+async function saveWizard(
+  interaction: ButtonInteraction,
+  target: string | null,
+): Promise<void> {
+  if (!target) {
+    await respond(interaction, { content: "This wizard has expired." }, true);
+
+    return;
+  }
+
+  const draft = readSsDraft(target);
+
+  if (!draft || !isDraftComplete(draft) || draft.ssType === null) {
     await respond(
       interaction,
       { content: "The setup is not finished yet." },
@@ -930,55 +1069,225 @@ async function handleSaveWizard(
     return;
   }
 
-  const ssType = draft.ssType;
+  // The entitlement is checked **before** the row is written.
+  await service.assertScreenshotTypeAllowed(guildId, draft.ssType);
 
-  if (ssType === null) {
-    await respond(interaction, { content: "The setup is not finished yet." }, true);
+  const created = await service.createSsConfig({
+    guildId,
+    channelId: draft.channelId ?? "",
+    roleId: draft.roleId ?? "",
+    requiredSs: draft.requiredSs,
+    channelName: draft.channelName,
+    channelLink: draft.channelLink,
+    keywords: draft.keywords.length > 0 ? draft.keywords : [draft.channelName],
+    allowSame: draft.allowSame,
+    ssType: draft.ssType,
+    successMessage: draft.successMessage,
+  });
+
+  dropSsDraft(target);
+
+  const panel = buildSsPanel({
+    kind: "edit",
+    configId: created.id,
+    config: created,
+  });
+
+  await interaction.update({
+    embeds: [panel.embed],
+    components: panel.components,
+  });
+
+  await respond(
+    interaction,
+    { content: `✅ The setup is live in <#${created.channelId}>.` },
+    true,
+  );
+}
+
+async function openEditor(
+  interaction: ButtonInteraction,
+  configId: string | null,
+): Promise<void> {
+  if (!configId) {
+    await respond(interaction, { content: "This panel has expired." }, true);
 
     return;
   }
 
-  try {
-    // The entitlement is checked **before** the row is written.
-    await service.assertScreenshotTypeAllowed(guildId, ssType);
+  const config = await service.findSsConfig(configId);
 
-    const created = await service.createSsConfig({
-      guildId,
-      channelId: draft.channelId ?? "",
-      roleId: draft.roleId ?? "",
-      requiredSs: draft.requiredSs,
-      channelName: draft.channelName,
-      channelLink: draft.channelLink,
-      keywords: draft.keywords.length > 0 ? draft.keywords : [draft.channelName],
-      allowSame: draft.allowSame,
-      ssType,
-      successMessage: draft.successMessage,
-    });
-
-    dropSsDraft(target);
-
-    const panel = buildSsPanel({
-      kind: "edit",
-      configId: created.id,
-      config: created,
-    });
-
-    await interaction.update({
-      embeds: [panel.embed],
-      components: panel.components,
-    });
-
+  if (!config) {
     await respond(
       interaction,
-      { content: `✅ The setup is live in <#${created.channelId}>.` },
+      { content: "That setup no longer exists." },
       true,
     );
-  } catch (error) {
-    await respond(interaction, { content: errorMessage(error) }, true);
+
+    return;
   }
+
+  const panel = buildSsPanel({ kind: "edit", configId, config });
+
+  await interaction.update({
+    embeds: [panel.embed],
+    components: panel.components,
+  });
 }
 
-async function handleClose(
+async function toggleAllowSame(
+  interaction: ButtonInteraction,
+  target: string | null,
+): Promise<void> {
+  if (!target) {
+    await respond(interaction, { content: "This panel has expired." }, true);
+
+    return;
+  }
+
+  const resolved =
+    resolveSetupTarget(target, interaction.guildId) ??
+    (await resolveEditTarget(target));
+
+  if (!resolved) {
+    await respond(
+      interaction,
+      { content: "This panel has expired. Please run the command again." },
+      true,
+    );
+
+    return;
+  }
+
+  if (resolved.kind === "setup") {
+    resolved.draft.allowSame = !resolved.draft.allowSame;
+
+    writeSsDraft(resolved.token, resolved.draft);
+  } else {
+    await service.updateSsConfig(resolved.configId, {
+      allowSame: !resolved.config.allowSame,
+    });
+
+    resolved.config = {
+      ...resolved.config,
+      allowSame: !resolved.config.allowSame,
+    };
+  }
+
+  await renderPanel(interaction, resolved);
+}
+
+async function openPageDetailsModal(
+  interaction: ButtonInteraction,
+  target: string | null,
+): Promise<void> {
+  if (!target) {
+    await respond(interaction, { content: "This panel has expired." }, true);
+
+    return;
+  }
+
+  const resolved =
+    resolveSetupTarget(target, interaction.guildId) ??
+    (await resolveEditTarget(target));
+
+  if (!resolved) {
+    await respond(
+      interaction,
+      { content: "This panel has expired. Please run the command again." },
+      true,
+    );
+
+    return;
+  }
+
+  const current =
+    resolved.kind === "setup"
+      ? {
+          channelName: resolved.draft.channelName,
+          channelLink: resolved.draft.channelLink,
+        }
+      : {
+          channelName: resolved.config.channelName,
+          channelLink: resolved.config.channelLink,
+        };
+
+  await interaction.showModal(
+    buildPageDetailsModal(target, resolved.kind === "setup", current),
+  );
+}
+
+async function openSuccessMessageModal(
+  interaction: ButtonInteraction,
+  target: string | null,
+): Promise<void> {
+  if (!target) {
+    await respond(interaction, { content: "This panel has expired." }, true);
+
+    return;
+  }
+
+  const resolved =
+    resolveSetupTarget(target, interaction.guildId) ??
+    (await resolveEditTarget(target));
+
+  if (!resolved) {
+    await respond(
+      interaction,
+      { content: "This panel has expired. Please run the command again." },
+      true,
+    );
+
+    return;
+  }
+
+  const current =
+    resolved.kind === "setup"
+      ? resolved.draft.successMessage
+      : resolved.config.successMessage;
+
+  await interaction.showModal(
+    buildSuccessMessageModal(target, resolved.kind === "setup", current),
+  );
+}
+
+async function deleteSetup(
+  interaction: ButtonInteraction,
+  target: string | null,
+): Promise<void> {
+  if (!target) {
+    await respond(interaction, { content: "This panel has expired." }, true);
+
+    return;
+  }
+
+  const config = await service.findSsConfig(target);
+
+  if (!config) {
+    await respond(
+      interaction,
+      { content: "That setup no longer exists." },
+      true,
+    );
+
+    return;
+  }
+
+  await service.deleteSsConfig(config.id);
+
+  await interaction.update({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setDescription(
+          `🗑️ The setup in <#${config.channelId}> was deleted. Its submissions went with it.`,
+        ),
+    ],
+    components: [],
+  });
+}
+
+async function closePanel(
   interaction: ButtonInteraction,
   target: string | null,
 ): Promise<void> {
@@ -993,38 +1302,6 @@ async function handleClose(
       new EmbedBuilder()
         .setColor(ERROR_COLOR)
         .setDescription("This panel is closed."),
-    ],
-    components: [],
-  });
-}
-
-async function handleDelete(
-  interaction: ButtonInteraction,
-  target: string | null,
-): Promise<void> {
-  if (!target) {
-    await respond(interaction, { content: "This panel has expired." }, true);
-
-    return;
-  }
-
-  const config = await service.findSsConfig(target);
-
-  if (!config) {
-    await respond(interaction, { content: "That setup no longer exists." }, true);
-
-    return;
-  }
-
-  await service.deleteSsConfig(config.id);
-
-  await interaction.update({
-    embeds: [
-      new EmbedBuilder()
-        .setColor(EMBED_COLOR)
-        .setDescription(
-          `🗑️ The setup in <#${config.channelId}> was deleted. Its submissions went with it.`,
-        ),
     ],
     components: [],
   });
@@ -1124,7 +1401,10 @@ async function applyPageDetails(
   name: string,
   link: string,
 ): Promise<void> {
-  const keywords = [name, ...resolved.keywords().filter((word) => word !== name)];
+  const keywords = [
+    name,
+    ...resolved.keywords().filter((word) => word !== name),
+  ];
 
   if (resolved.kind === "setup") {
     resolved.draft.channelName = name;
@@ -1178,78 +1458,8 @@ async function applySuccessMessage(
 }
 
 /* ------------------------------------------------------------------ *
- * Resolving a target
+ * Rendering
  * ------------------------------------------------------------------ */
-
-/**
- * A target the panel can write to.
- *
- * The setup variant holds the draft by reference so a change is visible to
- * the renderer without another lookup.
- */
-export type ResolvedTarget =
-  | {
-      readonly kind: "setup";
-      readonly token: string;
-      readonly guildId: string | null;
-      readonly draft: SsDraft;
-      keywords(): readonly string[];
-    }
-  | {
-      readonly kind: "edit";
-      readonly configId: string;
-      readonly guildId: string;
-      config: SsConfig;
-      keywords(): readonly string[];
-    };
-
-/**
- * Resolves a wizard's token.
- */
-export function resolveSetupTarget(token: string): ResolvedTarget | null {
-  const draft = readSsDraft(token);
-
-  if (!draft) return null;
-
-  return {
-    kind: "setup",
-    token,
-    guildId: null,
-    draft,
-    keywords: () => draft.keywords,
-  };
-}
-
-/**
- * Resolves a setup's row id.
- */
-export async function resolveEditTarget(
-  configId: string,
-): Promise<ResolvedTarget | null> {
-  const config = await service.findSsConfig(configId);
-
-  if (!config) return null;
-
-  return {
-    kind: "edit",
-    configId,
-    guildId: config.guildId,
-    config,
-    keywords: () => config.keywords,
-  };
-}
-
-/**
- * Is this payload one of the wizard's?
- *
- * The wizard's ids carry the `setup:` marker, so the two never need to be
- * told apart by the shape of the id.
- */
-export function isSetupPayload(action: string, payload: string | null): boolean {
-  if (!payload) return false;
-
-  return payload.startsWith("setup:");
-}
 
 /**
  * Re-renders the panel.
@@ -1264,14 +1474,16 @@ async function renderPanel(
   const target: SsTarget =
     resolved.kind === "setup"
       ? { kind: "setup", token: resolved.token, draft: resolved.draft }
-      : { kind: "edit", configId: resolved.configId, config: resolved.config };
+      : {
+          kind: "edit",
+          configId: resolved.configId,
+          config: resolved.config,
+        };
 
   const panel = buildSsPanel(target);
 
-  const payload: InteractionReplyOptions = {
+  await interaction.update({
     embeds: [panel.embed],
     components: panel.components,
-  };
-
-  await interaction.update(payload);
+  });
 }

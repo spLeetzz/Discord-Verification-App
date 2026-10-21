@@ -14,7 +14,7 @@
  */
 
 import { ButtonStyle, EmbedBuilder } from "discord.js";
-import type { Message, TextBasedChannel } from "discord.js";
+import type { Message, TextChannel } from "discord.js";
 import { EMBED_COLOR } from "../../../core/constants.js";
 import { discordTimestamp } from "../../../core/time.js";
 import { renderSlotlist, slotListLines } from "../render.js";
@@ -84,7 +84,7 @@ export function buildSlotlistPanel(
  * row names the message.
  */
 export async function publishSlotlist(
-  channel: TextBasedChannel,
+  channel: TextChannel,
   scrim: ScrimRecord,
   slots: readonly SlotRecord[],
 ): Promise<Message> {
@@ -130,7 +130,7 @@ export async function publishSlotlist(
  * after a restart without anybody rediscovering it by name.
  */
 export async function refreshSlotlistMessage(
-  channel: TextBasedChannel,
+  channel: TextChannel,
   scrim: ScrimRecord,
   slots: readonly SlotRecord[],
 ): Promise<void> {

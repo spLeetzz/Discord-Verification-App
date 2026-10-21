@@ -108,12 +108,18 @@ interface `guards.ts` depends on; the premium engineer implements it
 against `guild_entitlements`.
 
 **A caller must know:**
-- `FREE_TIER` is the **single** free-tier allowance table (D45). Every
-  count gate reads it. If the premium module also defines one, drop that
-  one — there must be exactly one.
-- A gate with no entry in `FREE_TIER` is unlimited.
+- `FREE_TIER` is a **mirror** of the free-tier allowance table (D45). The
+  canonical one is `modules/premium/limits.ts`, which the perk list is
+  generated from; a test in the premium module fails the moment the two
+  drift apart.
+- A gate with no entry in the table is unlimited.
+- `core/guards.ts` never reads a number from the table: `countLimitGuard`
+  takes the limit as a parameter, so no allowance is hard-coded in the
+  runtime layer.
 - `assertEntitled(guildId, feature)` is the only place an entitlement is
   read, and it is always called *before* the state it guards changes.
+- `modules/premium/entitlements.ts` already exports an `entitlementLookup`
+  that satisfies {@link EntitlementLookup}. Use it.
 
 ## `errors.ts`
 

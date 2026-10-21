@@ -329,10 +329,9 @@ export async function writeTagCheckIgnoreRole(
   if (ignoreRoleColumnMissing) return false;
 
   try {
-    await db
-      .update(tagcheckChannels)
-      .set({ ignoreRoleId: sql`${roleId}` })
-      .where(eq(tagcheckChannels.id, configId));
+    await db.execute(
+      sql`update "tagcheck_channels" set "ignore_role_id" = ${roleId} where "id" = ${configId}`,
+    );
 
     return true;
   } catch (error) {
@@ -352,10 +351,9 @@ export async function writeEasyTagIgnoreRole(
   if (ignoreRoleColumnMissing) return false;
 
   try {
-    await db
-      .update(easytagChannels)
-      .set({ ignoreRoleId: sql`${roleId}` })
-      .where(eq(easytagChannels.id, configId));
+    await db.execute(
+      sql`update "easytag_channels" set "ignore_role_id" = ${roleId} where "id" = ${configId}`,
+    );
 
     return true;
   } catch (error) {
@@ -414,29 +412,23 @@ const asScreenshotType = (value: string): ScreenshotType =>
 /** Every setup of a guild, oldest first. */
 export async function listSsConfigs(guildId: string): Promise<SsConfig[]> {
   const rows = await db
-    .select({
-      ...ssConfigColumns,
-      ssType: asScreenshotType(ssConfigs.ssType),
-    })
+    .select(ssConfigColumns)
     .from(ssConfigs)
     .where(eq(ssConfigs.guildId, guildId))
     .orderBy(asc(ssConfigs.createdAt));
 
-  return rows;
+  return rows.map((row) => ({ ...row, ssType: asScreenshotType(row.ssType) }));
 }
 
 /** One setup, by its row id. */
 export async function findSsConfigById(id: string): Promise<SsConfig | null> {
   const [row] = await db
-    .select({
-      ...ssConfigColumns,
-      ssType: asScreenshotType(ssConfigs.ssType),
-    })
+    .select(ssConfigColumns)
     .from(ssConfigs)
     .where(eq(ssConfigs.id, id))
     .limit(1);
 
-  return row ?? null;
+  return row ? { ...row, ssType: asScreenshotType(row.ssType) } : null;
 }
 
 /** One setup, by its channel id. */
@@ -444,15 +436,12 @@ export async function findSsConfigByChannel(
   channelId: string,
 ): Promise<SsConfig | null> {
   const [row] = await db
-    .select({
-      ...ssConfigColumns,
-      ssType: asScreenshotType(ssConfigs.ssType),
-    })
+    .select(ssConfigColumns)
     .from(ssConfigs)
     .where(eq(ssConfigs.channelId, channelId))
     .limit(1);
 
-  return row ?? null;
+  return row ? { ...row, ssType: asScreenshotType(row.ssType) } : null;
 }
 
 /** How many setups a guild has. */
@@ -644,12 +633,19 @@ export async function countSsSubmissions(
 /** One tournament, by its row id. */
 export async function findTourney(
   id: string,
-): Promise<{ id: string; guildId: string; name: string; groupSize: number | null } | null> {
+): Promise<{
+  id: string;
+  guildId: string;
+  name: string;
+  roleId: string;
+  groupSize: number | null;
+} | null> {
   const [row] = await db
     .select({
       id: tourneys.id,
       guildId: tourneys.guildId,
       name: tourneys.name,
+      roleId: tourneys.roleId,
       groupSize: tourneys.groupSize,
     })
     .from(tourneys)

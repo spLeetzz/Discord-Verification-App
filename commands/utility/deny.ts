@@ -10,6 +10,7 @@ import { updateThreadStatus } from "../../utils/thread.js";
 
 const command: Command = {
   staffOnly: true,
+  ephemeral: true,
   data: new SlashCommandBuilder()
     .setName("deny")
     .setDescription("Mark the current verification ticket as denied.")

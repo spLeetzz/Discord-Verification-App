@@ -19,24 +19,25 @@ import { assertEntitled, PremiumFeature } from "../entitlements.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
 import { slotNumbers } from "../slots.js";
-import { modalChannelId, modalRoleId, modalText } from "./components.js";
-import { scrimsId } from "./ids.js";
+import { modalText } from "./components.js";
 import {
-  buildAutocleanPanel,
-  buildBanPanel,
   buildEditorPanel,
-  buildReservePanel,
-  buildScrimPanel,
   buildWizardPanel,
   wizardStore,
 } from "./manager.js";
+import {
+  buildAutocleanPanel,
+  buildBanPanel,
+  buildDesignPanel,
+  buildReservePanel,
+  buildSlotlistEditorPanel,
+} from "./panels.js";
 import {
   acknowledgeAndRender,
   fail,
   refuseUnlessMod,
   scrimPosition,
 } from "./handlers.js";
-import { buildDesignPanel } from "./panels.js";
 
 /** Handles one modal submit. */
 export async function handleScrimsModal(
@@ -61,6 +62,9 @@ export async function handleScrimsModal(
       return;
     case "punish":
       await handlePunishModal(interaction, parts);
+      return;
+    case "slot_team":
+      await handleSlotTeamModal(interaction, parts);
       return;
     case "reserve":
       await handleReserveModal(interaction, parts);
@@ -585,6 +589,111 @@ async function handlePunishModal(
  * in a token store, keyed by the scrim (D18).
  */
 export const punishSelection = new Map<string, string[]>();
+
+/* ------------------------------------------------------------------ *
+ * The slotlist editor
+ * ------------------------------------------------------------------ */
+
+/**
+ * The slot a team is being added to or changed on.
+ *
+ * A multi-select's values cannot travel in a custom id — twenty-five
+ * uuids do not fit in a hundred characters — so the selection is kept
+ * in a token store (D18).
+ */
+export const slotSelection = new Map<
+  string,
+  { readonly scrimId: string; readonly slotId: string }
+>();
+
+/**
+ * Adds or changes the team on a slot.
+ *
+ * The source wrote the team name and the owner in two separate
+ * statements, which could leave a half-changed slot behind. Ours is one
+ * statement.
+ */
+async function handleSlotTeamModal(
+  interaction: ModalSubmitInteraction,
+  parts: readonly string[],
+): Promise<void> {
+  const [token] = parts;
+
+  if (!token) {
+    await fail(interaction, "That form is no longer active.");
+
+    return;
+  }
+
+  const selection = slotSelection.get(token);
+
+  slotSelection.delete(token);
+
+  if (!selection) {
+    await fail(interaction, "That form is no longer active.");
+
+    return;
+  }
+
+  const scrim = await repo.getScrim(selection.scrimId);
+
+  if (!scrim) {
+    await fail(interaction, "This scrim no longer exists.");
+
+    return;
+  }
+
+  const teamName = truncate(modalText(interaction, "team_name"), 25);
+
+  if (teamName.length === 0) {
+    await fail(interaction, "The team name cannot be empty.");
+
+    return;
+  }
+
+  const leaderIds = mentionIds(modalText(interaction, "leader"));
+  const leaderId = leaderIds[0] ?? null;
+
+  const slot = await repo.getSlot(selection.slotId);
+
+  if (!slot) {
+    await fail(interaction, "That slot no longer exists.");
+
+    return;
+  }
+
+  if (slot.state === "free") {
+    // The slot is free: claim it for the team.
+    const claimed = await repo.claimSlot(scrim.id, slot.num, {
+      teamName,
+      ownerUserId: leaderId ?? "",
+      members: leaderIds.length > 0 ? leaderIds : [],
+      messageId: null,
+      jumpUrl: null,
+    });
+
+    if (!claimed) {
+      await fail(interaction, "Somebody else took that slot first.");
+
+      return;
+    }
+  } else {
+    await repo.changeSlotTeam(slot.id, {
+      teamName,
+      ownerUserId: leaderId,
+      members: leaderIds.length > 0 ? leaderIds : [],
+    });
+  }
+
+  const fresh = await repo.getScrim(scrim.id);
+
+  if (!fresh) return;
+
+  await acknowledgeAndRender(
+    interaction,
+    buildSlotlistEditorPanel(fresh),
+  );
+}
 
 /* ------------------------------------------------------------------ *
  * Reserved slots

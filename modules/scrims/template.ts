@@ -135,9 +135,42 @@ export function parseTemplate(value: unknown): EmbedTemplate {
   return template;
 }
 
-/** Is a template empty enough that the caller should use the default? */
+/**
+ * Is a template empty enough that the caller should use the default?
+ *
+ * The source asked `len(template) <= 1`. That was a proxy for "the
+ * template holds no content", and it worked because discord.py's
+ * `Embed.to_dict()` always carried a `type: 'rich'` key — a designed
+ * template could never have fewer than two keys.
+ *
+ * Ours is `jsonb` and does not carry that key, so the count would be a
+ * trap: a template with a title and nothing else would be thrown away.
+ * The question is therefore asked directly.
+ */
 export function isEmptyTemplate(template: EmbedTemplate): boolean {
-  return Object.keys(template).length <= 1;
+  if (template.title !== undefined && template.title.length > 0) return false;
+
+  if (
+    template.description !== undefined &&
+    template.description.length > 0
+  ) {
+    return false;
+  }
+
+  if ((template.fields?.length ?? 0) > 0) return false;
+
+  if (
+    template.footer?.text !== undefined &&
+    template.footer.text.length > 0
+  ) {
+    return false;
+  }
+
+  if (template.image?.url !== undefined) return false;
+
+  if (template.author?.name !== undefined) return false;
+
+  return true;
 }
 
 /**

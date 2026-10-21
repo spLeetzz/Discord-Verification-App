@@ -6,14 +6,14 @@
  * one table.
  */
 
-import { SlashCommandBuilder } from "discord.js";
+import { SlashCommandSubcommandBuilder } from "discord.js";
 import { canUseScrimMod } from "../guards.js";
 import * as repo from "../repo.js";
 import type { ScrimSubcommand } from "./types.js";
 
 /** The subcommand. */
 export const slotInfoSubcommand: ScrimSubcommand = {
-  data: new SlashCommandBuilder()
+  data: new SlashCommandSubcommandBuilder()
     .setName("slotinfo")
     .setDescription("Show the slots a user holds.")
     .addUserOption((option) =>

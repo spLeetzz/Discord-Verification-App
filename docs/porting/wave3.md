@@ -295,6 +295,22 @@ and category operations.
 
 ---
 
+### 8. The room-credential command (`idp`)
+
+**This was missed in the original area split and is assigned here.** Quotient's
+`idp` command lets staff post a custom room's ID, password and map; the bot
+posts an embed with a "Get in Copy Format" button and **deletes itself after
+thirty minutes** so the credentials do not linger.
+
+- The auto-delete is a row in the durable `jobs` table with the `msg_delete`
+  event — **never a `setTimeout`**. The manager's dispatcher is already
+  registered for `msg_delete` against this area.
+- The command's reply must be **ephemeral**. Quotient deletes the *user's*
+  message to hide the password, which a slash command cannot do; an ephemeral
+  reply is the equivalent. This is D23 and it is a security property, not a
+  cosmetic one.
+- The password must never appear in a log line.
+
 ## Cross-area dependencies
 
 | If you need | From | Note |

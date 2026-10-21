@@ -5,7 +5,7 @@
  * schema-qualified join table (S6, row 15). Ours is a typed query.
  */
 
-import { SlashCommandBuilder } from "discord.js";
+import { SlashCommandSubcommandBuilder } from "discord.js";
 import { canUseScrimMod } from "../guards.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
@@ -13,7 +13,7 @@ import type { ScrimSubcommand } from "./types.js";
 
 /** The subcommand. */
 export const unbanSubcommand: ScrimSubcommand = {
-  data: new SlashCommandBuilder()
+  data: new SlashCommandSubcommandBuilder()
     .setName("unban")
     .setDescription("Unban a user from the scrims of this server.")
     .addUserOption((option) =>

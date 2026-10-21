@@ -77,11 +77,14 @@ disagree. **Never hard-code `3` or `1`.**
 
 ```ts
 verifyPayuCallback(payload, expectation): PayuVerification
-payuRequestHash(credentials, input): string
-payuResponseHash(credentials, input): string
+payuRequestHash(credentials, input, layout?): string
+payuResponseHash(credentials, input, layout?): string
+payuResponseHashCandidates(credentials, input): readonly string[]
+payuFieldLayoutShape(layout): string
 amountsEqual(a, b): boolean
 formatAmount(rupees): string
 isPayuOrigin(origin): boolean
+isSuccessfulStatus(status): boolean
 
 activatePremium(purchase: VerifiedPurchase): Promise<ActivationResult>
 failPremium({ txnId, raw }): Promise<PremiumTransactionStatus | "unknown_transaction">
@@ -206,36 +209,61 @@ decides entitlement from it.
 
 ### The verification steps, in order
 
-1. **The transaction id is ours.** The form's `txnid` must equal the
-   `txnId` in the query string. A callback for somebody else's
-   transaction is refused before anything else happens.
-2. **The signature verifies, in constant time.**
-   `sha512(salt|txnid|amount|productinfo|firstname|email|udf1|…|udf5||||||key)`
-   — the **salt and the key are swapped** relative to the request hash.
-   The comparison is `timingSafeEqual` over the two SHA-512 digests, so
-   it cannot throw on a malformed input and does not leak how much of the
-   hash matched. A tampered amount, a tampered email, a tampered name, a
-   wrong key, a wrong salt and a request hash used as a response hash
-   are all refused.
-3. **The amount is the plan's price, compared as a decimal.** `"29"` and
+The callback is verified in `modules/premium/payu.ts`, in this order.
+Nothing is written before every one of them has passed.
+
+1. **The transaction id is ours.** The callback has to name the
+   transaction the link named, and that transaction has to exist in the
+   database. A callback for somebody else's transaction is refused before
+   anything else happens.
+2. **The merchant key is ours,** when the callback carries one. (The
+   signature covers it anyway; this catches a stranger's callback early.)
+3. **The status is `success`.** The gateway says the payment went
+   through. The status is *inside* the signature, so it cannot have been
+   changed after the fact.
+4. **The origin is PayU's** — for the browser redirect. The hostname is
+   checked against a suffix list (`.payu.in`, `.payu.com`) and a missing
+   header is a clean refusal, not an exception. The server-to-server
+   webhook has no `Origin` at all and is not asked for one.
+5. **The signature verifies, in constant time.**
+   `sha512(salt|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)`
+   — the request's fields **in reverse order**, with the status added
+   and the salt and the key at the two ends. The comparison is
+   `timingSafeEqual` over the two SHA-512 digests, so it cannot throw on
+   a malformed input and does not leak how much of the hash matched. A
+   tampered amount, a tampered email, a tampered name, a wrong key, a
+   wrong salt, a request hash used as a response hash and Quotient's
+   swapped form are all refused.
+6. **The amount is the plan's price, compared as a decimal.** `"29"` and
    `"29.00"` are the same money and the gateway is free to send either;
    a string comparison would refuse a real payment over a missing zero.
    The comparison is exact (`BigInt` on the scaled value), not a float.
-4. **The status is `success`.** Checked by the callers, not by the
-   signature: a webhook that carries a "failure" status must not grant a
-   subscription even though its signature verifies.
-5. **The `Origin` header.** Quotient's
-   `if not "payu" in request.headers.get("origin")` raised a `TypeError`
-   on a missing header (a 500), and `"payu" in origin` would also have
-   passed for `https://payu.evil.example`. Here the hostname is checked
-   against a suffix list (`.payu.in`, `.payu.com`) and a missing header
-   is "not PayU" rather than an exception. **A present, non-PayU origin
-   is refused (403); an absent one is allowed**, because the signature —
-   not the header — is the authority. The webhook skips the check
-   entirely: it is server to server and has no `Origin` at all.
-6. **Then, and only then, the grant.** `activatePremium` is idempotent:
+7. **Then, and only then, the grant.** `activatePremium` is idempotent:
    the second call finds the transaction already `paid` and grants
    nothing.
+
+### The field layout is one named thing
+
+The number of pipes in a PayU hash string is the whole ball game, and it
+is now a name rather than a magic `5`:
+
+```ts
+PAYU_FIELD_LAYOUTS = ["udf-with-blanks", "compact"] as const;
+```
+
+| Layout | Fields | The string |
+|---|---|---|
+| `"udf-with-blanks"` | 17 | `key\|txnid\|amount\|productinfo\|firstname\|email\|udf1…udf5\|\|\|\|\|\|salt` |
+| `"compact"` | 12 | `key\|txnid\|amount\|productinfo\|firstname\|email\|udf1…udf5\|salt` |
+
+`"udf-with-blanks"` is the default and the one we send: it is the form
+PayU's own SDK builds, and it is what Quotient used. `"compact"` is the
+form several third-party guides publish. A callback is accepted if it
+verifies under **any** known layout.
+
+The request hash and the response hash both take a layout, and they are
+never interchangeable: the response is the request's fields **reversed**,
+with the status added and the salt and the key at the two ends.
 
 ### The transaction state machine
 
@@ -339,7 +367,7 @@ it and therefore needs it before the transaction is created.
 | `duration_days` is an **integer** | The expiry is `base + days * 86_400_000`. No `INTERVAL`, no timezone maths. |
 | `guild_settings.premium_expires_at` exists | It is the subscription *tier* summary, and it is the base a renewal extends. The per-feature gates never read it. |
 | `user_settings` has `is_premium` / `premium_expire_time` / `premiums` | `/premium-status` can show the caller's own subscription. The column is written but is **not** a gate. |
-| PayU signs `udf1…udf5` | The hash string has exactly seventeen fields and eleven pipes after the email. The request and the response differ only in where the key and the salt sit. The test vectors were computed outside this code, so a change to the field order fails the test. |
+| PayU signs `udf1…udf5` | The hash string has exactly seventeen fields and eleven pipes after the email, and the response hash is the request's fields **reversed**, with the status added. Both are pinned against PayU's own SDK known-answer vectors, so a change to the field order fails the test. |
 | PayU redirects a **browser** | The redirect cannot be trusted until the signature verifies, which is why there is also a server-to-server webhook. Both funnel into one idempotent `activatePremium`. |
 | PayU needs the email **before** the payment starts | The email is collected in a modal in the checkout, not scraped from the account. |
 
@@ -380,26 +408,31 @@ it and therefore needs it before the transaction is created.
    interactions and check whether the interaction was already
    acknowledged, so they are safe either way.
 
-3. **Environment variables.** None of these exist yet:
+3. **Environment variables.** These are in `.env` and `.env.example` now,
+   and `modules/premium/env.ts` reads them. **None of them throws** — a
+   guild that never sells premium does not have a merchant key, and the
+   bot still has to start:
 
    | Variable | Meaning | Required |
    |---|---|---|
-   | `PREMIUM_PUBLIC_URL` | the address the buyer's browser and the gateway can reach | **yes** — `startPremiumServer` throws without it |
-   | `PREMIUM_SERVER_PORT` | the port (default 8899) | no |
+   | `PREMIUM_PUBLIC_URL` | the address the buyer's browser and the gateway can reach | no — the checkout is disabled without it |
+   | `PREMIUM_PORT` | the port (default 8899) | no |
    | `PREMIUM_SERVER_HOST` | the host (default `0.0.0.0`) | no |
    | `PAYU_KEY` | the merchant key | no — the payment routes answer 503 without it and the bot still runs |
    | `PAYU_SALT` | the merchant salt | no — same |
    | `PAYU_ACTION` | the gateway's form endpoint (default `https://secure.payu.in/_payment`) | no |
 
-4. **`@fastify/formbody` is not installed.** The brief said it was; it is
-   not in `node_modules` and `package.json` does not list it. Since I may
-   not run `npm install`, `modules/premium/server/formbody.ts` is a
-   twenty-line local parser for `application/x-www-form-urlencoded`. It
-   registers the parser on the **root** Fastify instance (a parser added
-   inside a plugin is encapsulated and the routes would never see it).
-   When the plugin is installed, delete that file and its one call site —
-   `registerFormBodyParser` skips itself if the content type is already
-   registered.
+   `startPremiumServer` no longer throws for a missing `PREMIUM_PUBLIC_URL`
+   (it used to). It logs a warning, leaves the checkout switched off, and
+   the Discord side says "the premium checkout is not set up on this bot
+   yet" rather than sending the buyer to a link that goes nowhere.
+
+4. **`@fastify/formbody` is installed**, so the local parser is gone:
+   `modules/premium/server/formbody.ts` was deleted and the plugin is
+   registered on the root instance with `await app.register(formbody)`.
+   The plugin is a `fastify-plugin`, so the parser it adds is visible to
+   the routes (a parser added inside an ordinary plugin would be
+   encapsulated and the routes would never see it).
 
 5. **Reconcile the two copies of `FREE_TIER`.** `core/premium.ts`
    declares one and `modules/premium/limits.ts` declares the other. The
@@ -421,25 +454,31 @@ it and therefore needs it before the transaction is created.
    `ephemeral: false` and `/premium-status` sets `ephemeral: true`, so
    it will do the right thing the moment the dispatcher reads the flag.
 
+8. **The PayU account has to be set up for the webhook.** The
+   server-to-server call is the trustworthy path; it only arrives if
+   `https://<PREMIUM_PUBLIC_URL>/payu/webhook` is configured as the
+   webhook URL in the PayU dashboard.
+
 ---
 
 ## 8. The state of the repository
 
 | | |
 |---|---|
-| `npm run typecheck` | **My files are clean** — zero errors in `modules/premium/` or `commands/premium/`. The repository as a whole does **not** typecheck right now, because of other areas in flight: `modules/moderation/blocklist.ts`, `modules/scrims/views/{components,ids,manager,panels}.ts`, `modules/ssverify/ocr/{http,local}.test.ts`. Not mine, not touched. |
-| `npm test` | **My 7 test files, 98 tests, all pass.** The repository's suite is otherwise green except `core/time.test.ts` (3 failures), which is another engineer's file in flight. |
-| `npm run smoke` | Currently fails in `commands/moderation/ban.ts` (another area, in flight). My two command files load and serialise correctly on their own. |
+| `npm run typecheck` | **My files are clean** — zero errors in `modules/premium/` or `commands/premium/`. The repository as a whole does **not** typecheck right now, because of other areas in flight: `modules/identity/`, `modules/scrims/views/manager.test.ts`, `modules/ssverify/ocr/{http,local}.test.ts`. Not mine, not touched. |
+| `npm test` | **My 8 test files, 133 tests, all pass.** The repository's suite is green as well — 37 files, 538 tests. |
+| `npm run smoke` | Not re-run for this change; my two command files load and serialise correctly on their own. |
 | `deploy.ts` | No change needed — it scans `commands/<folder>/*.ts` one level deep and picks up both premium commands. |
 
 ### The tests
 
 | File | Tests | What it proves |
 |---|---|---|
-| `payu.test.ts` | 29 | the hash vectors (computed outside this code), the swapped salt and key, the constant-time comparison, the decimal amounts ("29" vs "29.00"), the origin check (missing, hostile, genuine), and that a tampered amount, email, name, a wrong key, a wrong salt and a request-hash-used-as-a-response-hash are all refused |
+| `payu.test.ts` | 48 | the pinned hash vectors for every layout, PayU's **own SDK** known-answer vectors, the request and the response differing for every layout, the status being inside the signature, the constant-time comparison, the decimal amounts ("29" vs "29.00"), the origin check (missing, hostile, genuine), and that a tampered amount, email, name, a wrong key, a wrong salt, Quotient's swapped form, a non-`success` status, a missing origin and a request-hash-used-as-a-response-hash are all refused |
+| `env.test.ts` | 12 | the environment reader: nothing throws, everything unset is `null`, the numbers are parsed strictly, and the warnings say what is missing |
 | `entitlements.test.ts` | 14 | the gate: allowed, no expiry, expired without a sweep, disabled, unknown feature, the refusal's wording, that an expired entitlement is not deleted, and the expiry rule at the boundary second |
 | `purchase.test.ts` | 16 | the state machine, the retry, the idempotent grant, the extension of an existing subscription, the real email and name, and that a late failure does not un-buy a subscription |
-| `server/server.test.ts` | 15 | the routes: the health check, the payment page, a genuine callback, a missing `Origin`, a hostile `Origin`, a PayU `Origin`, the tampered forms, the wrong key, the webhook, the repeated webhook, the failure and the retry, and the already-paid page |
+| `server/server.test.ts` | 19 | the routes: the health check, the payment page and its request hash, a genuine callback, a missing `Origin`, a hostile `Origin`, the other field layout, the tampered forms, the wrong key, the webhook, the repeated webhook, the failure and the retry, and the already-paid page |
 | `gate.test.ts` | 7 | one presentation, one button, and the reason naming the feature and the way out |
 | `limits.test.ts` | 11 | the free-tier table, the generated perk list, the "no Pro bot" promise, the feature union against the schema's `CHECK` list and the runtime union, and that the two copies of the table have not drifted |
 | `views.test.ts` | 6 | the custom ids are namespaced and carry their token, the select offers one option per plan, the transaction id is unguessable, and the email check |

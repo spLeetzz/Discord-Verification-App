@@ -639,12 +639,22 @@ export async function listClaimedTeamNames(
  * The source ran this as raw SQL with an array-overlap operator
  * (`$2 && SLOTS.MEMBERS`) against a schema-qualified join table. Ours is
  * a typed query over one table (S6, row 12).
+ *
+ * The overlap is written as `members && ARRAY[$1, $2]::text[]` rather
+ * than `members && $1::text[]`: the latter makes Postgres read the
+ * parameter as text and then cast it, and the array literal it receives
+ * is not one it can parse. Every id is still a bind parameter.
  */
 export async function findFakeTagMatches(
   scrimId: string,
   memberIds: readonly string[],
 ): Promise<SlotRecord[]> {
   if (memberIds.length === 0) return [];
+
+  const array = sql.join(
+    memberIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
 
   const rows = await db
     .select()
@@ -653,7 +663,7 @@ export async function findFakeTagMatches(
       and(
         eq(slots.scrimId, scrimId),
         eq(slots.state, "claimed"),
-        sql`${slots.members} && ${memberIds}::text[]`,
+        sql`${slots.members} && ARRAY[${array}]::text[]`,
       ),
     );
 

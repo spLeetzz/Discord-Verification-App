@@ -6,16 +6,35 @@
  * which the caller controls. Anyone who could reach the HTTP port could
  * grant themselves unlimited premium with one request.
  *
- * This module is the fix. PayU signs the fields it echoes back:
+ * This module is the fix. PayU signs the fields it echoes back.
+ *
+ * ## The two strings
+ *
+ * The **request** hash — the one we send to PayU — is over the fields in
+ * the order they are sent:
  *
  * ```
- * request  hash = sha512(key|txnid|amount|productinfo|firstname|email|udf1|…|udf5||||||salt)
- * response hash = sha512(salt|txnid|amount|productinfo|firstname|email|udf1|…|udf5||||||key)
+ * sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||salt)
  * ```
  *
- * The **salt and the key are swapped** between the two. A request hash
- * built the response way round is the classic way to get this wrong, so
- * the two are separate functions here and the test proves they differ.
+ * Seventeen fields, and **eleven pipes after the email**. That is the
+ * form PayU's own SDK builds, and it is reproduced exactly.
+ *
+ * The **response** hash — the one PayU sends back — is over the same
+ * fields **in reverse order, with the status added**:
+ *
+ * ```
+ * sha512(salt|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+ * ```
+ *
+ * Eighteen fields. The salt comes first and the key last, so a request
+ * hash is never a valid response hash; and `status` is *inside* the
+ * signature, so a failed payment cannot be replayed as a successful one.
+ *
+ * Quotient assumed the response was the request with the salt and the key
+ * swapped (`salt|txnid|amount|…|key`). PayU does not sign it that way —
+ * it reverses the fields. The test pins both forms against PayU's own
+ * SDK known-answer vectors.
  *
  * The comparison is constant-time: `timingSafeEqual` over the two SHA-512
  * digests, so the function does not leak how much of the hash matched.
@@ -47,6 +66,97 @@ export interface PayuHashInput {
   readonly udf?: readonly string[];
 }
 
+/**
+ * The fields a **response** hash is computed over.
+ *
+ * The request fields plus the status: PayU signs the status, so the
+ * callback cannot have its outcome changed after the fact.
+ */
+export interface PayuResponseInput extends PayuHashInput {
+  /** The status PayU reported, exactly as it sent it. */
+  readonly status: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * The field layout
+ * ------------------------------------------------------------------ */
+
+/**
+ * The layouts a PayU hash can be computed over.
+ *
+ * The layout names the **field list** — which fields, and how many empty
+ * slots sit between the user-defined fields and the secret. The direction
+ * (request or response) is a separate thing: it decides the order and
+ * where the two secrets go.
+ *
+ *  - `"udf-with-blanks"` — the five user-defined fields, then **five
+ *    empty slots**, then the secret. Seventeen fields, eleven pipes after
+ *    the email. This is the form PayU's own SDK builds, and the one we
+ *    send.
+ *  - `"compact"` — the same list with the five empty slots removed.
+ *    Twelve fields, six pipes after the email. Several third-party guides
+ *    publish this form; PayU's SDK does not produce it, so it is not the
+ *    default. It is kept because it is a real, published shape of the
+ *    same field list, and because a change to either one is then a
+ *    one-line edit here.
+ *
+ * The empty slots are not decoration: PayU's hash string always carries
+ * them, and a hash over a different number of fields is a different hash.
+ */
+export const PAYU_FIELD_LAYOUTS = ["udf-with-blanks", "compact"] as const;
+
+/** One of the known field layouts. */
+export type PayuFieldLayout = (typeof PAYU_FIELD_LAYOUTS)[number];
+
+/**
+ * The layout used when the caller does not choose one.
+ *
+ * `"udf-with-blanks"`, because that is the form PayU's SDK produces.
+ */
+export const DEFAULT_PAYU_FIELD_LAYOUT: PayuFieldLayout = "udf-with-blanks";
+
+/**
+ * How many empty slots each layout puts between the user-defined fields
+ * and the secret.
+ *
+ * This is the whole difference between the two layouts, and it is here,
+ * in one table, instead of five bare `""` entries in an array.
+ */
+const LAYOUT_BLANK_SLOTS: Record<PayuFieldLayout, number> = {
+  "udf-with-blanks": 5,
+  compact: 0,
+};
+
+/**
+ * The field list of a layout, written out.
+ *
+ * For the humans and for the error messages: it is what the layout
+ * actually is, in one line.
+ */
+export function payuFieldLayoutShape(layout: PayuFieldLayout): string {
+  const blanks = LAYOUT_BLANK_SLOTS[layout];
+
+  return [
+    "key",
+    "txnid",
+    "amount",
+    "productinfo",
+    "firstname",
+    "email",
+    "udf1",
+    "udf2",
+    "udf3",
+    "udf4",
+    "udf5",
+    ...Array.from({ length: blanks }, () => "(empty)"),
+    "salt",
+  ].join("|");
+}
+
+/* ------------------------------------------------------------------ *
+ * The hash
+ * ------------------------------------------------------------------ */
+
 /** How many user-defined fields PayU signs. */
 const UDF_COUNT = 5;
 
@@ -54,40 +164,39 @@ const UDF_COUNT = 5;
 const HEX_128 = /^[0-9a-f]{128}$/i;
 
 /**
- * The fields the hash is built from, in order.
+ * The fields a request hash is built from, in order.
  *
- * `key`/`salt` first and last, and five empty fields between the user
- * fields and the trailing secret — that is the shape PayU documents, and
- * it is reproduced exactly rather than approximated.
+ * The key leads and the salt closes the string, and the layout decides
+ * how many empty slots sit between the user-defined fields and the salt.
  */
-function hashFields(
-  first: string,
-  last: string,
+function requestFields(
+  credentials: PayuCredentials,
   input: PayuHashInput,
-): string {
+  layout: PayuFieldLayout,
+): string[] {
   const udf: string[] = [];
 
   for (let index = 0; index < UDF_COUNT; index += 1) {
     udf.push(input.udf?.[index] ?? "");
   }
 
-  const fields = [
-    first,
+  const blanks: string[] = [];
+
+  for (let index = 0; index < LAYOUT_BLANK_SLOTS[layout]; index += 1) {
+    blanks.push("");
+  }
+
+  return [
+    credentials.key,
     input.txnId,
     input.amount,
     input.productInfo,
     input.firstName,
     input.email,
     ...udf,
-    "",
-    "",
-    "",
-    "",
-    "",
-    last,
+    ...blanks,
+    credentials.salt,
   ];
-
-  return createHash("sha512").update(fields.join("|"), "utf8").digest("hex");
 }
 
 /**
@@ -98,20 +207,71 @@ function hashFields(
 export function payuRequestHash(
   credentials: PayuCredentials,
   input: PayuHashInput,
+  layout: PayuFieldLayout = DEFAULT_PAYU_FIELD_LAYOUT,
 ): string {
-  return hashFields(credentials.key, credentials.salt, input);
+  return sha512(requestFields(credentials, input, layout).join("|"));
 }
 
 /**
  * The hash PayU sends back on the **response**.
  *
- * The salt comes first and the key last — the opposite of the request.
+ * PayU takes the request's fields **in reverse order**, puts the salt
+ * first and the key last, and puts the **status** in the second
+ * position:
+ *
+ * ```
+ * salt|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key
+ * ```
+ *
+ * Two things follow from that, and both matter:
+ *
+ *  - the salt and the key are at opposite ends, so a request hash is
+ *    never a valid response hash;
+ *  - the status is inside the signature, so a callback cannot have its
+ *    outcome changed after the fact. A form that says "failure" cannot
+ *    be replayed as "success".
  */
 export function payuResponseHash(
   credentials: PayuCredentials,
-  input: PayuHashInput,
+  input: PayuResponseInput,
+  layout: PayuFieldLayout = DEFAULT_PAYU_FIELD_LAYOUT,
 ): string {
-  return hashFields(credentials.salt, credentials.key, input);
+  const fields = requestFields(credentials, input, layout);
+
+  fields.reverse();
+
+  // The salt leads the string, then the status, then the rest of the
+  // request's fields in reverse, ending with the key.
+  const reversed = [fields[0], input.status, ...fields.slice(1)];
+
+  return sha512(reversed.join("|"));
+}
+
+/**
+ * Every response hash a genuine callback could carry — one per layout.
+ *
+ * **Why more than one is safe.** Both layouts are computed over the same
+ * signed fields with the same secret, so an attacker who cannot produce
+ * one cannot produce the other: the set of forgeable messages is
+ * identical, and accepting a second encoding of the same signature
+ * broadens compatibility without broadening what an attacker can do.
+ *
+ * Do not "tighten" this back to a single layout without reading the
+ * release notes in `modules/premium/PORT-REPORT.md` — the checkout stops
+ * working if PayU's live gateway uses the other form.
+ */
+export function payuResponseHashCandidates(
+  credentials: PayuCredentials,
+  input: PayuResponseInput,
+): readonly string[] {
+  return PAYU_FIELD_LAYOUTS.map((layout) =>
+    payuResponseHash(credentials, input, layout),
+  );
+}
+
+/** The SHA-512 digest of a string, hex encoded. */
+function sha512(value: string): string {
+  return createHash("sha512").update(value, "utf8").digest("hex");
 }
 
 /**
@@ -261,12 +421,26 @@ export interface PayuCallbackPayload {
   readonly email: string;
   readonly status: string;
   readonly hash: string;
+  /** The merchant key PayU echoes. Checked when it is there. */
+  readonly key?: string;
   readonly udf1?: string;
   readonly udf2?: string;
   readonly udf3?: string;
   readonly udf4?: string;
   readonly udf5?: string;
 }
+
+/**
+ * Where a callback came from.
+ *
+ *  - `"browser"` — the gateway redirected the buyer's browser to our
+ *    success URL. The request carries an `Origin`, and it has to be
+ *    PayU's.
+ *  - `"webhook"` — the gateway posted to us from its own servers. There
+ *    is no `Origin` in a server-to-server call, and asking for one would
+ *    refuse every webhook. The signature is what carries the trust here.
+ */
+export type PayuCallbackSource = "browser" | "webhook";
 
 /** What we expect a callback to say. */
 export interface PayuCallbackExpectation {
@@ -276,7 +450,38 @@ export interface PayuCallbackExpectation {
   readonly amount: string;
   /** The merchant credentials. */
   readonly credentials: PayuCredentials;
+  /** Where the callback came from. */
+  readonly source: PayuCallbackSource;
+  /**
+   * The request's `Origin` header, when it had one.
+   *
+   * `undefined` for a request that carried none.
+   */
+  readonly origin?: string | undefined;
 }
+
+/**
+ * Why a callback was refused.
+ *
+ * A machine-readable code next to the human-readable reason, so the
+ * server can answer with the right status code (a foreign origin is a
+ * `403`, everything else is a `400`) without matching on the wording.
+ */
+export type PayuRejection =
+  /** The transaction id is not the one we issued. */
+  | "unknown_transaction"
+  /** The callback was signed for a different merchant. */
+  | "wrong_merchant"
+  /** The gateway did not report a successful payment. */
+  | "not_successful"
+  /** The request did not come from the gateway's origin. */
+  | "wrong_origin"
+  /** The callback carried no usable signature. */
+  | "no_signature"
+  /** The signature did not verify. */
+  | "bad_signature"
+  /** The amount is not the price of the plan. */
+  | "wrong_amount";
 
 /** The outcome of verifying a callback. */
 export type PayuVerification =
@@ -291,36 +496,89 @@ export type PayuVerification =
       /** The status PayU reported. */
       readonly status: string;
     }
-  | { readonly ok: false; readonly reason: string };
+  | {
+      readonly ok: false;
+      /** What went wrong, in words a buyer can read. */
+      readonly reason: string;
+      /** What went wrong, in a form code can act on. */
+      readonly code: PayuRejection;
+    };
 
 /**
  * Verifies a PayU callback.
  *
- * Three independent checks, in this order:
+ * Six checks, in this order:
  *
- *  1. the transaction id is the one we issued;
- *  2. the signature matches the fields PayU sent (constant-time);
- *  3. the amount is the plan's price, compared as a decimal.
+ *  1. **the transaction id is ours** — the one we issued, and (in the
+ *     server) the one that exists in the database;
+ *  2. **the merchant key is ours**, when the callback carries one;
+ *  3. **the status is `success`** — the gateway says the payment went
+ *     through;
+ *  4. **the origin is PayU's** — for a browser redirect. The hostname
+ *     is checked against a suffix list, and a missing header is a
+ *     refusal, not an exception;
+ *  5. **the signature verifies**, in constant time, against the response
+ *     hash of every known layout;
+ *  6. **the amount is the plan's price**, compared as a decimal.
+ *
+ * The order is cheapest-and-most-selective first, and the two checks that
+ * grant the purchase — the signature and the amount — are last, so
+ * nothing is written before they have both passed.
  *
  * A tampered amount, a tampered email or the wrong merchant key all fail
- * check 2, because the signature covers those fields.
+ * check 5, because the signature covers those fields. The amount is
+ * checked again in check 6 anyway: a mismatch in a signed field is
+ * impossible unless the signature also matched, but the check is
+ * independent on purpose, and it catches a gateway that echoes a stale
+ * amount.
  */
 export function verifyPayuCallback(
   payload: PayuCallbackPayload,
-  expected: PayuCallbackExpectation,
+  expectation: PayuCallbackExpectation,
 ): PayuVerification {
-  if (!payload.txnid || payload.txnid !== expected.txnId) {
+  if (!payload.txnid || payload.txnid !== expectation.txnId) {
     return {
       ok: false,
       reason: "The transaction id does not match the one we issued.",
+      code: "unknown_transaction",
+    };
+  }
+
+  // The signature covers the key too, so this only catches a callback
+  // for somebody else's merchant account before any work is done.
+  if (payload.key && payload.key !== expectation.credentials.key) {
+    return {
+      ok: false,
+      reason: "The callback was signed for a different merchant.",
+      code: "wrong_merchant",
+    };
+  }
+
+  if (!isSuccessfulStatus(payload.status)) {
+    return {
+      ok: false,
+      reason: "The gateway did not report a successful payment.",
+      code: "not_successful",
+    };
+  }
+
+  if (expectation.source === "browser" && !isPayuOrigin(expectation.origin)) {
+    return {
+      ok: false,
+      reason: "The request did not come from the payment gateway.",
+      code: "wrong_origin",
     };
   }
 
   if (!HEX_128.test(payload.hash)) {
-    return { ok: false, reason: "The callback carried no usable signature." };
+    return {
+      ok: false,
+      reason: "The callback carried no usable signature.",
+      code: "no_signature",
+    };
   }
 
-  const computed = payuResponseHash(expected.credentials, {
+  const candidates = payuResponseHashCandidates(expectation.credentials, {
     txnId: payload.txnid,
     amount: payload.amount,
     productInfo: payload.productinfo,
@@ -333,16 +591,32 @@ export function verifyPayuCallback(
       payload.udf4 ?? "",
       payload.udf5 ?? "",
     ],
+    // The status is signed exactly as PayU sent it — not the normalised
+    // one — because the hash is over the bytes that came in.
+    status: payload.status,
   });
 
-  if (!constantTimeEquals(computed, payload.hash)) {
-    return { ok: false, reason: "The callback signature did not verify." };
+  // Every candidate is checked, even after one matches: `some` would
+  // stop at the first hit and leak which layout the gateway used.
+  let verified = false;
+
+  for (const candidate of candidates) {
+    if (constantTimeEquals(candidate, payload.hash)) verified = true;
   }
 
-  if (!amountsEqual(payload.amount, expected.amount)) {
+  if (!verified) {
+    return {
+      ok: false,
+      reason: "The callback signature did not verify.",
+      code: "bad_signature",
+    };
+  }
+
+  if (!amountsEqual(payload.amount, expectation.amount)) {
     return {
       ok: false,
       reason: "The amount paid does not match the price of the plan.",
+      code: "wrong_amount",
     };
   }
 
@@ -360,7 +634,8 @@ export function verifyPayuCallback(
  *
  * The status is checked separately from the signature: a webhook that
  * carries a "failure" status must not grant a subscription even though
- * its signature verifies.
+ * its signature verifies. The signature also *covers* the status, so a
+ * callback cannot have its outcome changed after the fact.
  */
 export function isSuccessfulStatus(status: string | undefined): boolean {
   return (status ?? "").trim().toLowerCase() === "success";

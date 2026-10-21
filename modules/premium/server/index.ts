@@ -20,25 +20,33 @@
  * **The browser redirect is untrusted until the signature verifies.** The
  * webhook is what makes the grant trustworthy, and both funnel into the
  * same idempotent {@link activatePremium}.
+ *
+ * The two routes differ in one way, and it is deliberate: the browser
+ * redirect must come from PayU's origin, and the server-to-server
+ * webhook has no origin at all. Asking a webhook for an `Origin` header
+ * would refuse every one of them.
  */
 
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
+import formbody from "@fastify/formbody";
 import { logger } from "../../../utils/logger.js";
 import { seedPremiumPlans } from "../../../db/seed.js";
 import { buildFailureUrl, buildSuccessUrl, setCheckoutConfig } from "../checkout.js";
+import { readPremiumEnv, premiumEnvWarnings } from "../env.js";
 import { findTransaction } from "../repo.js";
 import { activatePremium, failPremium } from "../purchase.js";
 import {
   formatAmount,
-  isPayuOrigin,
-  isSuccessfulStatus,
   payuRequestHash,
   verifyPayuCallback,
 } from "../payu.js";
-import type { PayuCallbackPayload, PayuCredentials } from "../payu.js";
+import type {
+  PayuCallbackPayload,
+  PayuCallbackSource,
+  PayuCredentials,
+} from "../payu.js";
 import { PRODUCT_INFO } from "../types.js";
-import { registerFormBodyParser } from "./formbody.js";
 import { renderMessagePage, renderPayuForm } from "./pages.js";
 import type { PremiumNotifier } from "../notifications.js";
 
@@ -63,7 +71,7 @@ const DEFAULT_HOST = "0.0.0.0";
 
 /** How the server is configured. */
 export interface PremiumServerOptions {
-  /** The port to listen on. Defaults to `PREMIUM_SERVER_PORT` or 8899. */
+  /** The port to listen on. Defaults to `PREMIUM_PORT` or 8899. */
   port?: number;
   /** The host to bind to. Defaults to `PREMIUM_SERVER_HOST` or 0.0.0.0. */
   host?: string;
@@ -73,7 +81,7 @@ export interface PremiumServerOptions {
    * Defaults to `PREMIUM_PUBLIC_URL`. It has to be the *public* address:
    * the gateway redirects the browser to it and posts to its webhook.
    */
-  publicUrl?: string;
+  publicUrl?: string | null;
   /** The merchant credentials. Defaults to `PAYU_KEY` and `PAYU_SALT`. */
   credentials?: PayuCredentials | null;
   /** The gateway's form endpoint. Defaults to `PAYU_ACTION`. */
@@ -95,28 +103,17 @@ export interface PremiumServerHandle {
   readonly port: number;
   /** The host it is bound to. */
   readonly host: string;
-  /** The public address the checkout uses. */
-  readonly publicUrl: string;
+  /**
+   * The public address the checkout uses.
+   *
+   * `null` when there is none — the checkout is then disabled, and the
+   * bot says so rather than sending the buyer to a broken link.
+   */
+  readonly publicUrl: string | null;
   /** The Fastify instance, for tests. */
   readonly app: FastifyInstance;
   /** Stops the server. */
   close(): Promise<void>;
-}
-
-/**
- * Reads the merchant credentials from the environment.
- *
- * @returns the credentials, or `null` when they are not configured.
- */
-export function readPayuCredentials(
-  env: Record<string, string | undefined> = process.env,
-): PayuCredentials | null {
-  const key = env.PAYU_KEY?.trim();
-  const salt = env.PAYU_SALT?.trim();
-
-  if (!key || !salt) return null;
-
-  return { key, salt };
 }
 
 let running: PremiumServerHandle | null = null;
@@ -127,50 +124,57 @@ let running: PremiumServerHandle | null = null;
  * The manager calls this from `main.ts`; this module never touches
  * `main.ts` itself.
  *
- * @throws Error when the public URL is not configured. The server has to
- *         know its own address — the gateway redirects the buyer to it
- *         and posts to its webhook — and guessing would produce payment
- *         links that go nowhere.
+ * Nothing here throws for a missing environment variable. A guild that
+ * never sells premium does not have a merchant key, and the bot still
+ * has to start: the payment routes answer `503` and the Discord side
+ * says the checkout is not set up. What *is* fatal — a port that is
+ * already in use, say — still throws.
  */
 export async function startPremiumServer(
   options: PremiumServerOptions = {},
 ): Promise<PremiumServerHandle> {
-  const env = process.env;
+  const environment = readPremiumEnv(process.env);
 
   const publicUrl = (
     options.publicUrl ??
-    env.PREMIUM_PUBLIC_URL ??
+    environment.publicUrl ??
     ""
   ).trim();
 
-  if (!publicUrl) {
-    throw new Error(
-      "The premium server needs a public URL. Set PREMIUM_PUBLIC_URL or pass `publicUrl`.",
-    );
-  }
-
   const credentials =
     options.credentials === undefined
-      ? readPayuCredentials(env)
+      ? environment.credentials
       : options.credentials;
 
   const payuAction =
-    options.payuAction?.trim() || env.PAYU_ACTION?.trim() || DEFAULT_PAYU_ACTION;
+    options.payuAction?.trim() || environment.action || DEFAULT_PAYU_ACTION;
 
-  const port = options.port ?? numberFromEnv(env.PREMIUM_SERVER_PORT) ?? DEFAULT_PORT;
-  const host = options.host?.trim() || env.PREMIUM_SERVER_HOST?.trim() || DEFAULT_HOST;
+  const port = options.port ?? environment.port ?? DEFAULT_PORT;
+  const host = options.host?.trim() || environment.host || DEFAULT_HOST;
 
   if (options.seedPlans !== false) {
     await seedPremiumPlans();
   }
 
-  setCheckoutConfig({ publicUrl });
+  // The checkout needs to know its own address. Without one there is no
+  // checkout, and the Discord side refuses to sell rather than sending
+  // the buyer to a link that goes nowhere.
+  setCheckoutConfig(publicUrl ? { publicUrl } : null);
 
   const app = Fastify({ logger: false, bodyLimit: 256 * 1024 });
 
-  registerFormBodyParser(app);
+  // PayU posts `application/x-www-form-urlencoded`. The plugin is a
+  // `fastify-plugin`, so the parser it adds is visible to the routes
+  // below — a parser registered inside an ordinary plugin would be
+  // encapsulated, and the routes would never see it.
+  await app.register(formbody);
 
-  registerRoutes(app, { credentials, payuAction, notify: options.notify });
+  registerRoutes(app, {
+    credentials,
+    publicUrl: publicUrl || null,
+    payuAction,
+    notify: options.notify,
+  });
 
   await app.listen({ port, host });
 
@@ -181,7 +185,7 @@ export async function startPremiumServer(
   const handle: PremiumServerHandle = {
     port: boundPort,
     host,
-    publicUrl: publicUrl.replace(/\/+$/, ""),
+    publicUrl: publicUrl ? publicUrl.replace(/\/+$/, "") : null,
     app,
     async close() {
       await app.close();
@@ -194,8 +198,12 @@ export async function startPremiumServer(
   running = handle;
 
   logger.info(
-    `[Premium] Payment server listening on ${handle.host}:${boundPort} (public: ${handle.publicUrl})`,
+    `[Premium] Payment server listening on ${handle.host}:${boundPort} (public: ${handle.publicUrl ?? "not configured"})`,
   );
+
+  for (const warning of premiumEnvWarnings(environment)) {
+    logger.warn(`[Premium] ${warning}`);
+  }
 
   if (!credentials) {
     logger.warn(
@@ -227,6 +235,7 @@ export async function stopPremiumServer(): Promise<void> {
 
 interface RouteDependencies {
   readonly credentials: PayuCredentials | null;
+  readonly publicUrl: string | null;
   readonly payuAction: string;
   readonly notify?: PremiumNotifier;
 }
@@ -311,6 +320,19 @@ function registerRoutes(
         );
     }
 
+    if (!dependencies.publicUrl) {
+      return reply
+        .code(503)
+        .type("text/html")
+        .send(
+          renderMessagePage(
+            "Checkout unavailable",
+            "This server does not know its own public address, so it cannot take a payment.",
+            "error",
+          ),
+        );
+    }
+
     // The amount is a decimal string, and the hash is computed over the
     // very same string — the gateway signs the bytes it received.
     const amount = formatAmount(snapshot.price);
@@ -345,7 +367,7 @@ function registerRoutes(
   });
 
   // The gateway's success redirect. The browser is not trusted until the
-  // signature verifies.
+  // signature verifies, and it has to come from PayU's origin.
   app.post("/premium_success", async (request, reply) => {
     const body = readFormBody(request.body);
 
@@ -356,27 +378,12 @@ function registerRoutes(
         .send(renderMessagePage("Bad request", "The form could not be read.", "error"));
     }
 
-    const origin = request.headers.origin;
-
-    if (origin !== undefined && !isPayuOrigin(origin)) {
-      return reply
-        .code(403)
-        .type("text/html")
-        .send(
-          renderMessagePage(
-            "Invalid origin",
-            "That request did not come from the payment gateway.",
-            "error",
-          ),
-        );
-    }
-
-    const txnId = readQueryString(request.query, "txnId") ?? body.txnid ?? "";
-
     const outcome = await completePayment({
       body,
-      txnId,
+      queryTxnId: readQueryString(request.query, "txnId"),
       credentials: dependencies.credentials,
+      source: "browser",
+      origin: request.headers.origin,
       notify: dependencies.notify,
     });
 
@@ -409,7 +416,7 @@ function registerRoutes(
         .send(renderMessagePage("Bad request", "The form could not be read.", "error"));
     }
 
-    const txnId = readQueryString(request.query, "txnId") ?? body.txnid ?? "";
+    const txnId = body.txnid ?? readQueryString(request.query, "txnId") ?? "";
 
     if (txnId) {
       await failPremium({ txnId, raw: body });
@@ -436,8 +443,9 @@ function registerRoutes(
 
     const outcome = await completePayment({
       body,
-      txnId: body.txnid ?? "",
+      queryTxnId: readQueryString(request.query, "txnId"),
       credentials: dependencies.credentials,
+      source: "webhook",
       notify: dependencies.notify,
     });
 
@@ -455,8 +463,13 @@ function registerRoutes(
 
 interface CompletePaymentInput {
   readonly body: Record<string, string>;
-  readonly txnId: string;
+  /** The transaction id in the query string, when there was one. */
+  readonly queryTxnId?: string | undefined;
   readonly credentials: PayuCredentials | null;
+  /** Where the callback came from. */
+  readonly source: PayuCallbackSource;
+  /** The request's `Origin` header, when it had one. */
+  readonly origin?: string | undefined;
   readonly notify?: PremiumNotifier;
 }
 
@@ -474,6 +487,17 @@ type CompletePaymentOutcome =
  *
  * The browser redirect and the webhook both come through here, so both
  * are verified the same way and both are idempotent.
+ *
+ * The order of the checks is the order of the questions:
+ *
+ *  1. is the gateway configured at all?
+ *  2. did the callback name a transaction?
+ *  3. does it name the one the link said?
+ *  4. **is that transaction ours** — it has to exist in the database;
+ *  5. does it have a plan?
+ *  6. **does the callback verify** — the signature, the status, the
+ *     origin and the amount;
+ *  7. only then, the grant.
  */
 async function completePayment(
   input: CompletePaymentInput,
@@ -487,16 +511,30 @@ async function completePayment(
     };
   }
 
-  if (!input.txnId) {
+  // The transaction id in the body is the signed one, so it is the one
+  // that decides which transaction this is about. The one in the query
+  // string is a hint from the link, and the two have to agree.
+  const txnId = input.body.txnid ?? "";
+
+  if (!txnId) {
     return {
       ok: false,
       status: 400,
       title: "Missing transaction",
-      body: "No transaction id was given.",
+      body: "The callback did not name a transaction.",
     };
   }
 
-  const transaction = await findTransaction(input.txnId);
+  if (input.queryTxnId && input.queryTxnId !== txnId) {
+    return {
+      ok: false,
+      status: 400,
+      title: "Transaction mismatch",
+      body: "The callback named a different transaction than the link did.",
+    };
+  }
+
+  const transaction = await findTransaction(txnId);
 
   if (!transaction) {
     return {
@@ -518,38 +556,29 @@ async function completePayment(
     };
   }
 
-  const payload = readCallback(input.body);
-
-  if (!isSuccessfulStatus(payload.status)) {
-    return {
-      ok: false,
-      status: 400,
-      title: "Payment not successful",
-      body: `The gateway reported "${payload.status || "no status"}".`,
-    };
-  }
-
-  const verification = verifyPayuCallback(payload, {
-    txnId: input.txnId,
+  const verification = verifyPayuCallback(readCallback(input.body), {
+    txnId,
     amount: formatAmount(snapshot.price),
     credentials: input.credentials,
+    source: input.source,
+    origin: input.origin,
   });
 
   if (!verification.ok) {
     logger.warn(
-      `[Premium] Refused a payment callback for ${input.txnId}: ${verification.reason}`,
+      `[Premium] Refused a payment callback for ${txnId}: ${verification.reason}`,
     );
 
     return {
       ok: false,
-      status: 400,
+      status: verification.code === "wrong_origin" ? 403 : 400,
       title: "Payment could not be verified",
       body: verification.reason,
     };
   }
 
   const result = await activatePremium({
-    txnId: input.txnId,
+    txnId,
     amount: verification.amount,
     email: verification.email,
     buyerName: verification.firstName,
@@ -581,7 +610,7 @@ async function completePayment(
       });
     } catch (error) {
       logger.error(
-        `[Premium] Could not notify the buyer of ${input.txnId}:`,
+        `[Premium] Could not notify the buyer of ${txnId}:`,
         error instanceof Error ? error : String(error),
       );
     }
@@ -641,25 +670,11 @@ function readCallback(body: Record<string, string>): PayuCallbackPayload {
     email: body.email ?? "",
     status: body.status ?? "",
     hash: body.hash ?? "",
+    key: body.key,
     udf1: body.udf1,
     udf2: body.udf2,
     udf3: body.udf3,
     udf4: body.udf4,
     udf5: body.udf5,
   };
-}
-
-/**
- * Reads a number out of the environment.
- *
- * @returns the number, or `null` when it is not a number.
- */
-function numberFromEnv(value: string | undefined): number | null {
-  if (!value) return null;
-
-  const parsed = Number.parseInt(value, 10);
-
-  if (!Number.isFinite(parsed)) return null;
-
-  return parsed;
 }

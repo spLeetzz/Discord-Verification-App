@@ -78,21 +78,39 @@ export type {
 
 export {
   constantTimeEquals,
+  DEFAULT_PAYU_FIELD_LAYOUT,
   formatAmount,
   amountsEqual,
   isPayuOrigin,
   isSuccessfulStatus,
+  PAYU_FIELD_LAYOUTS,
+  payuFieldLayoutShape,
   payuRequestHash,
   payuResponseHash,
+  payuResponseHashCandidates,
   verifyPayuCallback,
 } from "./payu.js";
 export type {
   PayuCallbackExpectation,
   PayuCallbackPayload,
+  PayuCallbackSource,
   PayuCredentials,
+  PayuFieldLayout,
   PayuHashInput,
+  PayuRejection,
+  PayuResponseInput,
   PayuVerification,
 } from "./payu.js";
+
+export {
+  optionalEnv,
+  optionalNumber,
+  PREMIUM_ENV_VARS,
+  premiumEnvWarnings,
+  readPayuCredentials,
+  readPremiumEnv,
+} from "./env.js";
+export type { PremiumEnv } from "./env.js";
 
 export {
   buildCheckoutUrl,
@@ -114,7 +132,6 @@ export type {
 } from "./views.js";
 
 export {
-  readPayuCredentials,
   startPremiumServer,
   stopPremiumServer,
 } from "./server/index.js";

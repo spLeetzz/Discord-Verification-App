@@ -19,7 +19,11 @@ import {
   jobs,
   lockdowns,
 } from "../../db/schema.js";
-import type { BlockIdType, LockdownType } from "../../db/schema.js";
+import type {
+  BlockIdType,
+  LockdownPriorState,
+  LockdownType,
+} from "../../db/schema.js";
 import type {
   BlocklistEntry,
   LockdownJobPayload,
@@ -74,6 +78,7 @@ function toLockRecord(
     channelId: row.channelId,
     channelIds: row.channelIds,
     expireTime: row.expireTime,
+    priorState: row.priorState,
     authorId: row.authorId,
     // A category lockdown records the *category* in `channel_id`, and a
     // category is not a channel anybody can be told about in a message.
@@ -144,53 +149,100 @@ export interface NewLockdown {
   readonly channelIds: readonly string[];
   readonly expireTime: Date | null;
   readonly authorId: string;
+  /**
+   * What each channel's permission looked like before the lock.
+   *
+   * It is written with the row, in the same statement, so the undo data is
+   * as durable as the lock itself: a lockdown with no duration still
+   * restores exactly after a restart.
+   */
+  readonly priorState: LockdownPriorState | null;
+  /** Where the lockdown was started from — the closing message goes there. */
+  readonly sourceChannelId: string | null;
+  /** The maintenance channels `maintenance on` created. */
+  readonly maintenanceChannelIds: readonly string[];
 }
 
-/** Writes a lockdown row and returns it. */
-export async function insertLockdown(
-  input: NewLockdown,
-): Promise<LockRecord> {
-  const rows = await db
-    .insert(lockdowns)
-    .values({
-      guildId: input.guildId,
-      type: input.type,
-      roleId: input.roleId,
-      channelId: input.channelId,
-      channelIds: [...input.channelIds],
-      expireTime: input.expireTime,
-      authorId: input.authorId,
-    })
-    .returning();
+/**
+ * Writes a lockdown row, and the timer that lifts it.
+ *
+ * Both go in one transaction. A lockdown whose timer row was lost between
+ * the two writes would stay locked forever, and only a moderator could
+ * undo it.
+ *
+ * **A lockdown with no duration gets no timer.** There is nothing to
+ * schedule, and the row itself is the state — the double-lock guard reads
+ * it, and the unlock finds the permission state through it. A job row that
+ * never fires, used as a data store, would read as a design nobody meant.
+ */
+export async function createLockdown(input: NewLockdown): Promise<LockRecord> {
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .insert(lockdowns)
+      .values({
+        guildId: input.guildId,
+        type: input.type,
+        roleId: input.roleId,
+        channelId: input.channelId,
+        channelIds: [...input.channelIds],
+        expireTime: input.expireTime,
+        priorState: input.priorState,
+        authorId: input.authorId,
+      })
+      .returning();
 
-  const row = rows[0];
-  if (!row) throw new Error("The lockdown row was not returned.");
+    const row = rows[0];
+    if (!row) throw new Error("The lockdown row was not returned.");
 
-  const record = toLockRecord(row);
-  if (!record) throw new Error("The lockdown row has an unknown type.");
+    const record = toLockRecord(row);
+    if (!record) throw new Error("The lockdown row has an unknown type.");
 
-  return record;
+    if (input.expireTime) {
+      const payload: LockdownJobPayload = {
+        lockdownId: record.id,
+        type: record.type,
+        guildId: record.guildId,
+        channelIds: [...record.channelIds],
+        roleId: record.roleId,
+        sourceChannelId: input.sourceChannelId,
+        maintenanceChannelIds: [...input.maintenanceChannelIds],
+      };
+
+      await tx.insert(jobs).values({
+        event: "lockdown",
+        expiresAt: input.expireTime,
+        payload,
+      });
+    }
+
+    return record;
+  });
 }
 
-/** Removes a lockdown row. */
-export async function deleteLockdown(id: string): Promise<void> {
-  await db.delete(lockdowns).where(eq(lockdowns.id, id));
+/**
+ * Removes a lockdown row and the timer that lifts it.
+ *
+ * Both go in one transaction: a lockdown row left behind without its timer
+ * would never lift itself.
+ */
+export async function removeLockdown(id: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(jobs)
+      .where(
+        and(
+          eq(jobs.event, "lockdown"),
+          sql`${jobs.payload}->>'lockdownId' = ${id}`,
+        ),
+      );
+
+    await tx.delete(lockdowns).where(eq(lockdowns.id, id));
+  });
 }
 
 /* ------------------------------------------------------------------ *
  * The durable job
  * ------------------------------------------------------------------ */
-
-/**
- * The expiry a lockdown with no expiry gets.
- *
- * A lockdown without a duration still needs a job row, because that row
- * is where the permission state that has to be restored is written down
- * (see `modules/moderation/README.md`). The sentinel is far enough away
- * that the scheduler will never fire it, and the lock's real expiry — the
- * one that is `null` — stays on the `lockdowns` row.
- */
-export const INDEFINITE_JOB_EXPIRY = new Date("9999-12-31T23:59:59.000Z");
 
 /**
  * Checks a `jobs.payload` value against the lockdown payload shape.
@@ -208,9 +260,6 @@ export function parseLockdownJobPayload(
   if (typeof candidate.lockdownId !== "string") return null;
   if (typeof candidate.guildId !== "string") return null;
   if (!Array.isArray(candidate.channelIds)) return null;
-  if (typeof candidate.prior !== "object" || candidate.prior === null) {
-    return null;
-  }
 
   const type = candidate.type;
   if (!type || !asLockdownType(type)) return null;
@@ -227,7 +276,6 @@ export function parseLockdownJobPayload(
       typeof candidate.sourceChannelId === "string"
         ? candidate.sourceChannelId
         : null,
-    prior: candidate.prior as LockdownJobPayload["prior"],
     maintenanceChannelIds: Array.isArray(candidate.maintenanceChannelIds)
       ? candidate.maintenanceChannelIds.filter(
           (id): id is string => typeof id === "string",
@@ -236,28 +284,51 @@ export function parseLockdownJobPayload(
   };
 }
 
-/**
- * Writes the durable job that lifts a lockdown.
- *
- * @param expiresAt when the lockdown lifts. Use
- *                  {@link INDEFINITE_JOB_EXPIRY} for a lockdown with no
- *                  expiry.
- */
-export async function insertLockdownJob(
-  payload: LockdownJobPayload,
-  expiresAt: Date,
-): Promise<void> {
-  await db.insert(jobs).values({
-    event: "lockdown",
-    expiresAt,
-    payload,
-  });
-}
-
 /** The job row of a lockdown, when it still has one. */
 export interface LockdownJob {
   readonly id: string;
   readonly payload: LockdownJobPayload;
+}
+
+/** A job row, as the database has it. */
+export interface LockdownJobRow {
+  readonly id: string;
+  /** The JSON payload, unparsed. */
+  readonly payload: unknown;
+  /** When the job comes due. */
+  readonly expiresAt: Date;
+}
+
+/**
+ * The job rows of a lockdown.
+ *
+ * A lockdown has one while it has a timer, and none once it is lifted.
+ * The payload comes back **raw**, because what is *in* it matters: the
+ * permission state is not supposed to be there any more, and only the raw
+ * JSON can say so.
+ */
+export async function listLockdownJobs(
+  lockdownId: string,
+): Promise<LockdownJobRow[]> {
+  const rows = await db
+    .select({
+      id: jobs.id,
+      payload: jobs.payload,
+      expiresAt: jobs.expiresAt,
+    })
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.event, "lockdown"),
+        sql`${jobs.payload}->>'lockdownId' = ${lockdownId}`,
+      ),
+    );
+
+  return rows.map((row) => ({
+    id: row.id,
+    payload: row.payload,
+    expiresAt: row.expiresAt,
+  }));
 }
 
 /**
@@ -270,17 +341,7 @@ export interface LockdownJob {
 export async function findLockdownJob(
   lockdownId: string,
 ): Promise<LockdownJob | null> {
-  const rows = await db
-    .select()
-    .from(jobs)
-    .where(
-      and(
-        eq(jobs.event, "lockdown"),
-        sql`${jobs.payload}->>'lockdownId' = ${lockdownId}`,
-      ),
-    )
-    .limit(1);
-
+  const rows = await listLockdownJobs(lockdownId);
   const row = rows[0];
   if (!row) return null;
 
@@ -288,18 +349,6 @@ export async function findLockdownJob(
   if (!payload) return null;
 
   return { id: row.id, payload };
-}
-
-/** Removes the job row of a lockdown. */
-export async function deleteLockdownJob(lockdownId: string): Promise<void> {
-  await db
-    .delete(jobs)
-    .where(
-      and(
-        eq(jobs.event, "lockdown"),
-        sql`${jobs.payload}->>'lockdownId' = ${lockdownId}`,
-      ),
-    );
 }
 
 /* ------------------------------------------------------------------ *

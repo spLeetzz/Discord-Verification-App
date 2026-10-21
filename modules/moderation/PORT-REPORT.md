@@ -190,12 +190,33 @@ database row).
 ### Where the "restore the previous state" data lives
 
 This is the one design decision the decision log did not cover, and it
-needed a call.
+needed a call. The call was made twice: first for the port, then again
+when the schema owner added the column the first answer asked for.
 
-The `lockdowns` table has no column for the permissions that were
-changed, and the schema is frozen and migrated. The undo data therefore
-rides in the **payload of the `jobs` row**, which already exists, already
-carries the expiry, and is already the durable thing:
+The undo data lives on the `lockdowns` row itself, in the
+`prior_state jsonb` column:
+
+```jsonc
+{
+  "123": { "existed": false, "value": null }   // channel id → what it looked like before
+}
+```
+
+`prior_state` holds, per channel: whether the channel had an explicit
+overwrite for the target at all, and what the permission was — `true`,
+`false`, or `null` for "inherit".
+
+- The channel had **no** overwrite → the unlock **removes** the overwrite
+  the lock created, so the channel is exactly what it was.
+- The channel had one → the unlock puts the permission back to the value
+  it had, `null` included.
+
+It is written with the row, in the same statement, so the undo data is as
+durable as the lock itself.
+
+**The `jobs` row is the timer and nothing else.** It says when the
+lockdown lifts by itself, and its payload says only which lockdown to
+lift and where to say so:
 
 ```jsonc
 {
@@ -205,28 +226,16 @@ carries the expiry, and is already the durable thing:
   "channelIds": ["…"],
   "roleId": null,
   "sourceChannelId": "…",
-  "prior": {                  // channel id → what it looked like before
-    "123": { "existed": false, "value": null }
-  },
   "maintenanceChannelIds": []
 }
 ```
 
-`prior` holds, per channel: whether the channel had an explicit overwrite
-for the target at all, and what the permission was — `true`, `false`, or
-`null` for "inherit".
-
-- The channel had **no** overwrite → the unlock **removes** the overwrite
-  the lock created, so the channel is exactly what it was.
-- The channel had one → the unlock puts the permission back to the value
-  it had, `null` included.
-
-A lockdown **without** a duration still gets a `jobs` row, with an expiry
-far in the future (the year 9999), precisely so that the state to restore
-survives a restart. The real expiry stays `null` on the `lockdowns` row.
-
-**A cleaner home would be a `prior_state jsonb` column on `lockdowns`**
-(see §6). This port does not depend on it.
+**A lockdown without a duration has no `jobs` row at all.** There is
+nothing to schedule, and everything the unlock needs is on the lockdown
+row. The first cut of this port gave every lockdown a job row, with an
+expiry in the year 9999, purely so the undo data had somewhere durable to
+live — a job row that never fires, used as a data store, reads as a
+design nobody meant.
 
 ---
 
@@ -263,9 +272,9 @@ the moderator gives none, is Quotient's "Action done by `<author> (ID:
 
 | # | Difference | Why |
 |---|---|---|
-| 1 | **The `lockdowns` row is always created**, with `expire_time = null` when there is no duration. | **A deliberate deviation from D44**, which says "create the row only when there is a duration". The row is the *state*: the double-lock guard reads it, and the unlock finds the permission state through it. A lockdown with no record cannot be guarded against and cannot be unlocked. The crash D44 describes is fixed either way; this way also makes an untimed lockdown liftable. The column is nullable, so the schema already allows it. |
-| 2 | The prior permission state lives in the `jobs` payload rather than in a new column. | The schema is frozen and migrated. The `jobs` row already exists, already carries the expiry, and is already durable. A `prior_state jsonb` column on `lockdowns` would be cleaner — requested in §6, not depended on. |
-| 3 | A lockdown without a duration still gets a `jobs` row, with a sentinel expiry (the year 9999). | That row is the carrier of the undo data. The scheduler will never see it; the lock's real expiry stays `null` on the `lockdowns` row. |
+| 1 | **The `lockdowns` row is always created**, with `expire_time = null` when there is no duration. | **A deliberate deviation from D44**, which says "create the row only when there is a duration". The row is the *state*: the double-lock guard reads it, and the unlock finds the permission state through it. A lockdown with no record cannot be guarded against and cannot be unlocked. The crash D44 describes is fixed either way; this way also makes an untimed lockdown liftable. The column is nullable, so the schema already allows it. **Ratified by the schema owner** — the decision log (D44) now says the same. |
+| 2 | The prior permission state lives on the `lockdowns` row, in the `prior_state jsonb` column. | It is a property of the lockdown, not of the timer. The column was added for this port, so the state is as durable as the lock itself and a lockdown with no duration needs nothing else to restore it. |
+| 3 | A lockdown without a duration gets **no** `jobs` row. | A job is a schedule, and there is nothing to schedule. The first cut of this port gave every lockdown a job row with a sentinel expiry in the year 9999, purely so the undo data had somewhere durable to live — a job row that never fires, used as a data store, reads as a design nobody meant. |
 | 4 | The block list has **no chat command**. | D41. It ships as a model, a check and a cache. The management surface is an ops script — see §5. |
 | 5 | Every command is staff-only **and** needs a Discord permission. | D41: one authorisation model, the target's. Quotient only had the permission. |
 | 6 | `/unlock` on a channel that is not locked **refuses**. | The state machine says there is nothing to lift. Quotient forced `send_messages = True` on any channel, which is the bug this area exists to fix. |
@@ -324,7 +333,7 @@ None of these block the area; the code is written against them.
 | 4 | The startup | Call `registerModerationInteractions()` and `startModeration()`. Both are exported from `modules/moderation/register.ts`. |
 | 5 | The job dispatcher | Call `handleModerationJob(client, event, payload)` for the `lockdown` event. Exported from `modules/moderation/register.ts`. |
 | 6 | The global command guard | Call `isBlocked(userId, "1")` and `isBlocked(guildId, "2")` (D39/D41). |
-| 7 | `db/schema/system.ts` *(optional)* | A `prior_state jsonb` column on `lockdowns` would be a cleaner home for the permission state than the `jobs` payload. This port does not depend on it. |
+| 7 | ~~`db/schema/system.ts`~~ | **Done.** The `prior_state jsonb` column on `lockdowns` was added for this port, and the permission state moved onto it. The `jobs` payload carries no permission state any more. |
 | 8 | `core/guards.ts` *(optional)* | Two helpers live in this area and would fit better in core: the **member** hierarchy check (`modules/moderation/hierarchy.ts` — `core/guards.ts` has the *role* version, `canManageRole`, and this area uses it as it is) and a `permissionGuard` factory (`modules/moderation/commands/shared.ts`). |
 
 ---
@@ -336,6 +345,7 @@ None of these block the area; the code is written against them.
 | `purge.test.ts` | which messages each filter selects, the fourteen-day cutoff (including the exact boundary), the batching into hundreds, the three-character minimum |
 | `reason.test.ts` | the reason format, the 512-character cap, that the prefix counts against it, that a longer name means a shorter budget |
 | `lock-state.test.ts` | the transitions and the guards, including the refusal to double-lock, the refusal to unlock a channel of a server lockdown, and the "how long is left" message |
+| `lockdown.test.ts` | the lockdown against the live database: the prior state round-trips through `lockdowns.prior_state`, a lockdown with no duration writes no `jobs` row, one with a duration writes exactly one, that row's payload carries no permission state, the unlock puts an existing overwrite back to exactly what it was and removes one that did not exist, and the double-lock guard refuses a second lock with and without a duration |
 | `permissions.test.ts` | the restore-previous-state logic: no overwrite → remove, explicit allow → allow, explicit deny → deny, inherit → inherit |
 | `hierarchy.test.ts` | the actor's and the bot's checks, the guild-owner exemption, that the bot has none |
 | `blocklist.test.ts` | that a user and a guild with the same id do not collide, and that a failed refresh does not unblock anybody |
