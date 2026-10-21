@@ -278,5 +278,8 @@ export const JOB_EVENTS = [
   "vote",
   "alert",
   "autopurge",
+  // The community area's daily maintenance pass: the command-usage
+  // retention prune, and anything else that runs once a day.
+  "community_daily",
 ] as const;
 export type JobEvent = (typeof JOB_EVENTS)[number];

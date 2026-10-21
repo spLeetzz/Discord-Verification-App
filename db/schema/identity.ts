@@ -50,6 +50,16 @@ export const ssConfigs = pgTable(
       .default(sql`'{}'::text[]`),
     /** Allow the same screenshot to be submitted twice. */
     allowSame: boolean("allow_same").notNull().default(false),
+    /**
+     * The Hamming distance at which two screenshots count as duplicates.
+     *
+     * The default of 7 is calibrated against Python's `imagehash` 4.3.2, and
+     * this port's hashing is bit-exact with it — so the number means the
+     * same thing it did there. It is a column rather than a constant because
+     * the threshold has to move with the hash implementation, and because a
+     * guild whose screenshots rescale differently may need a different one.
+     */
+    duplicateThreshold: integer("duplicate_threshold").notNull().default(7),
     ssType: text("ss_type").notNull(),
     successMessage: text("success_message"),
     createdAt: createdAt(),
