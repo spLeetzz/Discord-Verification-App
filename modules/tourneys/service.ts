@@ -15,17 +15,22 @@
 import { findTeam, TEAM_NAME_MAX_LENGTH } from "../../core/team-name.js";
 import { truncate } from "../../core/text.js";
 import { dayName } from "../../core/time.js";
-import { mediaPartnerChannelCache, tourneyChannelCache } from "./channel-cache.js";
+import { logger } from "../../utils/logger.js";
+import {
+  mediaPartnerChannelCache,
+  tourneyChannelCache,
+} from "./channel-cache.js";
 import { groupSlots } from "./groups.js";
+import type { Group } from "./groups.js";
 import * as repo from "./repo.js";
 import { nextOpenInstant, opensOnDay } from "./schedule.js";
 import { canOpenTourney, canTransitionTourney } from "./state.js";
 import type { RegistrationContext } from "./requirements.js";
 import type {
-  Group,
   TourneyRecord,
   TourneySchedule,
   TourneySlotRecord,
+  WizardDraft,
 } from "./types.js";
 
 /** A refusal the caller should show to a person. */
@@ -192,19 +197,26 @@ export async function setTourneyStatus(
  * Creating a tournament
  * ------------------------------------------------------------------ */
 
-/** The state the setup wizard collects. */
-export interface WizardState {
-  readonly guildId: string;
-  readonly hostId: string;
-  readonly name: string;
-  readonly registrationChannelId: string | null;
-  readonly confirmChannelId: string | null;
-  readonly roleId: string | null;
-  readonly requiredMentions: number;
-  readonly totalSlots: number | null;
-  readonly groupSize: number | null;
-  readonly emojis: { tick: string; cross: string };
+/** The default wizard draft for a guild. */
+export function newDraft(guildId: string, hostId: string): WizardDraft {
+  return {
+    guildId,
+    hostId,
+    name: "Tournament",
+    registrationChannelId: null,
+    confirmChannelId: null,
+    roleId: null,
+    requiredMentions: 4,
+    totalSlots: null,
+    groupSize: null,
+    emojis: { tick: "✅", cross: "❌" },
+    openDays: [],
+    openTime: "18:00",
+  };
 }
+
+/** The state the setup wizard collects. */
+export type { WizardDraft };
 
 /**
  * Creates a tournament from a finished wizard.
@@ -213,7 +225,7 @@ export interface WizardState {
  * has not opened. Opening it is a separate, explicit step.
  */
 export async function createTourneyFromWizard(
-  state: WizardState,
+  state: WizardDraft,
 ): Promise<string> {
   if (!state.registrationChannelId) {
     throw new TourneyError("The tournament needs a registration channel.");
@@ -440,7 +452,13 @@ export async function listGroups(
 /**
  * The open schedule of a tournament.
  *
- * The schedule lives in the payload of the `tourney_open` job row.
+ * The schedule lives in the payload of the `tourney_open` job row, and
+ * the job row is the only copy of it — so this reads `null` in the one
+ * moment there is no row: while the job is firing, because the
+ * dispatcher deletes the row before it dispatches it. The handler reads
+ * the schedule out of the payload it was handed instead; this is for
+ * the views, which ask "what is this tournament's schedule?" while the
+ * bot is up.
  */
 export async function getSchedule(
   tourneyId: string,
@@ -460,6 +478,18 @@ export async function getSchedule(
  * The job is a row in the durable `jobs` table, never a `setTimeout`: a
  * timer that dies with the process means the tournament never opens
  * again.
+ *
+ * **The next open is the next occurrence of the schedule**, not "now plus
+ * 24 hours" and not "now plus the length of the last outage". The
+ * schedule is the weekdays and the wall-clock time, and the instant is
+ * computed from those — so a tournament that opens at 6pm opens at 6pm,
+ * whatever time the job happened to fire at.
+ *
+ * @param tourneyId the tournament;
+ * @param schedule  the weekdays and the time of day;
+ * @param now       the reference instant.
+ * @returns the instant the job is armed for, or `null` when the
+ *          schedule is unusable or the row could not be written.
  */
 export async function armOpenJob(
   tourneyId: string,
@@ -470,35 +500,28 @@ export async function armOpenJob(
 
   if (!next) return null;
 
-  await repo.replaceTourneyJob(
-    repo.TOURNEY_JOB_EVENT,
-    tourneyId,
-    next,
-    {
+  try {
+    await repo.replaceTourneyJob(
+      repo.TOURNEY_JOB_EVENT,
       tourneyId,
-      openDays: [...schedule.openDays],
-      openTime: schedule.openTime,
-    },
-  );
+      next,
+      {
+        tourneyId,
+        openDays: [...schedule.openDays],
+        openTime: schedule.openTime,
+      },
+    );
+  } catch (error) {
+    logger.error(
+      `[Tourneys] Could not arm the "${repo.TOURNEY_JOB_EVENT}" job for the tournament ${tourneyId}: ${
+        error instanceof Error ? error.message : String(error)
+      }.`,
+    );
+
+    return null;
+  }
 
   return next;
-}
-
-/**
- * Re-arms the daily open job after it fired.
- *
- * The job re-arms itself for the next allowed day, so a tournament opens
- * every day it is supposed to, without anybody touching the bot.
- */
-export async function rearmOpenJob(
-  tourneyId: string,
-  now: Date = new Date(),
-): Promise<Date | null> {
-  const schedule = await getSchedule(tourneyId);
-
-  if (!schedule) return null;
-
-  return armOpenJob(tourneyId, schedule, now);
 }
 
 /**

@@ -13,12 +13,12 @@
 
 import { PermissionFlagsBits, SlashCommandBuilder } from "discord.js";
 import type { ChatInputCommandInteraction } from "discord.js";
-import { respond } from "../../../core/context.js";
 import { InputError } from "../../../core/errors.js";
 import { parseDuration } from "../../../core/time.js";
 import { autoPurgeChannels } from "../cache.js";
 import * as service from "../service.js";
 import { buildAutoPurgeListEmbed } from "../views/embeds.js";
+import { respondSafe } from "../views/reply.js";
 import {
   missingPermission,
   permissionGuard,
@@ -180,7 +180,7 @@ async function setAutoPurge(
   // The cache is the listener's fast path; one place owns it.
   autoPurgeChannels.add(config.channelId);
 
-  await respond(interaction, {
+  await respondSafe(interaction, {
     content: `${channel.toString()} will have its messages deleted after ${delay} seconds.`,
   });
 }
@@ -207,7 +207,7 @@ async function listAutoPurge(
     names.set(config.channelId, channel?.toString() ?? "Deleted Channel");
   }
 
-  await respond(interaction, {
+  await respondSafe(interaction, {
     embeds: [buildAutoPurgeListEmbed(configs, names)],
   });
 }
@@ -232,7 +232,7 @@ async function removeAutoPurge(
 
   autoPurgeChannels.discard(option.id);
 
-  await respond(interaction, {
+  await respondSafe(interaction, {
     content: "That channel is no longer an auto-purge channel.",
   });
 }

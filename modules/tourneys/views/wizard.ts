@@ -22,58 +22,24 @@ import { ButtonStyle, EmbedBuilder } from "discord.js";
 import { TokenStore } from "../../../core/custom-id.js";
 import { EMBED_COLOR } from "../../../core/constants.js";
 import { OPEN_DAYS } from "../schedule.js";
-import type { TourneyEmojis } from "../types.js";
+import type { WizardDraft } from "../types.js";
 import {
   assertComponentBudget,
   button,
   buttonRow,
 } from "./components.js";
 import { tourneysId } from "./ids.js";
-import type { Panel } from "./handlers.js";
+import type { Panel, PanelComponents } from "./handlers.js";
 
 /** How long a wizard draft lives. */
 const WIZARD_TTL_MS = 30 * 60_000;
-
-/** The state the wizard collects. */
-export interface WizardDraft {
-  readonly guildId: string;
-  readonly hostId: string;
-  readonly name: string;
-  readonly registrationChannelId: string | null;
-  readonly confirmChannelId: string | null;
-  readonly roleId: string | null;
-  readonly requiredMentions: number;
-  readonly totalSlots: number | null;
-  readonly groupSize: number | null;
-  readonly emojis: TourneyEmojis;
-  /** The weekdays the tournament opens on. Empty means every day. */
-  readonly openDays: string[];
-  /** The time of day it opens at, in the server's zone. */
-  readonly openTime: string;
-}
 
 /** The drafts of the wizards that are running. */
 export const wizardStore = new TokenStore<WizardDraft>({
   ttlMs: WIZARD_TTL_MS,
 });
 
-/** The default draft for a guild. */
-export function newDraft(guildId: string, hostId: string): WizardDraft {
-  return {
-    guildId,
-    hostId,
-    name: "Tournament",
-    registrationChannelId: null,
-    confirmChannelId: null,
-    roleId: null,
-    requiredMentions: 4,
-    totalSlots: null,
-    groupSize: null,
-    emojis: { tick: "✅", cross: "❌" },
-    openDays: [],
-    openTime: "18:00",
-  };
-}
+export type { WizardDraft };
 
 /** The fields of the wizard, in the order they are shown. */
 export interface WizardField {
@@ -173,7 +139,7 @@ export function buildWizardPanel(draft: WizardDraft, token: string): Panel {
     draft.roleId !== null &&
     draft.totalSlots !== null;
 
-  const rows: Panel["components"] = [];
+  const rows: PanelComponents = [];
 
   const first = WIZARD_FIELDS.slice(0, 5);
   const second = WIZARD_FIELDS.slice(5);
@@ -199,6 +165,11 @@ export function buildWizardPanel(draft: WizardDraft, token: string): Panel {
           style: ButtonStyle.Secondary,
         }),
       ),
+    ),
+  );
+
+  rows.push(
+    buttonRow(
       button({
         customId: tourneysId("wizard", "save", token),
         label: "Save",

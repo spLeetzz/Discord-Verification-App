@@ -40,6 +40,7 @@ channel are meant to see.
 | | `remove` | `channel` (channel, required) | Manage Messages |
 | `/reminder` | `set` | `when` (string, required), `text` (string, optional) | — |
 | | `list` | — | — |
+| | `delete` | `id` (string, optional) | — |
 
 The source's guard on the auto-role commands was `is_mod`, which is "the
 caller has `manage_guild`", and it also required the **bot** to have
@@ -56,6 +57,94 @@ command loader scans.
 > (`handlers/interactions.ts`: `command.ephemeral ? MessageFlags.Ephemeral
 > : undefined`), so a tag, a snipe and a reminder are messages the channel
 > can see.
+
+---
+
+## The bot does not notify anybody
+
+**A reply in this area cannot ping anybody, unless the reply says so
+explicitly.**
+
+A tag's body is stored verbatim and posted as message **content**, so
+without a rule a member could store `@everyone` in a tag and have the
+bot — which holds "Mention Everyone" — ping the whole server. The member
+would be using a permission they do not have, and the bot would be
+holding it for them.
+
+Two things stop it, and the area uses both:
+
+1. **`allowedMentions: { parse: [] }` on the reply.** Every reply goes
+   through `views/reply.ts` (`respondSafe`), so Discord is told not to
+   parse a mention out of the content. A reply that *means* to mention
+   somebody passes that id explicitly: `/tag transfer` names the new
+   owner, and `/autorole` names the role.
+2. **The user content is escaped.** `core/escape.ts`'s `escapeMentions`
+   is applied to the tag body on the show path (the raw path already did
+   it), to the tag's name in the confirmations, and to the reminder's own
+   text in the confirmation. The markdown is left alone — a tag is a
+   canned message and its formatting is the point of it.
+
+> **The default belongs in `core/context.ts`.** Every area that posts
+> user content has this problem, not this one. `views/reply.ts` is the
+> area's own copy of the rule, so the area is safe whether or not the
+> core default has landed.
+
+Content that goes into an **embed** cannot notify anybody — Discord's
+`allowed_mentions` applies to message content only — so the snipe, the
+tag statistics, the reminder list and the auto-purge list are left as
+they are.
+
+---
+
+## The member allowances
+
+A tag is a row in the `tags` table and a reminder is a row in the `jobs`
+table, and nothing removed either of them by itself. A member could put
+on the order of ten thousand rows a day, and every one of them was
+scanned past by the dispatcher on every poll.
+
+| Allowance | Number | Counted over |
+|---|---|---|
+| Tags a member may own | **25** | one guild |
+| Reminders a member may have running | **25** | every guild |
+
+**Why twenty-five.** A tag is a canned message: twenty-five of them in
+one server is already more than a server uses, and the tag namespace is
+per guild, so the allowance is per guild too. A reminder is a row in the
+table the dispatcher polls every fifteen seconds; twenty-five running
+reminders is more than anybody needs at once, and the allowance empties
+itself — the dispatcher deletes a reminder's row when it fires.
+
+These are the area's own limits, in `rules.ts` (`MAX_TAGS_PER_MEMBER`,
+`MAX_REMINDERS_PER_MEMBER`). They are **not** free-tier limits: the free
+tier is about what a *guild* may configure, and these are about what a
+*member* may leave lying around.
+
+The rule itself is a pure function (`checkMemberQuota`), and it is
+enforced where the row is written: `service.createTag` and
+`service.createReminder`.
+
+**The allowance is never a trap.** A member at the allowance can always
+make room: `/tag delete` removes a tag the caller owns, and
+`/reminder delete` removes a running reminder (one by id, or all of
+them). Without the reminder command the allowance would have been a trap,
+because a reminder's row only goes away when it fires.
+
+### The retention
+
+| What | How long it is kept | Who prunes it |
+|---|---|---|
+| A reminder | until it fires | the dispatcher, which deletes the row *before* it dispatches it (`handlers/jobs.ts`) |
+| A tag that has been used | for ever | — the usage counter bumps `updated_at` |
+| A tag that has never been used | **180 days** | the daily pass (`community_daily`) |
+| A snipe | 10 days | the daily pass |
+| A command-usage row | 30 days | `db/retention.ts`, called by the daily pass |
+
+The tag prune is deliberately long: a tag is somebody's text, and the
+price of keeping it a little longer is far lower than the price of
+deleting a guild's rules by surprise. A tag that has been *edited* also
+keeps its row — the edit bumps `updated_at` — so what goes is only the
+tag somebody made once and forgot about.
 
 ---
 
@@ -139,7 +228,7 @@ which makes the handler idempotent under restarts.
 |---|---|---|---|
 | `reminder` | `/reminder set` | `{ channelId, userId, message, reminderId, createdAt, sourceMessageId? }` | posts the reminder in the channel it was created in |
 | `autopurge` | every message in an auto-purge channel | `{ channelId, messageId }` | deletes the message, unless it is pinned |
-| `community_daily` | at startup, and re-armed by itself every day | `{}` | the daily housekeeping pass: prunes the snipes older than ten days and the command-usage rows older than thirty, and arms itself again for the next day |
+| `community_daily` | at startup, and re-armed by itself every day | `{}` | the daily housekeeping pass: prunes the snipes older than ten days, the tags that have never been used and are older than six months, and the command-usage rows older than thirty, and arms itself again for the next day |
 
 The `user_id` column of the `jobs` row carries the member the reminder is
 for, so `/reminder list` is an index lookup instead of the source's
@@ -232,7 +321,7 @@ updated by the commands that add or remove a channel.
 | `jobs.ts` | the job handlers and the daily pass |
 | `listeners.ts` | the four listeners |
 | `commands/` | the command definitions |
-| `views/` | the embeds and the reminder delivery |
+| `views/` | the embeds, the reminder delivery and the reply helper (`views/reply.ts`) |
 | `register.ts` | what the manager wires in |
 
 ### What the manager has to wire
@@ -307,7 +396,10 @@ The refusals the module raises itself:
 | "The snipe is marked NSFW but the current channel isn't." | the same rule for a snipe |
 | "**#channel** is already an auto-purge channel." | the channel is already configured |
 | "You cannot set auto-purge in more than N channels on the free tier." | the free-tier allowance is used up |
+| "You can have at most 25 tags in this server. Delete one with `/tag delete` before you make another." | the member's tag allowance is used up |
+| "You can have at most 25 reminders running. Delete one with `/reminder delete` before you set another." | the member's reminder allowance is used up |
 | "The owner of that tag is still in the server." | `/tag claim` on a tag whose owner is here |
+| "That reminder is not one of yours, or it has already fired." | `/reminder delete` with somebody else's id |
 | "I have no running reminders." | `/reminder list` with nothing running |
 
 ---
@@ -425,6 +517,10 @@ three are listed underneath them.
 | The auto-role toggle is one statement | the source read the row, chose `ARRAY_APPEND` or `ARRAY_REMOVE` and wrote it back — a read-modify-write that races two moderators clicking at once. |
 | The reminder is posted in the channel it was created in | as in the source. It is not a DM: a DM is a private inbox the user may not be looking at. When the channel is gone, the reminder is dropped and the drop is logged. |
 | The snipe names the author instead of mentioning them | the source used the author's name. A mention would ping somebody for a message they deleted. |
+| A reply in this area cannot notify anybody | a tag's body is member text posted as message content. Without the rule, a member could store `@everyone` in a tag and have the bot ping the whole server — a permission the member does not have and the bot does. |
+| A member may own 25 tags and have 25 reminders running | nothing removed either row by itself, so both tables grew for ever. The numbers are the area's own limits, in `rules.ts`; the free tier is about what a *guild* may configure. |
+| An unused tag is pruned after 180 days | the allowance bounds how many tags a member may have *at once*; the prune bounds how many the table keeps over the months. A tag that has been used or edited is never touched. |
+| `/reminder delete` exists | without a way to delete a reminder, the allowance would have been a trap: a reminder's row only goes away when it fires. |
 | The usage log is written by the dispatcher, not by the commands | the log is a property of the dispatcher. The area provides the helper. |
 
 ---
@@ -437,8 +533,11 @@ npm test
 
 | File | What it proves |
 |---|---|
-| `rules.test.ts` | the tag name normalisation and the reserved-word check, the auto-purge admission **order**, the reminder's time-and-text split, the NSFW rule, the stale roles |
+| `rules.test.ts` | the tag name normalisation and the reserved-word check, the auto-purge admission **order**, the member allowance, the reminder's time-and-text split, the NSFW rule, the stale roles |
 | `embed-tag.test.ts` | the embed-tag render path, and that a malformed stored template is a refusal and not a crash |
+| `mentions.test.ts` | that **no reply in this area can notify anybody**: a tag whose body is `@everyone` is escaped and its reply allows no mentions, a reminder's text is escaped, and the reminder's delivery mentions only the member it is for |
+| `quota.test.ts` | the member allowances, against the live database: the tag past the allowance is refused, the reminder past the allowance is refused, and a member at the allowance can still delete their own tag and their own reminder |
+| `retention.test.ts` | the retention, against the live database: an unused tag is pruned, a used or recently edited tag is kept, and a fired reminder leaves no row behind |
 | `stats.test.ts` | the usage-log statistics, against the live database |
 | `tags.test.ts` | the tag storage rules against the live database: the canonical name, the case-insensitive lookup, the unique constraint, the usage counter, the ownership rules |
 | `repo.test.ts` | the hand-written SQL against the live database: the atomic auto-role toggle, the snipe upsert, the job rows |

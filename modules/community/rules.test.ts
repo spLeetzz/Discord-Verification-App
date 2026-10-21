@@ -15,11 +15,14 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  MAX_REMINDERS_PER_MEMBER,
+  MAX_TAGS_PER_MEMBER,
   RESERVED_TAG_WORDS,
   TAG_CONTENT_MAX_LENGTH,
   TAG_NAME_MAX_LENGTH,
   canShowSnipe,
   checkAutoPurgeAdmission,
+  checkMemberQuota,
   isReservedTagName,
   normaliseTagName,
   readReminder,
@@ -290,5 +293,78 @@ describe("the tag limits", () => {
 
   it("keeps the source's limit for the body", () => {
     expect(TAG_CONTENT_MAX_LENGTH).toBe(1990);
+  });
+
+  it("allows twenty-five tags and twenty-five reminders a member", () => {
+    // The numbers the README states, pinned here so they cannot drift.
+    expect(MAX_TAGS_PER_MEMBER).toBe(25);
+    expect(MAX_REMINDERS_PER_MEMBER).toBe(25);
+  });
+});
+
+describe("checkMemberQuota", () => {
+  it("lets a member under the allowance have another one", () => {
+    const result = checkMemberQuota({
+      subject: "tag",
+      currentCount: 24,
+      limit: 25,
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.refusal).toBeNull();
+    expect(result.message).toBe("");
+  });
+
+  it("refuses the one past the allowance", () => {
+    const result = checkMemberQuota({
+      subject: "tag",
+      currentCount: 25,
+      limit: 25,
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.refusal).toBe("limit_reached");
+  });
+
+  it("refuses a member who is over the allowance", () => {
+    const result = checkMemberQuota({
+      subject: "reminder",
+      currentCount: 40,
+      limit: 25,
+    });
+
+    expect(result.allowed).toBe(false);
+  });
+
+  it("says how to make room", () => {
+    const result = checkMemberQuota({
+      subject: "reminder",
+      currentCount: 25,
+      limit: 25,
+    });
+
+    expect(result.message).toContain("at most 25 reminders");
+    expect(result.message).toContain("/reminder delete");
+  });
+
+  it("names the tag command for a tag", () => {
+    const result = checkMemberQuota({
+      subject: "tag",
+      currentCount: 25,
+      limit: 25,
+    });
+
+    expect(result.message).toContain("at most 25 tags");
+    expect(result.message).toContain("/tag delete");
+  });
+
+  it("says the allowance in the number it was given", () => {
+    const result = checkMemberQuota({
+      subject: "tag",
+      currentCount: 5,
+      limit: 5,
+    });
+
+    expect(result.message).toContain("at most 5 tags");
   });
 });

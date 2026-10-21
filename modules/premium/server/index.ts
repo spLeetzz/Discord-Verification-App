@@ -25,6 +25,13 @@
  * redirect must come from PayU's origin, and the server-to-server
  * webhook has no origin at all. Asking a webhook for an `Origin` header
  * would refuse every one of them.
+ *
+ * **The failure redirect is verified too.** It used to be the one route
+ * that wrote to the database on the strength of a transaction id and
+ * nothing else. The gateway signs the failure callback as carefully as
+ * the successful one — the status is inside the signature — so the route
+ * checks the same things the success route checks before it marks
+ * anything failed.
  */
 
 import Fastify from "fastify";
@@ -40,6 +47,7 @@ import {
   formatAmount,
   payuRequestHash,
   verifyPayuCallback,
+  verifyPayuFailureCallback,
 } from "../payu.js";
 import type {
   PayuCallbackPayload,
@@ -47,6 +55,7 @@ import type {
   PayuCredentials,
 } from "../payu.js";
 import { PRODUCT_INFO } from "../types.js";
+import type { PremiumTransactionStatus } from "../types.js";
 import { renderMessagePage, renderPayuForm } from "./pages.js";
 import type { PremiumNotifier } from "../notifications.js";
 
@@ -406,6 +415,13 @@ function registerRoutes(
   });
 
   // The gateway's failure redirect.
+  //
+  // This one used to be the weakest route in the server: it took the
+  // transaction id out of the body or the query string and marked the
+  // transaction failed, with no signature, no origin check and no
+  // merchant check. It is now verified the same way the success route
+  // is — the gateway signs the failure callback too, and the status is
+  // inside the signature, so a failure cannot be forged.
   app.post("/premium_failed", async (request, reply) => {
     const body = readFormBody(request.body);
 
@@ -416,10 +432,18 @@ function registerRoutes(
         .send(renderMessagePage("Bad request", "The form could not be read.", "error"));
     }
 
-    const txnId = body.txnid ?? readQueryString(request.query, "txnId") ?? "";
+    const outcome = await completeFailure({
+      body,
+      queryTxnId: readQueryString(request.query, "txnId"),
+      credentials: dependencies.credentials,
+      origin: request.headers.origin,
+    });
 
-    if (txnId) {
-      await failPremium({ txnId, raw: body });
+    if (!outcome.ok) {
+      return reply
+        .code(outcome.status)
+        .type("text/html")
+        .send(renderMessagePage(outcome.title, outcome.body, "error"));
     }
 
     return reply
@@ -597,7 +621,11 @@ async function completePayment(
 
   // The rows are committed by now. Telling somebody is a separate step,
   // and a failure to tell must not undo the purchase.
-  if (result.outcome === "activated" && input.notify && result.expiresAt) {
+  if (
+    (result.outcome === "activated" || result.outcome === "repaired") &&
+    input.notify &&
+    result.expiresAt
+  ) {
     try {
       await input.notify({
         userId: result.userId,
@@ -617,6 +645,133 @@ async function completePayment(
   }
 
   return { ok: true, result: result.outcome };
+}
+
+/* ------------------------------------------------------------------ *
+ * The shared failure path
+ * ------------------------------------------------------------------ */
+
+interface CompleteFailureInput {
+  readonly body: Record<string, string>;
+  /** The transaction id in the query string, when there was one. */
+  readonly queryTxnId?: string | undefined;
+  readonly credentials: PayuCredentials | null;
+  /** The request's `Origin` header, when it had one. */
+  readonly origin?: string | undefined;
+}
+
+type CompleteFailureOutcome =
+  | {
+      readonly ok: true;
+      readonly status: PremiumTransactionStatus | "unknown_transaction";
+    }
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly title: string;
+      readonly body: string;
+    };
+
+/**
+ * Verifies a failure callback and records the failure.
+ *
+ * The same questions the success route asks, in the same order, with one
+ * difference: the status has to be a **failure**. A callback that says
+ * `success` is not a failure — the success route and the webhook own
+ * that one — and a callback that says nothing at all must not be allowed
+ * to change a transaction.
+ *
+ * Nothing is written until the callback has been verified. That is the
+ * whole point: an unauthenticated request must not be able to flip a
+ * transaction to `failed` or to overwrite the audit data with whatever
+ * JSON it liked.
+ */
+async function completeFailure(
+  input: CompleteFailureInput,
+): Promise<CompleteFailureOutcome> {
+  if (!input.credentials) {
+    return {
+      ok: false,
+      status: 503,
+      title: "Checkout unavailable",
+      body: "The payment gateway is not configured on this server.",
+    };
+  }
+
+  // The transaction id in the body is the signed one, so it is the one
+  // that decides which transaction this is about. The one in the query
+  // string is a hint from the link, and the two have to agree.
+  const txnId = input.body.txnid ?? input.queryTxnId ?? "";
+
+  if (!txnId) {
+    return {
+      ok: false,
+      status: 400,
+      title: "Missing transaction",
+      body: "The callback did not name a transaction.",
+    };
+  }
+
+  if (
+    input.body.txnid &&
+    input.queryTxnId &&
+    input.body.txnid !== input.queryTxnId
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      title: "Transaction mismatch",
+      body: "The callback named a different transaction than the link did.",
+    };
+  }
+
+  const transaction = await findTransaction(txnId);
+
+  if (!transaction) {
+    return {
+      ok: false,
+      status: 404,
+      title: "Unknown transaction",
+      body: "That transaction id is not one of ours.",
+    };
+  }
+
+  const snapshot = transaction.planSnapshot;
+
+  if (!snapshot) {
+    return {
+      ok: false,
+      status: 409,
+      title: "No plan attached",
+      body: "That transaction has no plan attached to it.",
+    };
+  }
+
+  const verification = verifyPayuFailureCallback(readCallback(input.body), {
+    txnId,
+    amount: formatAmount(snapshot.price),
+    credentials: input.credentials,
+    origin: input.origin,
+  });
+
+  if (!verification.ok) {
+    logger.warn(
+      `[Premium] Refused a failure callback for ${txnId}: ${verification.reason}`,
+    );
+
+    return {
+      ok: false,
+      status: verification.code === "wrong_origin" ? 403 : 400,
+      title: "Payment could not be verified",
+      body: verification.reason,
+    };
+  }
+
+  // The transaction becomes `failed` — a conditional update, so a `paid`
+  // transaction is never un-bought, and a failed one can be retried.
+  const status = await failPremium({ txnId, raw: input.body });
+
+  return { ok: true, status };
 }
 
 /* ------------------------------------------------------------------ *

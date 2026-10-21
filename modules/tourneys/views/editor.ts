@@ -33,7 +33,7 @@ import {
   fieldLetter,
 } from "./components.js";
 import { tourneysId } from "./ids.js";
-import type { Panel } from "./handlers.js";
+import type { Panel, PanelComponents } from "./handlers.js";
 
 /**
  * The editor panel.
@@ -157,7 +157,7 @@ export function buildEditorPanel(
     }),
   );
 
-  const rows: Panel["components"] = [];
+  const rows: PanelComponents = [];
 
   for (let index = 0; index < buttons.length; index += 5) {
     rows.push(buttonRow(...buttons.slice(index, index + 5)));

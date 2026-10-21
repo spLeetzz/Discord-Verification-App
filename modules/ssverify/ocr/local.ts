@@ -49,9 +49,11 @@ export interface LocalOcrProviderOptions {
    * Called when the text extraction fails.
    *
    * The provider then answers with empty text. That is deliberately
-   * fail-closed: every text rule in the verification feature rejects a
-   * screenshot whose text is empty, so a broken OCR rejects a screenshot
-   * instead of waving it through.
+   * fail-closed: every rule that checks the text rejects a screenshot whose
+   * text is empty, so a broken OCR rejects a screenshot instead of waving it
+   * through. The `any_ss` type has no rules at all, so a caller that wants
+   * to be certain refuses the screenshot itself — see `isOcrDisabled()` in
+   * `disabled.ts`.
    */
   onError?: (error: Error) => void;
   /** Replaces Tesseract. Used by the tests. */

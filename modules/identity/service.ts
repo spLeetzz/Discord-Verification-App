@@ -14,12 +14,13 @@
 
 import { RateLimiter } from "../../core/ratelimit.js";
 import { PremiumFeature } from "../../core/constants.js";
+import { logger } from "../../utils/logger.js";
 import { assertEntitled } from "../premium/entitlements.js";
 import { FREE_TIER } from "../premium/limits.js";
 import { DEFAULT_DUPLICATE_THRESHOLD } from "../ssverify/ocr/hash.js";
 import * as repo from "./repo.js";
 import * as cache from "./cache.js";
-import { getOcrProvider } from "./ocr.js";
+import { getOcrProvider, isOcrAvailable } from "./ocr.js";
 import { findDuplicate, submissionJumpUrl } from "./duplicate.js";
 import type { DuplicateMatch } from "./duplicate.js";
 import { verifyScreenshot } from "./verification.js";
@@ -240,7 +241,19 @@ export async function createSsConfig(input: {
   // so cancelling the wizard left a half-configured channel running (B11).
   cache.cacheChannel("ssverify", input.channelId);
 
-  const created = await repo.findSsConfigById(id);
+  // The automatic half of the OCR decision is made at boot, so a setup that
+  // is created after the boot does not switch the OCR on. Say so, rather
+  // than leaving the guild with a refusal it cannot explain.
+  if (!isOcrAvailable()) {
+    logger.warn(
+      "[Identity] A screenshot-verification setup was created, but the OCR " +
+        "is switched off. Screenshots will be refused until the bot is " +
+        "restarted with OCR_ENABLED=true, or until a setup exists when it " +
+        "starts.",
+    );
+  }
+
+  const created = await repo.findSsConfigById(input.guildId, id);
 
   if (!created) {
     throw new Error("the screenshot-verification setup was created but could not be read back");
@@ -255,19 +268,26 @@ export async function createSsConfig(input: {
  * The patch is an explicit list of fields (B18): the source wrote
  * `dict(self.record)` and relied on Tortoise internals to leave the right
  * columns alone.
+ *
+ * The guild is part of the key: a setup of another server is not written,
+ * whatever the row id says.
  */
 export async function updateSsConfig(
+  guildId: string,
   id: string,
   patch: repo.SsConfigPatch,
 ): Promise<void> {
-  await repo.updateSsConfig(id, patch);
+  await repo.updateSsConfig(guildId, id, patch);
 }
 
 /** Removes a setup and everything that belongs to it. */
-export async function deleteSsConfig(id: string): Promise<void> {
-  const existing = await repo.findSsConfigById(id);
+export async function deleteSsConfig(
+  guildId: string,
+  id: string,
+): Promise<void> {
+  const existing = await repo.findSsConfigById(guildId, id);
 
-  await repo.deleteSsConfig(id);
+  await repo.deleteSsConfig(guildId, id);
 
   if (existing) {
     cache.uncacheChannel("ssverify", existing.channelId);
@@ -279,9 +299,18 @@ export async function listSsConfigs(guildId: string): Promise<SsConfig[]> {
   return repo.listSsConfigs(guildId);
 }
 
-/** One setup, by its row id. */
-export async function findSsConfig(id: string): Promise<SsConfig | null> {
-  return repo.findSsConfigById(id);
+/**
+ * One setup, by its row id **and** its guild.
+ *
+ * A setup of another guild is not found: the panel's buttons carry a row
+ * id, and the row id alone must never be enough to reach another
+ * server's configuration.
+ */
+export async function findSsConfig(
+  guildId: string,
+  id: string,
+): Promise<SsConfig | null> {
+  return repo.findSsConfigById(guildId, id);
 }
 
 /** One setup, by its channel id. */
@@ -370,6 +399,16 @@ export interface SubmissionOutcome {
 }
 
 /**
+ * What the bot says when the OCR is switched off.
+ *
+ * A refusal the member can understand, in the voice of the other answers.
+ * Not a crash and not a silent pass: the screenshot was not accepted, and
+ * this is why.
+ */
+export const OCR_UNAVAILABLE_MESSAGE =
+  "**Screenshot verification is not currently available. Please try again later.**";
+
+/**
  * Checks the screenshots of one message and records the good ones.
  *
  * The order is Quotient's:
@@ -382,12 +421,38 @@ export interface SubmissionOutcome {
  * The stored submissions are re-read after every accepted screenshot, so a
  * second screenshot in the same message cannot be a duplicate of the first
  * one.
+ *
+ * ## The OCR being off refuses the submission
+ *
+ * When the OCR is switched off the submission is refused **before** the
+ * duplicate check and before the rules run, and **nothing is stored**: no
+ * submission row, and no hash.
+ *
+ * The refusal cannot be left to the rules. An `any_ss` setup has no rules
+ * at all, and a `loco` or `rooter` setup whose channel name is empty has
+ * none that look at the text — so an empty text would be *accepted* there.
+ * The switched-off provider's zero hashes are the hash of nothing, and a
+ * hash of nothing must never reach the database.
  */
 export async function processSubmission(
   config: SsConfig,
   authorId: string,
   images: readonly SubmittedImage[],
 ): Promise<SubmissionOutcome> {
+  // The OCR is off, or was never decided on. The submission is refused
+  // outright: there is nothing to check the screenshot against, and a
+  // screenshot that cannot be checked must not be accepted.
+  if (!isOcrAvailable()) {
+    return {
+      accepted: 0,
+      lines: [OCR_UNAVAILABLE_MESSAGE],
+      submitted: await repo.countSsSubmissions(config.id, authorId),
+      // A refused submission verifies nobody: nothing was accepted, so
+      // nothing was verified.
+      verified: false,
+    };
+  }
+
   const provider = getOcrProvider();
 
   const stored = await repo.listSsSubmissions(config.id);

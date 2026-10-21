@@ -330,8 +330,11 @@ describe("the other types", () => {
 
 describe("the matrix", () => {
   it("refuses an empty text", () => {
-    // A broken OCR produces an empty text, and an empty text must be
-    // refused rather than waved through.
+    // A broken OCR produces an empty text, and for these two types an
+    // empty text is refused rather than waved through. It is not the case
+    // for *every* type — `any_ss` has no rules at all — which is why the
+    // submission is refused outright when the OCR is known to be off (see
+    // `ocr.test.ts`).
     expect(verifyScreenshot(youtube, ocr("")).ok).toBe(false);
     expect(verifyScreenshot(instagram, ocr("")).ok).toBe(false);
   });

@@ -13,17 +13,22 @@
  * reminders" and then showed **every** running reminder, soonest first.
  * It is now the ten latest, latest first, and the wording says what it
  * does.
+ *
+ * The reminder's own text is the member's, and it comes back out in the
+ * confirmation and in the list, so it is escaped before it is posted: a
+ * reminder whose text is `@everyone` must not ping the server.
  */
 
 import { SlashCommandBuilder } from "discord.js";
 import type { ChatInputCommandInteraction } from "discord.js";
-import { respond } from "../../../core/context.js";
 import { InputError } from "../../../core/errors.js";
+import { escapeMentions } from "../../../core/escape.js";
 import { Paginator } from "../../../core/paginator.js";
 import { discordTimestamp } from "../../../core/time.js";
-import { truncate } from "../../../core/text.js";
+import { plural, truncate } from "../../../core/text.js";
 import { readReminder } from "../rules.js";
 import * as service from "../service.js";
+import { respondSafe } from "../views/reply.js";
 import { requireGuild, runCommand } from "./shared.js";
 import type { CommunityCommand } from "./shared.js";
 
@@ -56,6 +61,19 @@ const reminderCommand: CommunityCommand = {
     )
     .addSubcommand((sub) =>
       sub.setName("list").setDescription("Show your running reminders."),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("delete")
+        .setDescription("Delete one of your running reminders, or all of them.")
+        .addStringOption((option) =>
+          option
+            .setName("id")
+            .setDescription(
+              "The id of the reminder, as `/reminder list` shows it. Leave it out to delete all of them.",
+            )
+            .setMaxLength(64),
+        ),
     ),
 
   async execute(interaction) {
@@ -66,6 +84,9 @@ const reminderCommand: CommunityCommand = {
           return;
         case "list":
           await listReminders(interaction);
+          return;
+        case "delete":
+          await deleteReminders(interaction);
           return;
         default:
           throw new InputError("I do not know that reminder command.");
@@ -101,8 +122,50 @@ async function setReminder(
     dueAt: reminder.time,
   });
 
-  await respond(interaction, {
-    content: `Alright **${interaction.user.username}**, I'll remind you ${discordTimestamp(reminder.time)}: ${reminder.message}`,
+  // The message is the member's own text and it is posted as content,
+  // so it is escaped: a reminder whose text is `@everyone` must not ping
+  // the server. The reply allows no mentions either.
+  await respondSafe(interaction, {
+    content: `Alright **${interaction.user.username}**, I'll remind you ${discordTimestamp(reminder.time)}: ${escapeMentions(reminder.message)}`,
+  });
+}
+
+/**
+ * Deletes one of the caller's running reminders, or all of them.
+ *
+ * The allowance of running reminders is a number, and a member at the
+ * number has to be able to make room: without a way to delete one, the
+ * allowance would be a trap.
+ */
+async function deleteReminders(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const userId = interaction.user.id;
+
+  const id = interaction.options.getString("id");
+
+  if (id) {
+    const deleted = await service.deleteReminder({ id, userId });
+
+    if (!deleted) {
+      throw new InputError(
+        "That reminder is not one of yours, or it has already fired.",
+      );
+    }
+
+    await respondSafe(interaction, { content: "Deleted that reminder." });
+
+    return;
+  }
+
+  const count = await service.deleteReminders(userId);
+
+  if (count === 0) {
+    throw new InputError("You have no running reminders.");
+  }
+
+  await respondSafe(interaction, {
+    content: `Deleted ${plural(count, "reminder")}.`,
   });
 }
 

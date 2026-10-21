@@ -23,7 +23,8 @@
  */
 
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { db, withTransaction } from "../../db/client.js";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { db, schema, withTransaction } from "../../db/client.js";
 import {
   guildEntitlements,
   guildSettings,
@@ -41,6 +42,17 @@ import type {
 /** A day in milliseconds. Subscriptions are whole days (S12). */
 export const DAY_MS = 86_400_000;
 
+/**
+ * A handle that can run statements.
+ *
+ * Either the pool (`db`) or a transaction handle. Every write below takes
+ * one as an optional last argument, so the same statement can be run
+ * inside a transaction or on its own — and the premium grant can put the
+ * state change and the entitlements in **one** transaction, which is the
+ * only way they cannot drift apart.
+ */
+export type DbExecutor = NodePgDatabase<typeof schema>;
+
 /* ------------------------------------------------------------------ *
  * Entitlements
  * ------------------------------------------------------------------ */
@@ -53,8 +65,9 @@ export const DAY_MS = 86_400_000;
 export async function findEntitlement(
   guildId: string,
   feature: EntitlementFeature,
+  executor: DbExecutor = db,
 ): Promise<EntitlementRow | null> {
-  const [row] = await db
+  const [row] = await executor
     .select({
       guildId: guildEntitlements.guildId,
       feature: guildEntitlements.feature,
@@ -77,8 +90,9 @@ export async function findEntitlement(
 /** Reads every entitlement row a guild holds. */
 export async function listEntitlements(
   guildId: string,
+  executor: DbExecutor = db,
 ): Promise<EntitlementRow[]> {
-  const rows = await db
+  const rows = await executor
     .select({
       guildId: guildEntitlements.guildId,
       feature: guildEntitlements.feature,
@@ -99,14 +113,17 @@ export async function listEntitlements(
  * The primary key is `(guild_id, feature)`, so this is an upsert: granting
  * a feature twice updates the one row rather than making a second.
  */
-export async function upsertEntitlement(input: {
-  guildId: string;
-  feature: EntitlementFeature;
-  enabled: boolean;
-  expiresAt: Date | null;
-  source: EntitlementSource;
-}): Promise<void> {
-  await db
+export async function upsertEntitlement(
+  input: {
+    guildId: string;
+    feature: EntitlementFeature;
+    enabled: boolean;
+    expiresAt: Date | null;
+    source: EntitlementSource;
+  },
+  executor: DbExecutor = db,
+): Promise<void> {
+  await executor
     .insert(guildEntitlements)
     .values({
       guildId: input.guildId,
@@ -263,14 +280,17 @@ export async function listTransactionsForUser(
  *
  * @returns `true` when the row was updated.
  */
-export async function markTransactionPaid(input: {
-  txnId: string;
-  email: string | null;
-  buyerName: string | null;
-  rawData: Record<string, unknown>;
-  paidAt: Date;
-}): Promise<boolean> {
-  const updated = await db
+export async function markTransactionPaid(
+  input: {
+    txnId: string;
+    email: string | null;
+    buyerName: string | null;
+    rawData: Record<string, unknown>;
+    paidAt: Date;
+  },
+  executor: DbExecutor = db,
+): Promise<boolean> {
+  const updated = await executor
     .update(premiumTransactions)
     .set({
       status: "paid",
@@ -299,11 +319,14 @@ export async function markTransactionPaid(input: {
  *
  * @returns `true` when the row was updated.
  */
-export async function markTransactionFailed(input: {
-  txnId: string;
-  rawData: Record<string, unknown>;
-}): Promise<boolean> {
-  const updated = await db
+export async function markTransactionFailed(
+  input: {
+    txnId: string;
+    rawData: Record<string, unknown>;
+  },
+  executor: DbExecutor = db,
+): Promise<boolean> {
+  const updated = await executor
     .update(premiumTransactions)
     .set({
       status: "failed",
@@ -347,20 +370,27 @@ export async function retryTransaction(txnId: string): Promise<boolean> {
  * ------------------------------------------------------------------ */
 
 /** The guild's settings row, creating it if it does not exist yet. */
-export async function ensureGuildSettings(guildId: string): Promise<void> {
-  await db.insert(guildSettings).values({ guildId }).onConflictDoNothing();
+export async function ensureGuildSettings(
+  guildId: string,
+  executor: DbExecutor = db,
+): Promise<void> {
+  await executor.insert(guildSettings).values({ guildId }).onConflictDoNothing();
 }
 
 /** The user's settings row, creating it if it does not exist yet. */
-export async function ensureUserSettings(userId: string): Promise<void> {
-  await db.insert(userSettings).values({ userId }).onConflictDoNothing();
+export async function ensureUserSettings(
+  userId: string,
+  executor: DbExecutor = db,
+): Promise<void> {
+  await executor.insert(userSettings).values({ userId }).onConflictDoNothing();
 }
 
 /** Reads the guild's settings row. */
 export async function getGuildSettings(
   guildId: string,
+  executor: DbExecutor = db,
 ): Promise<GuildSettingsRow | null> {
-  const [row] = await db
+  const [row] = await executor
     .select({
       guildId: guildSettings.guildId,
       premiumExpiresAt: guildSettings.premiumExpiresAt,
@@ -373,11 +403,38 @@ export async function getGuildSettings(
   return row ?? null;
 }
 
+/**
+ * Reads the guild's settings row **and holds the lock** on it.
+ *
+ * The lock is what makes two purchases for the same guild safe: without
+ * it both would read the same expiry and both would extend it, and one
+ * of the two subscriptions would be lost. It is taken after the
+ * transaction row and before it is released, so every writer takes the
+ * locks in the same order and two of them cannot deadlock.
+ */
+export async function lockGuildSettings(
+  guildId: string,
+  executor: DbExecutor = db,
+): Promise<GuildSettingsRow | null> {
+  const [row] = await executor
+    .select({
+      guildId: guildSettings.guildId,
+      premiumExpiresAt: guildSettings.premiumExpiresAt,
+      madePremiumBy: guildSettings.madePremiumBy,
+    })
+    .from(guildSettings)
+    .where(eq(guildSettings.guildId, guildId))
+    .for("update");
+
+  return row ?? null;
+}
+
 /** Reads the user's settings row. */
 export async function getUserSettings(
   userId: string,
+  executor: DbExecutor = db,
 ): Promise<UserSettingsRow | null> {
-  const [row] = await db
+  const [row] = await executor
     .select({
       userId: userSettings.userId,
       isPremium: userSettings.isPremium,
@@ -398,11 +455,14 @@ export async function getUserSettings(
  * counter, and it is incremented in SQL so two purchases cannot lose one
  * between them.
  */
-export async function setUserPremium(input: {
-  userId: string;
-  expiresAt: Date;
-}): Promise<void> {
-  await db
+export async function setUserPremium(
+  input: {
+    userId: string;
+    expiresAt: Date;
+  },
+  executor: DbExecutor = db,
+): Promise<void> {
+  await executor
     .update(userSettings)
     .set({
       isPremium: true,
@@ -413,17 +473,99 @@ export async function setUserPremium(input: {
     .where(eq(userSettings.userId, input.userId));
 }
 
+/**
+ * Puts the user's subscription summary back without counting it twice.
+ *
+ * This is the repair path: a purchase that was paid for but whose rows
+ * never landed. The counter is **not** touched — the purchase has already
+ * been counted by the grant that did land, and counting it again would
+ * report a subscription the user does not hold.
+ */
+export async function restoreUserPremium(
+  input: {
+    userId: string;
+    expiresAt: Date;
+  },
+  executor: DbExecutor = db,
+): Promise<void> {
+  await executor
+    .update(userSettings)
+    .set({
+      isPremium: true,
+      // `greatest` ignores nulls, and never shortens: a subscription the
+      // user holds for another server may run longer than this one.
+      premiumExpireTime: sql`greatest(${userSettings.premiumExpireTime}, ${input.expiresAt})`,
+      updatedAt: new Date(),
+    })
+    .where(eq(userSettings.userId, input.userId));
+}
+
+/**
+ * Counts the user's paid transactions and puts the counter back.
+ *
+ * `user_settings.premiums` is a summary of the purchases, and
+ * `premium_transactions` is the record of them. A repair that put a
+ * purchase back together but left the counter short would show the buyer
+ * a subscription they hold and a count that says they bought nothing.
+ *
+ * The count is only ever raised, never lowered: the counter may carry a
+ * value from before this bot kept transactions, and a repair must not
+ * take it away.
+ */
+export async function recountUserPremiums(
+  userId: string,
+  executor: DbExecutor = db,
+): Promise<void> {
+  await executor
+    .update(userSettings)
+    .set({
+      premiums: sql`greatest(${userSettings.premiums}, (select count(*)::int from ${premiumTransactions} where ${premiumTransactions.userId} = ${userId} and ${premiumTransactions.status} = 'paid'))`,
+      updatedAt: new Date(),
+    })
+    .where(eq(userSettings.userId, userId));
+}
+
 /** Records the subscription on the guild's row. */
-export async function setGuildPremium(input: {
-  guildId: string;
-  expiresAt: Date;
-  madePremiumBy: string;
-}): Promise<void> {
-  await db
+export async function setGuildPremium(
+  input: {
+    guildId: string;
+    expiresAt: Date;
+    madePremiumBy: string;
+  },
+  executor: DbExecutor = db,
+): Promise<void> {
+  await executor
     .update(guildSettings)
     .set({
       premiumExpiresAt: input.expiresAt,
       madePremiumBy: input.madePremiumBy,
+      updatedAt: new Date(),
+    })
+    .where(eq(guildSettings.guildId, input.guildId));
+}
+
+/**
+ * Puts the guild's subscription summary back without taking anything away.
+ *
+ * The repair path again: the expiry is only ever moved **later** (a guild
+ * that holds a longer subscription keeps it), and the buyer is only
+ * recorded when nobody has been recorded yet — a repair must not
+ * overwrite the name of whoever bought the subscription that is actually
+ * running.
+ */
+export async function restoreGuildPremium(
+  input: {
+    guildId: string;
+    expiresAt: Date;
+    madePremiumBy: string;
+  },
+  executor: DbExecutor = db,
+): Promise<void> {
+  await executor
+    .update(guildSettings)
+    .set({
+      premiumExpiresAt: sql`greatest(${guildSettings.premiumExpiresAt}, ${input.expiresAt})`,
+      madePremiumBy: sql`coalesce(${guildSettings.madePremiumBy}, ${input.madePremiumBy})`,
       updatedAt: new Date(),
     })
     .where(eq(guildSettings.guildId, input.guildId));
@@ -558,12 +700,16 @@ const transactionColumns = {
  * same transaction safe: the second one waits for the first to commit and
  * then sees the row already `paid`.
  *
+ * The handle is handed to `fn` as well, so **every** statement the
+ * callback runs can be made on the same connection — the state change and
+ * the grant then commit together or not at all.
+ *
  * @returns whatever `fn` returned, or `null` when the transaction does
  *          not exist.
  */
 export async function withLockedTransaction<T>(
   txnId: string,
-  fn: (transaction: TransactionRow) => Promise<T>,
+  fn: (transaction: TransactionRow, tx: DbExecutor) => Promise<T>,
 ): Promise<T | null> {
   return withTransaction(async (tx) => {
     const [row] = await tx
@@ -574,6 +720,6 @@ export async function withLockedTransaction<T>(
 
     if (!row) return null;
 
-    return fn(toTransactionRow(row));
+    return fn(toTransactionRow(row), tx);
   });
 }

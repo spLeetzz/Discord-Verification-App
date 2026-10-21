@@ -22,9 +22,13 @@
  * The wizard carries a **token** rather than a record id, because the
  * tournament does not exist yet: it is state with no database row, which
  * is exactly what D18 says a token is for.
+ *
+ * `tourneys:idp_copy` is the one id with no record at all: the room
+ * credentials are read back out of the message the button is attached to,
+ * so there is nothing else to point at.
  */
 
-import { makeCustomId } from "../../core/custom-id.js";
+import { makeCustomId } from "../../../core/custom-id.js";
 
 /** The prefix every tourneys custom id starts with. */
 export const TOURNEYS_PREFIX = "tourneys";
@@ -43,10 +47,12 @@ export const TOURNEYS_ACTIONS = [
   "slotm",
   "slotm_cancel",
   "slotm_rename",
+  "slotm_pick",
   "slotm_swap",
   "partner",
   "partner_add",
   "partner_remove",
+  "idp_copy",
   "modal",
   "select",
 ] as const;

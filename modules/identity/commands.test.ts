@@ -85,6 +85,15 @@ describe("the three commands", () => {
   });
 });
 
+describe("the screenshot-verification command", () => {
+  it("answers ephemerally", () => {
+    // The panel is a moderator's control panel: its buttons delete a
+    // server's verification setup, repoint the channel the bot reads and
+    // change the role the bot grants. It does not belong in the channel.
+    expect(ssVerifyCommand.ephemeral).toBe(true);
+  });
+});
+
 describe("the adapter files", () => {
   it("are found by the loader", () => {
     const files = listCommandFiles(categoryPath);

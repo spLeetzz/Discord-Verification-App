@@ -17,10 +17,30 @@
  *    and the message being edited.
  *
  * The two never share a custom id and never share a handler: the wizard's
- * ids start with `identity:ssmod:setup:` and the editor's with
+ * ids start with `identity:ssmod:wizard:` and the editor's with
  * `identity:ssmod:`. The router matches on segment boundaries and the more
  * specific prefix is registered first, so a wizard id is never mistaken
  * for an editor id.
+ *
+ * The wizard's prefix is `wizard` and not `setup` because the list panel
+ * has a **Setup** button whose id is `identity:ssmod:setup` — and the
+ * router takes the first prefix that matches, so a wizard prefix of
+ * `identity:ssmod:setup` swallowed that button and it never did anything.
+ *
+ * ## Who may press the buttons
+ *
+ * The panel is a **control panel**: its buttons delete a server's
+ * verification setup, repoint the channel the bot reads, change the role
+ * the bot grants, and set the text and the link the bot posts. It is
+ * opened by a moderator, but it is a **message** — anybody who can read
+ * the channel can press its buttons.
+ *
+ * So every handler checks the caller itself, before the setup is read or
+ * written (`../guards.ts`): the caller must be a moderator of the guild
+ * the interaction came from, and the setup must belong to **that** guild.
+ * The second half is the lookup's job — every read and every write of a
+ * setup is keyed by the guild *and* the row id — and the wizard's draft
+ * remembers the guild it was started in.
  *
  * ## What was fixed rather than ported
  *
@@ -37,6 +57,14 @@
  *    live set as soon as the channel was picked, so cancelling left a
  *    half-configured channel running. The channel only goes live when the
  *    setup is saved.
+ *  - **The panel had no authorisation at all.** Every handler answered
+ *    anybody: an ordinary member could delete the server's setup, repoint
+ *    the channel and change the role the bot grants. The callers are
+ *    checked now, and the rows are looked up in a guild.
+ *  - **Two buttons did nothing.** The list panel's **Setup** button was
+ *    swallowed by the wizard's prefix, and the wizard's **Save & setup**
+ *    and **Cancel** buttons carried the editor's prefix, so the wizard
+ *    could never be saved.
  */
 
 import {
@@ -57,6 +85,7 @@ import type {
   ButtonInteraction,
   MessageActionRowComponentBuilder,
   ModalSubmitInteraction,
+  RepliableInteraction,
 } from "discord.js";
 import { TokenStore } from "../../../core/custom-id.js";
 import { makeCustomId } from "../../../core/custom-id.js";
@@ -64,6 +93,7 @@ import { EMBED_COLOR, ERROR_COLOR } from "../../../core/constants.js";
 import { respond } from "../../../core/context.js";
 import { errorMessage } from "../../../utils/errors.js";
 import { logger } from "../../../utils/logger.js";
+import { canManageSsConfig } from "../guards.js";
 import * as service from "../service.js";
 import type { ScreenshotType, SsConfig } from "../types.js";
 import { SCREENSHOT_TYPE_LABELS } from "../types.js";
@@ -75,8 +105,15 @@ import { SCREENSHOT_TYPE_LABELS } from "../types.js";
 /** The prefix of every id of this panel. */
 export const SSMOD_PREFIX = "identity:ssmod";
 
-/** The prefix of the **wizard's** ids. Registered before {@link SSMOD_PREFIX}. */
-export const SSMOD_SETUP_PREFIX = "identity:ssmod:setup";
+/**
+ * The prefix of the **wizard's** ids. Registered before {@link SSMOD_PREFIX}.
+ *
+ * The wizard's prefix is `wizard` and not `setup`, because the list panel
+ * has a **Setup** button whose id is `identity:ssmod:setup` — and the
+ * router takes the first prefix that matches, so a wizard prefix of
+ * `identity:ssmod:setup` swallowed that button and it never did anything.
+ */
+export const SSMOD_WIZARD_PREFIX = "identity:ssmod:wizard";
 
 /** The actions the panel understands. */
 export const SSMOD_ACTIONS = {
@@ -123,7 +160,7 @@ export function ssModCustomId(
   target?: string,
   setup = false,
 ): string {
-  const prefix = setup ? "setup:" : "";
+  const prefix = setup ? "wizard:" : "";
 
   const payload =
     target === undefined ? `${prefix}${action}` : `${prefix}${action}:${target}`;
@@ -189,22 +226,45 @@ export function emptySsDraft(): SsDraft {
  *
  * A wizard has no database row yet, so its state is a token (D18).
  */
-const drafts = new TokenStore<SsDraft>();
+const drafts = new TokenStore<SsWizard>();
+
+/**
+ * A wizard that is open.
+ *
+ * The guild is part of it: a wizard belongs to the server it was started
+ * in, and a draft is never carried from one server to another. Without
+ * it, a member of another server who saw the panel could drive the
+ * wizard, and the setup would be created in **their** server.
+ */
+export interface SsWizard {
+  /** The guild the wizard was started in. */
+  readonly guildId: string;
+  /** The draft itself. */
+  readonly draft: SsDraft;
+}
 
 /**
  * Opens a wizard.
  *
+ * @param guildId the guild the wizard belongs to.
  * @returns the token that goes into the custom ids.
  */
-export function startSsWizard(): string {
-  return drafts.issue(emptySsDraft());
+export function startSsWizard(guildId: string): string {
+  return drafts.issue({ guildId, draft: emptySsDraft() });
+}
+
+/**
+ * Reads a wizard.
+ */
+export function readSsWizard(token: string): SsWizard | undefined {
+  return drafts.get(token);
 }
 
 /**
  * Reads a draft.
  */
 export function readSsDraft(token: string): SsDraft | undefined {
-  return drafts.get(token);
+  return drafts.get(token)?.draft;
 }
 
 /**
@@ -220,7 +280,7 @@ export function writeSsDraft(token: string, draft: SsDraft): void {
 
   if (!stored) return;
 
-  Object.assign(stored, draft);
+  Object.assign(stored.draft, draft);
 }
 
 /**
@@ -422,12 +482,15 @@ export function buildSsPanel(target: SsTarget): SsPanel {
     components.push(
       new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(ssModCustomId(SSMOD_ACTIONS.save, id))
+          // The wizard's own buttons carry the wizard's prefix, like every
+          // other button of the wizard. Without it they were the editor's
+          // ids, and the wizard could never be saved.
+          .setCustomId(ssModCustomId(SSMOD_ACTIONS.save, id, true))
           .setLabel("Save & setup")
           .setStyle(ButtonStyle.Success)
           .setDisabled(!isDraftComplete(target.draft)),
         new ButtonBuilder()
-          .setCustomId(ssModCustomId(SSMOD_ACTIONS.close, id))
+          .setCustomId(ssModCustomId(SSMOD_ACTIONS.close, id, true))
           .setLabel("Cancel")
           .setStyle(ButtonStyle.Danger),
       ),
@@ -674,13 +737,15 @@ export type ResolvedTarget =
   | {
       readonly kind: "setup";
       readonly token: string;
-      readonly guildId: string | null;
+      /** The guild the wizard belongs to. */
+      readonly guildId: string;
       readonly draft: SsDraft;
       keywords(): readonly string[];
     }
   | {
       readonly kind: "edit";
       readonly configId: string;
+      /** The guild the setup belongs to. */
       readonly guildId: string;
       config: SsConfig;
       keywords(): readonly string[];
@@ -688,31 +753,44 @@ export type ResolvedTarget =
 
 /**
  * Resolves a wizard's token.
+ *
+ * The wizard belongs to the guild it was started in, so a token that is
+ * used from another server resolves to nothing. The guild the caller is
+ * acting in is the one that is compared — the caller has already been
+ * checked against it.
  */
 export function resolveSetupTarget(
   token: string,
   guildId: string | null,
 ): ResolvedTarget | null {
-  const draft = readSsDraft(token);
+  const wizard = readSsWizard(token);
 
-  if (!draft) return null;
+  if (!wizard) return null;
+
+  if (wizard.guildId !== guildId) return null;
 
   return {
     kind: "setup",
     token,
-    guildId,
-    draft,
-    keywords: () => draft.keywords,
+    guildId: wizard.guildId,
+    draft: wizard.draft,
+    keywords: () => wizard.draft.keywords,
   };
 }
 
 /**
- * Resolves a setup's row id.
+ * Resolves a setup's row id, **in a guild**.
+ *
+ * The lookup is scoped: a setup of another server is not found, so a row
+ * id on its own never reaches another guild's configuration.
  */
 export async function resolveEditTarget(
+  guildId: string | null,
   configId: string,
 ): Promise<ResolvedTarget | null> {
-  const config = await service.findSsConfig(configId);
+  if (!guildId) return null;
+
+  const config = await service.findSsConfig(guildId, configId);
 
   if (!config) return null;
 
@@ -730,9 +808,31 @@ export async function resolveEditTarget(
  * ------------------------------------------------------------------ */
 
 /**
+ * Refuses an interaction from somebody who may not manage the setups.
+ *
+ * The check comes **before** the configuration is read or written: a
+ * member who may not manage the setups must not be able to change them,
+ * and must not learn anything about them either.
+ *
+ * @returns whether the interaction was refused.
+ */
+async function refuseSsMod(
+  interaction: RepliableInteraction,
+  guildId: string | null,
+): Promise<boolean> {
+  const refusal = await canManageSsConfig(interaction, guildId);
+
+  if (!refusal) return false;
+
+  await respond(interaction, { content: refusal }, true);
+
+  return true;
+}
+
+/**
  * Answers a button of the **wizard**.
  *
- * Registered for the prefix `identity:ssmod:setup`.
+ * Registered for the prefix `identity:ssmod:wizard`.
  */
 export async function handleSsSetupButton(
   interaction: ButtonInteraction,
@@ -740,10 +840,12 @@ export async function handleSsSetupButton(
 ): Promise<void> {
   const { action, target } = parseSsModPayload(payload);
 
+  // The authorisation comes first. The panel is a message, so anybody who
+  // can read the channel can press its buttons.
+  if (await refuseSsMod(interaction, interaction.guildId)) return;
+
   try {
     switch (action) {
-      case SSMOD_ACTIONS.setup:
-        return await startWizard(interaction);
       case SSMOD_ACTIONS.save:
         return await saveWizard(interaction, target);
       case SSMOD_ACTIONS.close:
@@ -772,6 +874,8 @@ export async function handleSsSetupSelect(
   payload: string | null,
 ): Promise<void> {
   const { action, target } = parseSsModPayload(payload);
+
+  if (await refuseSsMod(interaction, interaction.guildId)) return;
 
   const resolved = resolveSetupTarget(target ?? "", interaction.guildId);
 
@@ -831,12 +935,19 @@ export async function handleSsSetupSelect(
 
 /**
  * Answers a modal of the **wizard**.
+ *
+ * A modal is only shown to the person who pressed the button that opened
+ * it, so it is owner-only by Discord's own doing — but the guild check
+ * still applies: a moderator may have opened a modal on a setup of
+ * another server.
  */
 export async function handleSsSetupModal(
   interaction: ModalSubmitInteraction,
   payload: string | null,
 ): Promise<void> {
   const { action, target } = parseSsModPayload(payload);
+
+  if (await refuseSsMod(interaction, interaction.guildId)) return;
 
   const resolved = resolveSetupTarget(target ?? "", interaction.guildId);
 
@@ -885,8 +996,14 @@ export async function handleSsModButton(
 ): Promise<void> {
   const { action, target } = parseSsModPayload(payload);
 
+  // The authorisation comes first — before the setup is read, before it is
+  // written, and before the panel is even opened.
+  if (await refuseSsMod(interaction, interaction.guildId)) return;
+
   try {
     switch (action) {
+      case SSMOD_ACTIONS.setup:
+        return await startWizard(interaction);
       case SSMOD_ACTIONS.edit:
         return await openEditor(interaction, target);
       case SSMOD_ACTIONS.faq:
@@ -922,7 +1039,11 @@ export async function handleSsModSelect(
 ): Promise<void> {
   const { action, target } = parseSsModPayload(payload);
 
-  const resolved = await resolveEditTarget(target ?? "");
+  if (await refuseSsMod(interaction, interaction.guildId)) return;
+
+  // The setup is looked up **in the caller's guild**, so a row id of
+  // another server is not found and cannot be changed.
+  const resolved = await resolveEditTarget(interaction.guildId, target ?? "");
 
   if (!resolved) {
     await respond(
@@ -980,6 +1101,12 @@ export async function handleSsModSelect(
 
 /**
  * Answers a modal of the **editor**.
+ *
+ * A modal is only shown to the person who pressed the button that opened
+ * it, so it is owner-only by Discord's own doing — but the guild check
+ * still applies: a moderator may have opened a modal on a setup of
+ * another server, and the row id in the modal's custom id is not a
+ * permission.
  */
 export async function handleSsModModal(
   interaction: ModalSubmitInteraction,
@@ -987,7 +1114,9 @@ export async function handleSsModModal(
 ): Promise<void> {
   const { action, target } = parseSsModPayload(payload);
 
-  const resolved = await resolveEditTarget(target ?? "");
+  if (await refuseSsMod(interaction, interaction.guildId)) return;
+
+  const resolved = await resolveEditTarget(interaction.guildId, target ?? "");
 
   if (!resolved) {
     await respond(
@@ -1036,7 +1165,9 @@ async function startWizard(interaction: ButtonInteraction): Promise<void> {
   // a setup that cannot be saved.
   await service.assertSsConfigAllowance(guildId);
 
-  const token = startSsWizard();
+  // The wizard belongs to this guild, so it cannot be driven from another
+  // one.
+  const token = startSsWizard(guildId);
 
   const panel = buildSsPanel({
     kind: "setup",
@@ -1076,6 +1207,20 @@ async function saveWizard(
 
   if (!guildId) {
     await respond(interaction, { content: "This only works in a server." }, true);
+
+    return;
+  }
+
+  // The wizard belongs to the guild it was started in. A wizard that
+  // belongs to another server is not saved here.
+  const wizard = readSsWizard(target);
+
+  if (!wizard || wizard.guildId !== guildId) {
+    await respond(
+      interaction,
+      { content: "This wizard belongs to another server." },
+      true,
+    );
 
     return;
   }
@@ -1126,7 +1271,17 @@ async function openEditor(
     return;
   }
 
-  const config = await service.findSsConfig(configId);
+  const guildId = interaction.guildId;
+
+  if (!guildId) {
+    await respond(interaction, { content: "This only works in a server." }, true);
+
+    return;
+  }
+
+  // The setup is looked up **in the caller's guild**: a row id of another
+  // server is not found.
+  const config = await service.findSsConfig(guildId, configId);
 
   if (!config) {
     await respond(
@@ -1158,7 +1313,7 @@ async function toggleAllowSame(
 
   const resolved =
     resolveSetupTarget(target, interaction.guildId) ??
-    (await resolveEditTarget(target));
+    (await resolveEditTarget(interaction.guildId, target));
 
   if (!resolved) {
     await respond(
@@ -1175,7 +1330,7 @@ async function toggleAllowSame(
 
     writeSsDraft(resolved.token, resolved.draft);
   } else {
-    await service.updateSsConfig(resolved.configId, {
+    await service.updateSsConfig(resolved.guildId, resolved.configId, {
       allowSame: !resolved.config.allowSame,
     });
 
@@ -1200,7 +1355,7 @@ async function openPageDetailsModal(
 
   const resolved =
     resolveSetupTarget(target, interaction.guildId) ??
-    (await resolveEditTarget(target));
+    (await resolveEditTarget(interaction.guildId, target));
 
   if (!resolved) {
     await respond(
@@ -1240,7 +1395,7 @@ async function openSuccessMessageModal(
 
   const resolved =
     resolveSetupTarget(target, interaction.guildId) ??
-    (await resolveEditTarget(target));
+    (await resolveEditTarget(interaction.guildId, target));
 
   if (!resolved) {
     await respond(
@@ -1272,7 +1427,17 @@ async function deleteSetup(
     return;
   }
 
-  const config = await service.findSsConfig(target);
+  const guildId = interaction.guildId;
+
+  if (!guildId) {
+    await respond(interaction, { content: "This only works in a server." }, true);
+
+    return;
+  }
+
+  // The setup is looked up **in the caller's guild**: a row id of another
+  // server is not found, so it cannot be deleted.
+  const config = await service.findSsConfig(guildId, target);
 
   if (!config) {
     await respond(
@@ -1284,7 +1449,7 @@ async function deleteSetup(
     return;
   }
 
-  await service.deleteSsConfig(config.id);
+  await service.deleteSsConfig(config.guildId, config.id);
 
   await interaction.update({
     embeds: [
@@ -1334,7 +1499,9 @@ async function applyChannel(
     return;
   }
 
-  await service.updateSsConfig(resolved.configId, { channelId });
+  await service.updateSsConfig(resolved.guildId, resolved.configId, {
+    channelId,
+  });
 
   resolved.config = { ...resolved.config, channelId };
 }
@@ -1351,7 +1518,7 @@ async function applyRole(
     return;
   }
 
-  await service.updateSsConfig(resolved.configId, { roleId });
+  await service.updateSsConfig(resolved.guildId, resolved.configId, { roleId });
 
   resolved.config = { ...resolved.config, roleId };
 }
@@ -1362,14 +1529,10 @@ async function applyType(
 ): Promise<void> {
   const type = value as ScreenshotType;
 
-  const guildId = resolved.guildId;
-
-  if (!guildId) return;
-
   // **The check happens before the assignment.** Quotient assigned the
   // type first and checked afterwards, so a free guild ended up with a
   // premium type (B8).
-  await service.assertScreenshotTypeAllowed(guildId, type);
+  await service.assertScreenshotTypeAllowed(resolved.guildId, type);
 
   if (resolved.kind === "setup") {
     resolved.draft.ssType = type;
@@ -1379,7 +1542,9 @@ async function applyType(
     return;
   }
 
-  await service.updateSsConfig(resolved.configId, { ssType: type });
+  await service.updateSsConfig(resolved.guildId, resolved.configId, {
+    ssType: type,
+  });
 
   resolved.config = { ...resolved.config, ssType: type };
 }
@@ -1402,7 +1567,9 @@ async function applyCount(
     return;
   }
 
-  await service.updateSsConfig(resolved.configId, { requiredSs: count });
+  await service.updateSsConfig(resolved.guildId, resolved.configId, {
+    requiredSs: count,
+  });
 
   resolved.config = { ...resolved.config, requiredSs: count };
 }
@@ -1427,7 +1594,7 @@ async function applyPageDetails(
     return;
   }
 
-  await service.updateSsConfig(resolved.configId, {
+  await service.updateSsConfig(resolved.guildId, resolved.configId, {
     channelName: name,
     channelLink: link,
     keywords,
@@ -1445,13 +1612,9 @@ async function applySuccessMessage(
   resolved: ResolvedTarget,
   message: string,
 ): Promise<void> {
-  const guildId = resolved.guildId;
-
-  if (!guildId) return;
-
   // One gate, both paths. Quotient disabled the editor's button and had
   // no guard in the wizard at all, so the gate was bypassable (B12).
-  await service.assertSuccessMessageAllowed(guildId);
+  await service.assertSuccessMessageAllowed(resolved.guildId);
 
   const value = message.length === 0 ? null : message;
 
@@ -1463,7 +1626,9 @@ async function applySuccessMessage(
     return;
   }
 
-  await service.updateSsConfig(resolved.configId, { successMessage: value });
+  await service.updateSsConfig(resolved.guildId, resolved.configId, {
+    successMessage: value,
+  });
 
   resolved.config = { ...resolved.config, successMessage: value };
 }

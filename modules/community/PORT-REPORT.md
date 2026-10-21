@@ -5,7 +5,7 @@ and the `reminder` cog: tags, snipe, auto-roles, auto-purge, reminders, the
 durable job scheduler's consumers, and the command-usage log.
 
 **Status: complete.** `npm run typecheck` is clean for my files, `npm test` is
-green for my files (6 files, 88 tests), and `npm run smoke` is still 106/106.
+green for my files (9 files, 111 tests), and `npm run smoke` is still 106/106.
 The whole repository typechecks. At the time of writing, two tests in
 `modules/tourneys/` fail; that area is in flight, and the failures are not
 mine and are not in my files.
@@ -15,11 +15,17 @@ mine and are not in my files.
 discriminator went with it, and the daily row became a singleton with a
 fixed id. See §2.
 
+**Since the security review:** no reply in this area can notify anybody
+(`views/reply.ts` and the escaping on the tag and reminder paths), a member
+may own 25 tags and have 25 reminders running, an unused tag is pruned after
+180 days, and `/reminder delete` exists so the allowance is never a trap. See
+`SECURITY-REPORT.md`.
+
 ---
 
 ## 1. The command surface
 
-Five top-level commands, twenty-two subcommands. **Public** by default (D43) —
+Five top-level commands, twenty-three subcommands. **Public** by default (D43) —
 none of them sets `ephemeral`, and the dispatcher honours the flag.
 
 | Command | Subcommand | Options | Permission |
@@ -45,6 +51,13 @@ none of them sets `ephemeral`, and the dispatcher honours the flag.
 | | `list` / `remove` | `channel` (remove only) | Manage Messages |
 | `/reminder` | `set` | `when`, `text` (optional) | — |
 | | `list` | — | — |
+| | `delete` | `id` (optional) | — |
+
+`/reminder delete` is the one subcommand the port did not have: without a way
+to delete a reminder, the member's allowance of running reminders would have
+been a trap, because a reminder's row only goes away when it fires. With an
+id it deletes that one reminder; without one it deletes all of them. See
+`SECURITY-REPORT.md`.
 
 **Deviation from the brief, forced by the loader:** the brief said
 `commands/community.ts`, one file. `handlers/commands.ts` does
@@ -292,18 +305,25 @@ is recorded here rather than silently changed.
 
 | File | What it pins down |
 |---|---|
-| `rules.test.ts` | the tag name normalisation and the reserved-word check; the auto-purge admission **order** ("already configured" beats "limit reached"); the reminder's time-and-text split; the NSFW rule; the stale roles |
+| `rules.test.ts` | the tag name normalisation and the reserved-word check; the auto-purge admission **order** ("already configured" beats "limit reached"); the member allowance; the reminder's time-and-text split; the NSFW rule; the stale roles |
 | `embed-tag.test.ts` | the embed-tag render path, and that a malformed stored template is a refusal and not a crash |
+| `mentions.test.ts` | that **no reply in this area can notify anybody**: a tag whose body is `@everyone` is escaped and its reply allows no mentions; the reminder's text is escaped; the reminder's delivery mentions only the member it is for |
+| `quota.test.ts` | the member allowances against the live database: the tag past the allowance is refused, the reminder past the allowance is refused, and a member at the allowance can still delete their own tag and their own reminder |
+| `retention.test.ts` | the retention against the live database: an unused tag is pruned, a used or recently edited tag is kept, and a fired reminder leaves no row behind |
 | `stats.test.ts` | the usage-log statistics, against the live database: the per-member counts, the per-owner counts, the window-function totals, the atomic counter |
 | `tags.test.ts` | the tag storage rules against the live database: the canonical name, the case-insensitive lookup, the unique constraint refusing a name that differs only in case, the ownership rules |
 | `repo.test.ts` | the hand-written SQL against the live database: the atomic auto-role toggle, the snipe upsert, the job rows |
 | `jobs.test.ts` | the job payloads; that each event means one thing; that the daily row is **a row in the `jobs` table**, armed at startup and re-armed by itself, and never a timer |
 
-The two database-backed areas use ids no real row can have and clean up after
+The database-backed areas use ids no real row can have and clean up after
 themselves. `repo.test.ts` **caught a real bug in my own SQL**: the
 `ON CONFLICT DO UPDATE` clause needed the column qualified with the table
 name, because an unqualified name is ambiguous between the row being updated
 and the row being inserted (`column reference "humans" is ambiguous`).
+
+`mentions.test.ts` and `quota.test.ts` need no environment: the service and
+the repository are mocked, so the "does not notify" proof runs on a machine
+without Postgres.
 
 ---
 

@@ -210,3 +210,26 @@ export interface TourneySchedule {
    */
   readonly openTime: string;
 }
+
+/**
+ * The state the setup wizard collects.
+ *
+ * It has no database row yet — that is why it travels in a **token**
+ * (D18) — but it is still domain state, so it lives here.
+ */
+export interface WizardDraft {
+  readonly guildId: string;
+  readonly hostId: string;
+  readonly name: string;
+  readonly registrationChannelId: string | null;
+  readonly confirmChannelId: string | null;
+  readonly roleId: string | null;
+  readonly requiredMentions: number;
+  readonly totalSlots: number | null;
+  readonly groupSize: number | null;
+  readonly emojis: TourneyEmojis;
+  /** The weekdays the tournament opens on. Empty means every day. */
+  readonly openDays: string[];
+  /** The time of day it opens at, in the server's zone. */
+  readonly openTime: string;
+}

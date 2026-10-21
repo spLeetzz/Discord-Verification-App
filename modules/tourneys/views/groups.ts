@@ -23,14 +23,15 @@
 import { ButtonStyle, EmbedBuilder } from "discord.js";
 import { EMBED_COLOR } from "../../../core/constants.js";
 import { renderGroupList } from "../groups.js";
-import type { Group, TourneyRecord, TourneySlotRecord } from "../types.js";
+import type { TourneyRecord, TourneySlotRecord } from "../types.js";
+import type { Group } from "../groups.js";
 import {
   assertComponentBudget,
   button,
   buttonRow,
 } from "./components.js";
 import { tourneysId } from "./ids.js";
-import type { Panel } from "./handlers.js";
+import type { Panel, PanelComponents } from "./handlers.js";
 
 /** The group manager panel. */
 export function buildGroupManagerPanel(options: {
@@ -49,9 +50,9 @@ export function buildGroupManagerPanel(options: {
     .setTitle(`Group Management — ${tourney.name}`)
     .setColor(EMBED_COLOR)
     .setDescription(
-      groups.length === 0
+      group === null
         ? "Nobody has registered yet, so there are no groups to draw."
-        : `**Group ${current} of ${groups.length}**\n\n${renderGroupList(group as Group, tourney.startFrom)}`,
+        : `**Group ${current} of ${groups.length}**\n\n${renderGroupList(group, tourney.startFrom)}`,
     );
 
   embed.addFields(
@@ -72,19 +73,19 @@ export function buildGroupManagerPanel(options: {
     },
   );
 
-  const rows: Panel["components"] = [
+  const rows: PanelComponents = [
     buttonRow(
       button({
         customId: tourneysId("groups", tourney.id, current - 1),
         label: "Previous",
         style: ButtonStyle.Secondary,
-        disabled: groups.length === 0,
+        disabled: current <= 1,
       }),
       button({
         customId: tourneysId("groups", tourney.id, current + 1),
         label: "Next",
         style: ButtonStyle.Secondary,
-        disabled: groups.length === 0,
+        disabled: current >= groups.length,
       }),
       button({
         customId: tourneysId("group_publish", tourney.id, current),
@@ -98,7 +99,7 @@ export function buildGroupManagerPanel(options: {
         style: ButtonStyle.Primary,
       }),
       button({
-        customId: tourneysId("modal", "group_role", tourney.id, current),
+        customId: tourneysId("groups", tourney.id, current, "role"),
         label: "Give Group Role",
         style: ButtonStyle.Primary,
         disabled: group === null,
@@ -139,7 +140,7 @@ export function buildPublishedGroupList(options: {
   readonly tourney: TourneyRecord;
   readonly group: Group<TourneySlotRecord>;
   readonly guildName: string;
-}): { embeds: EmbedBuilder[]; components: Panel["components"] } {
+}): { embeds: EmbedBuilder[]; components: PanelComponents } {
   const { tourney, group, guildName } = options;
 
   const embed = new EmbedBuilder()
@@ -148,7 +149,7 @@ export function buildPublishedGroupList(options: {
     .setDescription(renderGroupList(group, tourney.startFrom))
     .setFooter({ text: guildName });
 
-  const rows: Panel["components"] = [
+  const rows: PanelComponents = [
     buttonRow(
       button({
         customId: tourneysId("group_refresh", tourney.id, group.number),

@@ -24,6 +24,8 @@ const mocks = vi.hoisted(() => ({
     findTagCheckById: vi.fn(),
     findEasyTagByChannel: vi.fn(),
     findSsConfigById: vi.fn(),
+    updateSsConfig: vi.fn(),
+    deleteSsConfig: vi.fn(),
     writeTagCheckIgnoreRole: vi.fn(),
     writeEasyTagIgnoreRole: vi.fn(),
   },
@@ -226,6 +228,67 @@ describe("the screenshot-verification setup gate", () => {
 
     expect(mocks.repo.insertSsConfig).not.toHaveBeenCalled();
     expect(mocks.cache.cacheChannel).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The guild scope of a setup.
+ *
+ * The row id of a setup travels in a custom id, so a lookup by id alone
+ * would answer a question about another server's configuration. The guild
+ * is part of the key everywhere.
+ */
+describe("the guild scope of a setup", () => {
+  it("looks a setup up by its guild and its row id", async () => {
+    await service.findSsConfig("guild-1", "config-1");
+
+    expect(mocks.repo.findSsConfigById).toHaveBeenCalledWith(
+      "guild-1",
+      "config-1",
+    );
+  });
+
+  it("writes a setup in a guild", async () => {
+    await service.updateSsConfig("guild-1", "config-1", {
+      channelId: "channel-2",
+    });
+
+    expect(mocks.repo.updateSsConfig).toHaveBeenCalledWith(
+      "guild-1",
+      "config-1",
+      { channelId: "channel-2" },
+    );
+  });
+
+  it("deletes a setup in a guild", async () => {
+    await service.deleteSsConfig("guild-1", "config-1");
+
+    expect(mocks.repo.deleteSsConfig).toHaveBeenCalledWith(
+      "guild-1",
+      "config-1",
+    );
+  });
+
+  it("reads the row back in the guild it was created in", async () => {
+    mocks.repo.countSsConfigs.mockResolvedValue(0);
+
+    await service.createSsConfig({
+      guildId: "guild-1",
+      channelId: "channel-1",
+      roleId: "role-1",
+      requiredSs: 2,
+      channelName: "Team Phoenix",
+      channelLink: "",
+      keywords: [],
+      allowSame: false,
+      ssType: "youtube",
+      successMessage: null,
+    });
+
+    expect(mocks.repo.findSsConfigById).toHaveBeenCalledWith(
+      "guild-1",
+      "config-1",
+    );
   });
 });
 

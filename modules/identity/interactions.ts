@@ -4,18 +4,21 @@
  * Every custom id is namespaced `identity:<feature>:<action>[:<payload>]`
  * (D7) and carries the record it refers to (D18):
  *
- *  - `identity:ssmod:setup:<action>:<token>` — the **wizard**. The setup
+ *  - `identity:ssmod:wizard:<action>:<token>` — the **wizard**. The setup
  *    does not exist yet, so its state is a token.
  *  - `identity:ssmod:<action>:<configId>` — the **editor**. The setup
  *    exists, so its row id travels in the id and the panel survives a
  *    restart.
- *  - `identity:groups:<action>:<id>` — the group management. The refresh
- *    button carries the row id of the published list.
  *
  * The router dispatches on the prefix and **never guesses** an owner from
  * the shape of the rest of the id. The wizard's prefix is registered
  * before the editor's, because the router takes the first prefix that
  * matches and `identity:ssmod` would match the wizard's ids too.
+ *
+ * The group management is **not** here. It was a second, unreachable copy
+ * of the tournament area's own group manager, and its handlers created
+ * channels and roles without checking the caller. It has been deleted; the
+ * tournament area's version is the live one.
  *
  * The router itself is injected rather than imported: `core/router.ts` is
  * the manager's file, and this module must not depend on it. The shape
@@ -27,15 +30,9 @@ import type {
   ButtonInteraction,
   ModalSubmitInteraction,
 } from "discord.js";
-import { GROUPS_PREFIX } from "./views/groups.js";
-import {
-  handleGroupButton,
-  handleGroupModal,
-  handleGroupSelect,
-} from "./views/groups.js";
 import {
   SSMOD_PREFIX,
-  SSMOD_SETUP_PREFIX,
+  SSMOD_WIZARD_PREFIX,
   handleSsModButton,
   handleSsModModal,
   handleSsModSelect,
@@ -82,17 +79,12 @@ export interface IdentityRouter {
  */
 export function registerIdentityInteractions(router: IdentityRouter): void {
   // The wizard first — `identity:ssmod` would match its ids too.
-  router.registerButton(SSMOD_SETUP_PREFIX, handleSsSetupButton);
-  router.registerSelect(SSMOD_SETUP_PREFIX, handleSsSetupSelect);
-  router.registerModal(SSMOD_SETUP_PREFIX, handleSsSetupModal);
+  router.registerButton(SSMOD_WIZARD_PREFIX, handleSsSetupButton);
+  router.registerSelect(SSMOD_WIZARD_PREFIX, handleSsSetupSelect);
+  router.registerModal(SSMOD_WIZARD_PREFIX, handleSsSetupModal);
 
   // The editor and the list panel.
   router.registerButton(SSMOD_PREFIX, handleSsModButton);
   router.registerSelect(SSMOD_PREFIX, handleSsModSelect);
   router.registerModal(SSMOD_PREFIX, handleSsModModal);
-
-  // The group management.
-  router.registerButton(GROUPS_PREFIX, handleGroupButton);
-  router.registerSelect(GROUPS_PREFIX, handleGroupSelect);
-  router.registerModal(GROUPS_PREFIX, handleGroupModal);
 }

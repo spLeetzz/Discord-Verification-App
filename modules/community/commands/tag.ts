@@ -13,11 +13,18 @@
  *    original case, so `/tag Rules` and `/tag rules` were two different
  *    tags. The lookup is case-insensitive now, and the database's
  *    `UNIQUE (guild_id, name)` constraint enforces it.
+ *
+ * And one of the port's own:
+ *
+ *  - a tag's body was posted as message content without being escaped,
+ *    so a member could store `@everyone` in a tag and have the bot ping
+ *    the whole server. The body is escaped now, exactly as `/tag raw`
+ *    escapes it, and the reply itself allows no mentions at all.
  */
 
 import { SlashCommandBuilder } from "discord.js";
 import type { ChatInputCommandInteraction } from "discord.js";
-import { respond, sendFile } from "../../../core/context.js";
+import { sendFile } from "../../../core/context.js";
 import { InputError } from "../../../core/errors.js";
 import { embedTemplateToBuilder } from "../../../core/embed-builder.js";
 import { escapeMarkdown, escapeMentions } from "../../../core/escape.js";
@@ -28,6 +35,7 @@ import * as rules from "../rules.js";
 import * as service from "../service.js";
 import { TAG_CONTENT_MAX_LENGTH, TAG_NAME_MAX_LENGTH } from "../rules.js";
 import { buildGuildTagStatsEmbed, buildMemberTagStatsEmbed, buildTagInfoEmbed } from "../views/embeds.js";
+import { respondSafe } from "../views/reply.js";
 import {
   canManageGuild,
   displayName,
@@ -372,7 +380,7 @@ async function showTag(interaction: ChatInputCommandInteraction): Promise<void> 
   }
 
   if (render.kind === "embed") {
-    await respond(interaction, {
+    await respondSafe(interaction, {
       embeds: [embedTemplateToBuilder(render.template)],
     });
 
@@ -386,7 +394,16 @@ async function showTag(interaction: ChatInputCommandInteraction): Promise<void> 
     throw new InputError("That tag does not have any content.");
   }
 
-  await respond(interaction, { content: render.content });
+  // The body is the member's own text, stored verbatim, and it is posted
+  // as message **content** — so it is escaped before it is posted. The
+  // markdown is left alone: a tag is a canned message and its formatting
+  // is the point of it. The mentions are what has to go: without this a
+  // member could store `@everyone` in a tag and have the bot, which holds
+  // "Mention Everyone", ping the whole server.
+  //
+  // The reply allows no mentions either (`views/reply.ts`), so the two
+  // together mean the bot cannot notify anybody on a member's say-so.
+  await respondSafe(interaction, { content: escapeMentions(render.content) });
 
   await service.countTagUse(guild.id, tag.name);
 }
@@ -420,7 +437,7 @@ async function rawTag(interaction: ChatInputCommandInteraction): Promise<void> {
     return;
   }
 
-  await respond(interaction, { content: escaped });
+  await respondSafe(interaction, { content: escaped });
 }
 
 /**
@@ -468,7 +485,7 @@ async function infoTag(interaction: ChatInputCommandInteraction): Promise<void> 
 
   const owner = displayName(guild, tag.ownerId);
 
-  await respond(interaction, { embeds: [buildTagInfoEmbed(tag, owner)] });
+  await respondSafe(interaction, { embeds: [buildTagInfoEmbed(tag, owner)] });
 }
 
 /**
@@ -489,7 +506,7 @@ async function claimTag(interaction: ChatInputCommandInteraction): Promise<void>
     ownerIsStillInGuild: ownerIsStillHere,
   });
 
-  await respond(interaction, {
+  await respondSafe(interaction, {
     content: "Transferred the tag to you.",
   });
 }
@@ -511,8 +528,10 @@ async function createTag(interaction: ChatInputCommandInteraction): Promise<void
     ownerId: interaction.user.id,
   });
 
-  await respond(interaction, {
-    content: `Created the tag **${tag.name}** (ID: \`${tag.id}\`).`,
+  // The name is the caller's own text, so it is escaped: a tag called
+  // `@everyone` must not ping the server in the confirmation.
+  await respondSafe(interaction, {
+    content: `Created the tag **${escapeMentions(tag.name)}** (ID: \`${tag.id}\`).`,
   });
 }
 
@@ -532,7 +551,9 @@ async function deleteTag(interaction: ChatInputCommandInteraction): Promise<void
     canManage,
   });
 
-  await respond(interaction, { content: `Deleted **${tag.name}**.` });
+  await respondSafe(interaction, {
+    content: `Deleted **${escapeMentions(tag.name)}**.`,
+  });
 }
 
 /**
@@ -556,9 +577,15 @@ async function transferTag(
     toUserId: member.id,
   });
 
-  await respond(interaction, {
-    content: `Transferred **${name}** to <@${member.id}>.`,
-  });
+  // The name is the caller's own text and is escaped; the new owner is
+  // mentioned on purpose, so they are the one id the reply allows.
+  await respondSafe(
+    interaction,
+    {
+      content: `Transferred **${escapeMentions(name)}** to <@${member.id}>.`,
+    },
+    { users: [member.id] },
+  );
 }
 
 /**
@@ -577,7 +604,7 @@ async function nsfwTag(interaction: ChatInputCommandInteraction): Promise<void> 
     canManage,
   });
 
-  await respond(interaction, {
+  await respondSafe(interaction, {
     content: `Tag NSFW toggled **${result.nsfw ? "ON" : "OFF"}**.`,
   });
 }
@@ -633,8 +660,8 @@ async function purgeTags(interaction: ChatInputCommandInteraction): Promise<void
     throw new InputError("That member does not own any tags.");
   }
 
-  await respond(interaction, {
-    content: `Deleted ${plural(count, "tag")} of **${member.username}**.`,
+  await respondSafe(interaction, {
+    content: `Deleted ${plural(count, "tag")} of **${escapeMentions(member.username)}**.`,
   });
 }
 
@@ -661,7 +688,7 @@ async function editTag(interaction: ChatInputCommandInteraction): Promise<void> 
     canManage,
   });
 
-  await respond(interaction, { content: "Tag updated." });
+  await respondSafe(interaction, { content: "Tag updated." });
 }
 
 /**
@@ -712,7 +739,7 @@ async function statsTags(
   if (!member) {
     const stats = await repo.getGuildTagStats(guild.id);
 
-    await respond(interaction, {
+    await respondSafe(interaction, {
       embeds: [buildGuildTagStatsEmbed(stats)],
     });
 
@@ -726,7 +753,7 @@ async function statsTags(
 
   const owned = tags[0];
 
-  await respond(interaction, {
+  await respondSafe(interaction, {
     embeds: [
       buildMemberTagStatsEmbed(displayName(guild, member.id), {
         ownedTags: owned?.totalTags ?? 0,

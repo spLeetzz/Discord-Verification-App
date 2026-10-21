@@ -10,9 +10,15 @@
  * channel at the same time cannot be answered by the same click, and
  * the collector only accepts the member who opened it.
  *
- * (The scrims area has the same helper. It is duplicated here rather
- * than imported, because one area may not depend on another area's code
- * — the manager may move it to `core/`.)
+ * **Why these two are still here.** `core/select.ts` collects a
+ * *string* select menu, and a channel or a role cannot be one: Discord
+ * has dedicated component types for them, and the helper has no way to
+ * build them. Everything else the area collects — the slots, the
+ * weekdays, the confirmations — goes through the core helpers now.
+ *
+ * (The scrims area has the same two helpers. They are duplicated here
+ * rather than imported, because one area may not depend on another
+ * area's code.)
  */
 
 import {

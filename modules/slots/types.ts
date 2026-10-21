@@ -209,6 +209,24 @@ export interface ReminderCandidate {
 }
 
 /**
+ * A ban of a scrim.
+ *
+ * The row is the whole truth about a ban: the reason and the expiry
+ * are written down nowhere else, so the ban log entry of an unban reads
+ * them from here.
+ */
+export interface BanRecord {
+  /** Who is banned. */
+  readonly userId: string;
+  /** The team they were banned with, when the ban named one. */
+  readonly teamName: string | null;
+  /** Why they were banned, when the moderator gave a reason. */
+  readonly reason: string | null;
+  /** When the ban runs out, when it has a duration. */
+  readonly expires: Date | null;
+}
+
+/**
  * The store the service layer talks to.
  *
  * The service is the state machine; the repository is the SQL. This
@@ -293,4 +311,8 @@ export interface SlotStore {
     reason: string | null,
     expires: Date | null,
   ): Promise<void>;
+  /** The bans of a scrim, with the reason and the expiry. */
+  listBans(scrimId: string): Promise<BanRecord[]>;
+  /** Lifts a ban. */
+  unbanUser(scrimId: string, userId: string): Promise<void>;
 }

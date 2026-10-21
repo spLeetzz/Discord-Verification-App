@@ -21,6 +21,13 @@
  * Every write is a conditional `UPDATE`, so the state machine lives in the
  * database and not only in this file: a replayed webhook updates zero rows.
  *
+ * **The grant is one transaction.** The transaction row and the seven
+ * entitlement rows are written by a single `withLockedTransaction`, so
+ * either all of it lands or none of it does. They used to be separate
+ * statements: the transaction was flipped to `paid` and committed, and the
+ * entitlements were written afterwards. A process killed in between left a
+ * buyer who had paid with nothing, and no code path could repair it.
+ *
  * **The rows are written before anybody is told.** Quotient dispatched the
  * purchase notification before the guild row was written, so the
  * confirmation DM could show a stale expiry or crash on `None`. The
@@ -32,15 +39,20 @@ import {
   ensureGuildSettings,
   ensureUserSettings,
   findTransaction,
-  getGuildSettings,
+  listEntitlements,
+  lockGuildSettings,
   markTransactionFailed,
   markTransactionPaid,
+  recountUserPremiums,
+  restoreGuildPremium,
+  restoreUserPremium,
   retryTransaction,
   setGuildPremium,
   setUserPremium,
   upsertEntitlement,
+  withLockedTransaction,
 } from "./repo.js";
-import type { TransactionRow } from "./repo.js";
+import type { DbExecutor, EntitlementRow, TransactionRow } from "./repo.js";
 import { PREMIUM_FEATURES } from "./types.js";
 import type { PremiumTransactionStatus } from "./types.js";
 
@@ -109,8 +121,16 @@ export interface VerifiedPurchase {
 
 /** What happened to the purchase. */
 export type ActivationOutcome =
+  /** The purchase was granted. */
   | "activated"
+  /** The purchase was already granted, and the grant was whole. */
   | "already_paid"
+  /**
+   * The purchase was already paid for, but the grant was not whole, and
+   * it has been put back together.
+   */
+  | "repaired"
+  /** There is no such transaction. */
   | "unknown_transaction";
 
 /** The result of an activation. */
@@ -139,21 +159,179 @@ export interface ActivationResult {
  * Idempotent: calling it twice grants one subscription. The second call
  * finds the transaction already `paid` and does nothing.
  *
+ * **One transaction.** The state change and every entitlement are written
+ * by a single `withLockedTransaction`, so the two cannot drift apart: a
+ * process killed half-way through the grant leaves the transaction
+ * `pending` and no entitlement rows, and the next callback grants it
+ * properly.
+ *
  * @param purchase a payment whose signature has already been verified.
  */
 export async function activatePremium(
   purchase: VerifiedPurchase,
 ): Promise<ActivationResult> {
-  const transaction = await findTransaction(purchase.txnId);
+  const outcome = await withLockedTransaction(
+    purchase.txnId,
+    async (transaction, tx) => {
+      if (transaction.status === "paid") {
+        return repairPaidTransaction(transaction, purchase, tx);
+      }
 
-  if (!transaction) {
-    return emptyResult(purchase, "unknown_transaction");
+      return grantPurchase(transaction, purchase, tx);
+    },
+  );
+
+  return outcome ?? emptyResult(purchase, "unknown_transaction");
+}
+
+/**
+ * Grants the purchase: the transaction becomes `paid` and every feature
+ * the plan unlocks becomes entitled, with one expiry.
+ */
+async function grantPurchase(
+  transaction: TransactionRow,
+  purchase: VerifiedPurchase,
+  tx: DbExecutor,
+): Promise<ActivationResult> {
+  const snapshot = transaction.planSnapshot;
+  const durationDays = snapshot?.duration_days ?? 0;
+  const now = new Date();
+
+  // The rows the grant writes to have to exist before they can be
+  // written, and the guild's row is **locked** while it is read: two
+  // purchases for the same guild would otherwise both read the same
+  // expiry and both extend it, and one subscription would be lost.
+  await ensureGuildSettings(transaction.guildId, tx);
+  await ensureUserSettings(transaction.userId, tx);
+
+  const settings = await lockGuildSettings(transaction.guildId, tx);
+
+  // The subscription extends an existing one rather than replacing it, so
+  // buying again before the current period ends does not lose the days
+  // that were already paid for.
+  const base =
+    settings?.premiumExpiresAt &&
+    settings.premiumExpiresAt.getTime() > now.getTime()
+      ? settings.premiumExpiresAt
+      : now;
+
+  const expiresAt = new Date(base.getTime() + durationDays * DAY_MS);
+
+  // 1. The transaction becomes `paid`.
+  const paid = await markTransactionPaid(
+    {
+      txnId: purchase.txnId,
+      email: purchase.email,
+      buyerName: purchase.buyerName,
+      rawData: purchase.raw,
+      paidAt: now,
+    },
+    tx,
+  );
+
+  if (!paid) {
+    // The row was neither `pending` nor `failed` after all. The lock
+    // means this cannot be a race with another webhook — the state
+    // machine lives in the database, and the database has the last word.
+    // Throwing rolls the whole grant back, so nothing is half-written.
+    throw new Error(
+      `the transaction ${purchase.txnId} is "${transaction.status}" and cannot be activated`,
+    );
   }
 
-  if (transaction.status === "paid") {
-    // Idempotent: the subscription was already granted.
-    const settings = await getGuildSettings(transaction.guildId);
+  // 2. Every feature the plan unlocks becomes entitled, with the same
+  //    expiry. The check happens on the *next* read, so nothing here has
+  //    to schedule an expiry job.
+  for (const feature of PREMIUM_FEATURES) {
+    await upsertEntitlement(
+      {
+        guildId: transaction.guildId,
+        feature,
+        enabled: true,
+        expiresAt,
+        source: "premium",
+      },
+      tx,
+    );
+  }
 
+  // 3. The summary rows the status command reads.
+  await setGuildPremium(
+    {
+      guildId: transaction.guildId,
+      expiresAt,
+      madePremiumBy: transaction.userId,
+    },
+    tx,
+  );
+
+  await setUserPremium({ userId: transaction.userId, expiresAt }, tx);
+
+  return toResult(transaction, purchase, "activated", expiresAt);
+}
+
+/**
+ * Repairs a purchase that was paid for but never granted.
+ *
+ * The grant is one transaction now, so a `paid` row always has its
+ * entitlements. It did not used to: the transaction was flipped to `paid`
+ * and committed, and the entitlements were written afterwards, so a
+ * process killed in between left a buyer who had paid with nothing — and
+ * the replay path wrote nothing, because the transaction was already
+ * `paid`.
+ *
+ * So a second callback for an already-`paid` transaction **checks** that
+ * the grant is whole, and puts it back together when it is not.
+ *
+ * Two rules keep the repair from becoming a second grant:
+ *
+ *  - the expiry is the latest of what the purchase bought on its own, what
+ *    the guild already holds, and what the interrupted grant wrote. It is
+ *    never longer than the guild's own subscription, so a repair can
+ *    never hand out a second set of days;
+ *  - the user's subscription counter is not incremented, so a purchase is
+ *    never counted twice.
+ */
+async function repairPaidTransaction(
+  transaction: TransactionRow,
+  purchase: VerifiedPurchase,
+  tx: DbExecutor,
+): Promise<ActivationResult> {
+  const snapshot = transaction.planSnapshot;
+  const durationDays = snapshot?.duration_days ?? 0;
+  const paidAt = transaction.paidAt ?? transaction.createdAt;
+
+  await ensureGuildSettings(transaction.guildId, tx);
+  await ensureUserSettings(transaction.userId, tx);
+
+  const settings = await lockGuildSettings(transaction.guildId, tx);
+  const entitlements = await listEntitlements(transaction.guildId, tx);
+
+  // The expiry the purchase bought on its own: the days that were paid
+  // for, counted from the moment they were paid for.
+  const ownExpiry = new Date(paidAt.getTime() + durationDays * DAY_MS);
+
+  // The expiry the guild holds. A longer subscription is never shortened
+  // by a repair.
+  const guildExpiry = settings?.premiumExpiresAt ?? null;
+
+  // The expiry the interrupted grant wrote, if any of its rows landed —
+  // every row it wrote carried the same expiry.
+  const witness = latestExpiry(entitlements);
+
+  const held = new Set(entitlements.map((row) => row.feature));
+  const missing = PREMIUM_FEATURES.filter((feature) => !held.has(feature));
+
+  // The grant is whole when every feature is entitled and the guild's
+  // subscription runs at least as long as the purchase bought.
+  const incomplete =
+    missing.length > 0 ||
+    guildExpiry === null ||
+    guildExpiry.getTime() < ownExpiry.getTime();
+
+  if (!incomplete) {
+    // Nothing to repair, and nothing to extend: the subscription the
+    // buyer holds is the one that is running.
     return toResult(
       transaction,
       purchase,
@@ -162,77 +340,65 @@ export async function activatePremium(
     );
   }
 
-  const snapshot = transaction.planSnapshot;
-  const durationDays = snapshot?.duration_days ?? 0;
-  const now = new Date();
+  const expiresAt = latestDate([ownExpiry, guildExpiry, witness]) ?? ownExpiry;
 
-  // The subscription extends an existing one rather than replacing it, so
-  // buying again before the current period ends does not lose the days
-  // that were already paid for.
-  await ensureGuildSettings(transaction.guildId);
-  await ensureUserSettings(transaction.userId);
-
-  const guildSettings = await getGuildSettings(transaction.guildId);
-
-  const base =
-    guildSettings?.premiumExpiresAt &&
-    guildSettings.premiumExpiresAt.getTime() > now.getTime()
-      ? guildSettings.premiumExpiresAt
-      : now;
-
-  const expiresAt = new Date(base.getTime() + durationDays * DAY_MS);
-
-  // 1. The transaction becomes `paid`.
-  const paid = await markTransactionPaid({
-    txnId: purchase.txnId,
-    email: purchase.email,
-    buyerName: purchase.buyerName,
-    rawData: purchase.raw,
-    paidAt: now,
-  });
-
-  if (!paid) {
-    // Somebody else activated it between the read and the write. The
-    // subscription is granted once; the second grant is a no-op.
-    const current = await findTransaction(purchase.txnId);
-
-    if (!current) return emptyResult(purchase, "unknown_transaction");
-
-    const settings = await getGuildSettings(current.guildId);
-
-    return toResult(
-      current,
-      purchase,
-      "already_paid",
-      settings?.premiumExpiresAt ?? null,
+  // The grant is all or nothing, so it is put back as a whole.
+  for (const feature of PREMIUM_FEATURES) {
+    await upsertEntitlement(
+      {
+        guildId: transaction.guildId,
+        feature,
+        enabled: true,
+        expiresAt,
+        source: "premium",
+      },
+      tx,
     );
   }
 
-  // 2. Every feature the plan unlocks becomes entitled, with the same
-  //    expiry. The check happens on the *next* read, so nothing here has
-  //    to schedule an expiry job.
-  for (const feature of PREMIUM_FEATURES) {
-    await upsertEntitlement({
+  await restoreGuildPremium(
+    {
       guildId: transaction.guildId,
-      feature,
-      enabled: true,
       expiresAt,
-      source: "premium",
-    });
+      madePremiumBy: transaction.userId,
+    },
+    tx,
+  );
+
+  await restoreUserPremium({ userId: transaction.userId, expiresAt }, tx);
+
+  // The counter is a summary of the purchases, and the transactions are
+  // the record of them: put the two back in step.
+  await recountUserPremiums(transaction.userId, tx);
+
+  return toResult(transaction, purchase, "repaired", expiresAt);
+}
+
+/**
+ * The latest expiry on a set of entitlement rows.
+ *
+ * `null` when no row carries one — a row with no expiry never lapses, so
+ * it is not a witness for a dated grant.
+ */
+function latestExpiry(rows: readonly EntitlementRow[]): Date | null {
+  const dates = rows
+    .map((row) => row.expiresAt)
+    .filter((date): date is Date => date !== null);
+
+  return latestDate(dates);
+}
+
+/** The latest of a list of dates, ignoring the nulls. */
+function latestDate(dates: readonly (Date | null)[]): Date | null {
+  let latest: Date | null = null;
+
+  for (const date of dates) {
+    if (!date) continue;
+
+    if (!latest || date.getTime() > latest.getTime()) latest = date;
   }
 
-  // 3. The summary rows the status command reads.
-  await setGuildPremium({
-    guildId: transaction.guildId,
-    expiresAt,
-    madePremiumBy: transaction.userId,
-  });
-
-  await setUserPremium({ userId: transaction.userId, expiresAt });
-
-  const updated = await findTransaction(purchase.txnId);
-
-  return toResult(updated ?? transaction, purchase, "activated", expiresAt);
+  return latest;
 }
 
 /**

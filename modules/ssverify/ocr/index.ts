@@ -8,8 +8,16 @@
  *
  * The local provider is the default. The feature has to work with no
  * configuration at all, so a remote service is opt-in.
+ *
+ * A deployment that does not use screenshot verification can switch OCR off
+ * altogether: `createOcrProvider({ enabled: false })` then returns the
+ * {@link DisabledOcrProvider}, which starts no worker, downloads no language
+ * model and makes no network call. The decision is the caller's, because
+ * only the caller can see whether a screenshot-verification setup exists —
+ * `ocrEnabledFromEnv()` reads the environment half of that decision.
  */
 
+import { DisabledOcrProvider } from "./disabled.js";
 import { HttpOcrProvider } from "./http.js";
 import type { HttpOcrProviderOptions } from "./http.js";
 import { LocalOcrProvider } from "./local.js";
@@ -58,9 +66,22 @@ export interface OcrProvider {
 
 export interface CreateOcrProviderOptions {
   /**
+   * Whether OCR should run at all.
+   *
+   * `false` returns the {@link DisabledOcrProvider}: it answers with empty
+   * text, starts no worker, downloads no language model and makes no network
+   * call. `true` builds the provider the deployment would have got anyway.
+   *
+   * Defaults to `true`, so nothing that works today changes. The decision
+   * belongs to the caller, because only the caller can see the database and
+   * say whether screenshot verification is used at all — see
+   * {@link ocrEnabledFromEnv} and `modules/identity/ocr.ts`.
+   */
+  enabled?: boolean;
+  /**
    * Environment to read the configuration from. Defaults to `process.env`.
    */
-  env?: Record<string, string | undefined>;
+  env?: NodeJS.ProcessEnv;
   /** Options for the local provider. */
   local?: LocalOcrProviderOptions;
   /** Options for the remote provider. */
@@ -73,10 +94,20 @@ export interface CreateOcrProviderOptions {
  * `OCR_PROVIDER_URL` selects the Quotient-compatible remote service; when it
  * is absent the local provider is used, which needs no API key, no network
  * and no configuration.
+ *
+ * With `enabled: false` none of that is looked at: the provider is the
+ * switched-off one, so there is no worker, no language model download and no
+ * network call.
  */
 export function createOcrProvider(
   options: CreateOcrProviderOptions = {},
 ): OcrProvider {
+  // The switch is read before anything else, so an installation that does
+  // not use screenshot verification never touches Tesseract at all.
+  if (options.enabled === false) {
+    return new DisabledOcrProvider();
+  }
+
   const env = options.env ?? process.env;
   const url = env.OCR_PROVIDER_URL?.trim();
 
@@ -93,8 +124,39 @@ export function createOcrProvider(
   });
 }
 
+/**
+ * Whether OCR should run.
+ *
+ * `OCR_ENABLED` decides it when it is set: "true" or "1" forces it on,
+ * "false" or "0" forces it off. When it is unset the decision is the
+ * caller's — see `modules/identity/ocr.ts`, which checks whether any
+ * screenshot-verification setup exists.
+ *
+ * A value that is neither of those is **not a guess**: it is treated as
+ * unset, so a typo in the environment falls back to the automatic decision
+ * rather than quietly switching OCR off.
+ *
+ * @returns `true` or `false` when the variable says so, `undefined` when it
+ *          is unset or says something that is not understood.
+ */
+export function ocrEnabledFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean | undefined {
+  const value = env.OCR_ENABLED?.trim().toLowerCase();
+
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+
+  return undefined;
+}
+
 export { LocalOcrProvider } from "./local.js";
 export { HttpOcrProvider } from "./http.js";
+export {
+  DisabledOcrProvider,
+  DISABLED_PROVIDER_NAME,
+  isOcrDisabled,
+} from "./disabled.js";
 export { normaliseText } from "./text.js";
 export {
   computeDhash,

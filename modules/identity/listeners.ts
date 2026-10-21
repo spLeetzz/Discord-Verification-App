@@ -22,7 +22,6 @@ import { STAFF_ROLE_NAME } from "../../core/guards.js";
 import { errorMessage } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 import * as cache from "./cache.js";
-import * as groups from "./groups.js";
 import * as repo from "./repo.js";
 import * as service from "./service.js";
 import { buildEasyTagReply, extractEasyTags, resolveEasyTag } from "./easytag.js";
@@ -30,6 +29,7 @@ import { NO_TAG_MESSAGE } from "./easytag.js";
 import type { EasyTagMember } from "./easytag.js";
 import { buildTagCheckSummary, checkTagCheckMessage } from "./tagcheck.js";
 import { isIgnoredMember } from "./ignore-role.js";
+import { isOcrAvailable } from "./ocr.js";
 
 /* ------------------------------------------------------------------ *
  * The entry point
@@ -227,6 +227,16 @@ export async function handleSsVerifyMessage(message: Message): Promise<void> {
 
   if (member && isStaffMember(member)) return;
 
+  // The OCR is off, or was never decided on: no screenshot can be checked,
+  // so none is accepted. The service refuses the submission itself — this
+  // is here so the member is told straight away, and the bot does not
+  // download a picture it is going to refuse.
+  if (!isOcrAvailable()) {
+    await message.reply(service.OCR_UNAVAILABLE_MESSAGE);
+
+    return;
+  }
+
   const authorId = message.author.id;
 
   if (await service.isUserVerified(config, authorId)) {
@@ -396,25 +406,4 @@ function scheduleDelete(
   }, seconds * 1000);
 
   timer.unref();
-}
-
-/**
- * The group list of a tournament, for the tourney area.
- *
- * Exposed here so the tourney area does not have to reach into this
- * module's tables.
- */
-export async function publishedGroupLists(tourneyId: string) {
-  return repo.listGroupLists(tourneyId);
-}
-
-/**
- * The teams of a group, for the tourney area.
- */
-export async function groupTeams(
-  tourneyId: string,
-  groupSize: number,
-  groupNumber: number,
-) {
-  return groups.getGroup(tourneyId, groupSize, groupNumber);
 }

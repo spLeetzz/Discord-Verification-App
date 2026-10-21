@@ -127,6 +127,11 @@ export async function deliverReminder(
     await channel.send({
       content: `<@${payload.userId}>`,
       embeds: [embed],
+      // The reminder is for one member, so the reminder mentions one
+      // member. Nothing in the message is parsed as a mention besides
+      // that: the text the member wrote is in the embed, and an embed
+      // cannot notify anybody, but the allowance says so outright.
+      allowedMentions: { parse: [], users: [payload.userId] },
       ...(jumpUrl ? { components: [buildJumpRow(jumpUrl)] } : {}),
     });
   } catch (error) {

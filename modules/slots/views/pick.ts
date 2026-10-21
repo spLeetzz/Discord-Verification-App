@@ -35,6 +35,7 @@ import { TokenStore } from "../../../core/custom-id.js";
 import { respond } from "../../../core/context.js";
 import { run } from "../../../core/fire-and-forget.js";
 import { slotsId } from "../ids.js";
+import type { BanMode } from "../types.js";
 import { selectRow } from "./components.js";
 
 /** How long a pick stays open. */
@@ -71,6 +72,14 @@ export type PickContext =
   | {
       readonly kind: "change_team";
       readonly scrimId: string;
+    }
+  | {
+      readonly kind: "remove_team";
+      readonly scrimId: string;
+    }
+  | {
+      readonly kind: "info";
+      readonly scrimId: string;
     };
 
 /**
@@ -90,7 +99,7 @@ export type ModalContext =
       readonly kind: "punish";
       readonly scrimId: string;
       readonly slotIds: readonly string[];
-      readonly mode: number;
+      readonly mode: BanMode;
     }
   | {
       readonly kind: "add_team";

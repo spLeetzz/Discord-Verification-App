@@ -15,11 +15,11 @@
 
 import { PermissionFlagsBits, SlashCommandBuilder } from "discord.js";
 import type { ChatInputCommandInteraction, Guild, Role } from "discord.js";
-import { respond } from "../../../core/context.js";
 import { InputError } from "../../../core/errors.js";
 import { prompt } from "../../../core/prompt.js";
 import * as service from "../service.js";
 import { buildAutoroleConfigEmbed } from "../views/embeds.js";
+import { respondSafe } from "../views/reply.js";
 import {
   missingPermission,
   permissionGuard,
@@ -177,11 +177,17 @@ async function toggleRole(
 
   const list = kind === "humans" ? "human" : "bot";
 
-  await respond(interaction, {
-    content: result.added
-      ? `Added ${role.toString()} to the ${list} auto-roles.`
-      : `Removed ${role.toString()} from the ${list} auto-roles.`,
-  });
+  // The role is named on purpose, so it is the one role the reply is
+  // allowed to mention.
+  await respondSafe(
+    interaction,
+    {
+      content: result.added
+        ? `Added ${role.toString()} to the ${list} auto-roles.`
+        : `Removed ${role.toString()} from the ${list} auto-roles.`,
+    },
+    { roles: [role.id] },
+  );
 }
 
 /**
@@ -200,7 +206,7 @@ async function showConfig(
     );
   }
 
-  await respond(interaction, {
+  await respondSafe(interaction, {
     embeds: [
       buildAutoroleConfigEmbed(
         describeRoles(guild, config.humans),
@@ -234,13 +240,13 @@ async function turnOff(
   );
 
   if (!confirmed) {
-    await respond(interaction, { content: "Alright, I left them alone." });
+    await respondSafe(interaction, { content: "Alright, I left them alone." });
     return;
   }
 
   await service.clearAutoroleRoles(guild.id);
 
-  await respond(interaction, { content: "Auto-roles turned off." });
+  await respondSafe(interaction, { content: "Auto-roles turned off." });
 }
 
 export default autoroleCommand;

@@ -20,6 +20,7 @@
 import { and, asc, count, eq, inArray, ne } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
+  banLogs,
   bannedTeams,
   jobs,
   scrims,
@@ -30,6 +31,7 @@ import {
 } from "../../db/schema.js";
 import type { JobEvent } from "../../db/schema/common.js";
 import type {
+  BanRecord,
   ScrimLite,
   SlotManagerRecord,
   SlotRecord,
@@ -267,6 +269,27 @@ export async function getScrim(id: string): Promise<ScrimLite | null> {
   return row ? toScrim(row) : null;
 }
 
+/**
+ * One scrim, by the id of the slot list message it published.
+ *
+ * The message id is on the scrim row, so the row is what finds the
+ * message again after a restart — a Discord message id carries no
+ * channel, so there is nowhere else to look.
+ */
+export async function getScrimBySlotlistMessageId(
+  messageId: string,
+): Promise<ScrimLite | null> {
+  const rows = await db
+    .select()
+    .from(scrims)
+    .where(eq(scrims.slotlistMessageId, messageId))
+    .limit(1);
+
+  const row = rows[0];
+
+  return row ? toScrim(row) : null;
+}
+
 /** Every scrim of a guild. */
 export async function listScrims(guildId: string): Promise<ScrimLite[]> {
   const rows = await db
@@ -303,6 +326,26 @@ export async function listScrimIds(guildId: string): Promise<string[]> {
     .where(eq(scrims.guildId, guildId));
 
   return rows.map((row) => row.id);
+}
+
+/**
+ * Records the message the slot list was published as.
+ *
+ * **This area owns the column.** The slot area publishes the slot list
+ * and records the message here, and the scrims area — which owns the
+ * scrim lifecycle and asks for the list to be published — does not
+ * write it. One writer, one column: two writers means whichever
+ * re-renders last wins, and a message id that points at a message
+ * nobody can edit.
+ */
+export async function setScrimSlotlistMessage(
+  scrimId: string,
+  messageId: string,
+): Promise<void> {
+  await db
+    .update(scrims)
+    .set({ slotlistMessageId: messageId, updatedAt: new Date() })
+    .where(eq(scrims.id, scrimId));
 }
 
 /* ------------------------------------------------------------------ *
@@ -688,6 +731,118 @@ export async function scheduleBanExpiry(
   });
 }
 
+/**
+ * Lifts a ban.
+ *
+ * The ban row is the whole truth about a ban: it is what
+ * `isBanned` reads and what the claim path refuses on. Deleting it is
+ * the unban.
+ */
+export async function unbanUser(
+  scrimId: string,
+  userId: string,
+): Promise<void> {
+  await db
+    .delete(bannedTeams)
+    .where(and(eq(bannedTeams.scrimId, scrimId), eq(bannedTeams.userId, userId)));
+}
+
+/**
+ * The bans of a scrim.
+ *
+ * The reason and the expiry come with the row because the ban log entry
+ * of an unban says what the ban was — "who was banned, from what, and
+ * why" — and the row is the only place that is written down.
+ */
+export async function listBans(scrimId: string): Promise<BanRecord[]> {
+  const rows = await db
+    .select({
+      userId: bannedTeams.userId,
+      teamName: bannedTeams.teamName,
+      reason: bannedTeams.reason,
+      expires: bannedTeams.expires,
+    })
+    .from(bannedTeams)
+    .where(eq(bannedTeams.scrimId, scrimId))
+    .orderBy(asc(bannedTeams.createdAt));
+
+  return rows.map((row) => ({
+    userId: row.userId,
+    teamName: row.teamName,
+    reason: row.reason,
+    expires: row.expires,
+  }));
+}
+
+/**
+ * The channel a guild writes its ban log to.
+ *
+ * The `ban_logs` table is shared with the scrims area — one row per
+ * guild — and the row is written by `/scrims banlog`. This area only
+ * reads it: the ban log is one channel, and two writers of that column
+ * would be two answers to "where does the log go".
+ */
+export async function getBanLogChannel(
+  guildId: string,
+): Promise<string | null> {
+  const rows = await db
+    .select({ channelId: banLogs.channelId })
+    .from(banLogs)
+    .where(eq(banLogs.guildId, guildId))
+    .limit(1);
+
+  return rows[0]?.channelId ?? null;
+}
+
+/* ------------------------------------------------------------------ *
+ * Job payloads
+ * ------------------------------------------------------------------ */
+
+/**
+ * The user ids a `scrim_ban` job is about.
+ *
+ * The payload shape is `{ scrimIds, userIds }` — what
+ * {@link scheduleBanExpiry} writes. The scrims area's own ban flow
+ * writes a superset of it, and this reader takes the same two keys, so
+ * the two agree.
+ */
+export function userIdsOf(payload: unknown): string[] {
+  if (typeof payload !== "object" || payload === null) return [];
+
+  const raw = (payload as Record<string, unknown>).userIds;
+
+  if (!Array.isArray(raw)) return [];
+
+  return raw.filter((id): id is string => typeof id === "string");
+}
+
+/**
+ * The scrim ids a `scrim_ban` job is about.
+ *
+ * A payload that names one scrim as well as a list of them — the
+ * scrims area's shape — counts that scrim once. The list is
+ * deduplicated, so a scrim that is in both is unbanned once and leaves
+ * one entry in the log, not two.
+ */
+export function scrimIdsOf(payload: unknown): string[] {
+  if (typeof payload !== "object" || payload === null) return [];
+
+  const raw = (payload as Record<string, unknown>).scrimIds;
+
+  const many = Array.isArray(raw)
+    ? raw.filter((id): id is string => typeof id === "string")
+    : [];
+
+  const single = (payload as Record<string, unknown>).scrimId;
+
+  const all = [
+    ...many,
+    ...(typeof single === "string" ? [single] : []),
+  ];
+
+  return [...new Set(all)];
+}
+
 /* ------------------------------------------------------------------ *
  * The store
  * ------------------------------------------------------------------ */
@@ -732,6 +887,8 @@ export const slotStore: SlotStore = {
   isBanned,
   listBannedUserIds,
   banUsers,
+  listBans,
+  unbanUser,
 };
 
 /** A convenience for the views: the free slots of a scrim, by number. */

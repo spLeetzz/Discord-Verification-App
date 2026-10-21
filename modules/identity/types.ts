@@ -1,8 +1,8 @@
 /**
  * The domain types of the identity area.
  *
- * Tag check, easy tag, screenshot verification and the tournament group
- * management. Everything here is a closed union or a plain data shape.
+ * Tag check, easy tag and screenshot verification. Everything here is a
+ * closed union or a plain data shape.
  *
  * Two rules the types enforce:
  *
@@ -100,35 +100,6 @@ export interface SsSubmission {
   /** 16 hex characters of pHash. */
   readonly phash: string | null;
   readonly createdAt: Date;
-}
-
-/* ------------------------------------------------------------------ *
- * Group management
- * ------------------------------------------------------------------ */
-
-/**
- * A published group list.
- *
- * `channelId` is stored on the row (D16 / B15). Quotient re-discovered the
- * channel by a name substring, so "Group 1" could pick up "Group 10"'s
- * channel.
- */
-export interface GroupListEntry {
-  readonly id: string;
-  readonly tourneyId: string;
-  readonly messageId: string;
-  readonly channelId: string;
-  readonly groupNumber: number;
-  /** The last time the published list was refreshed. */
-  readonly updatedAt: Date;
-}
-
-/** One registered team, as the group list shows it. */
-export interface GroupSlot {
-  readonly id: string;
-  readonly num: number;
-  readonly teamName: string;
-  readonly leaderId: string;
 }
 
 /* ------------------------------------------------------------------ *

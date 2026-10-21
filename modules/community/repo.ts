@@ -190,6 +190,45 @@ export async function insertTag(tag: {
   return toTagRecord(row);
 }
 
+/**
+ * How many tags a member owns in a guild.
+ *
+ * The count is what the member's allowance is checked against, so it
+ * runs on every `/tag create`. The table is small — every member is
+ * capped — so the count is cheap even without a dedicated index.
+ */
+export async function countOwnerTags(
+  guildId: string,
+  ownerId: string,
+): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(tags)
+    .where(and(eq(tags.guildId, guildId), eq(tags.ownerId, ownerId)));
+
+  return rows[0]?.count ?? 0;
+}
+
+/**
+ * Deletes the tags that have never been used and have not been touched
+ * for a while.
+ *
+ * A tag that has been used is never pruned: `incrementTagUsage` bumps
+ * `updated_at`, so a tag in daily use keeps its row. What goes is the
+ * tag somebody made once and forgot about.
+ *
+ * @param cutoff the tags older than this are removed.
+ * @returns how many rows were removed.
+ */
+export async function deleteUnusedTags(cutoff: Date): Promise<number> {
+  const deleted = await db
+    .delete(tags)
+    .where(and(eq(tags.usage, 0), sql`${tags.updatedAt} < ${cutoff}`))
+    .returning({ id: tags.id });
+
+  return deleted.length;
+}
+
 /** Replaces a tag's body. */
 export async function updateTagContent(
   id: string,
@@ -815,6 +854,46 @@ export async function countUserReminders(userId: string): Promise<number> {
     .where(and(eq(jobs.event, "reminder"), eq(jobs.userId, userId)));
 
   return rows[0]?.count ?? 0;
+}
+
+/**
+ * Deletes one of a member's running reminders.
+ *
+ * The delete is conditional on the row being **the member's** reminder,
+ * so a member cannot delete somebody else's by guessing an id.
+ *
+ * @returns whether a row was removed.
+ */
+export async function deleteUserReminder(
+  id: string,
+  userId: string,
+): Promise<boolean> {
+  const deleted = await db
+    .delete(jobs)
+    .where(
+      and(
+        eq(jobs.id, id),
+        eq(jobs.event, "reminder"),
+        eq(jobs.userId, userId),
+      ),
+    )
+    .returning({ id: jobs.id });
+
+  return deleted.length > 0;
+}
+
+/**
+ * Deletes every running reminder of a member.
+ *
+ * @returns how many rows were removed.
+ */
+export async function deleteUserReminders(userId: string): Promise<number> {
+  const deleted = await db
+    .delete(jobs)
+    .where(and(eq(jobs.event, "reminder"), eq(jobs.userId, userId)))
+    .returning({ id: jobs.id });
+
+  return deleted.length;
 }
 
 /* ------------------------------------------------------------------ *

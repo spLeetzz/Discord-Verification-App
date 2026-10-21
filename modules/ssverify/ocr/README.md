@@ -47,6 +47,11 @@ const provider = createOcrProvider();
 // OCR_PROVIDER_URL set -> HttpOcrProvider, the Quotient-compatible service
 ```
 
+Two helpers come with it: `ocrEnabledFromEnv()` reads the environment
+half of the on/off decision, and `isOcrDisabled(provider)` says whether the
+provider in hand is the switched-off one. Both are described under
+[Switching OCR off](#switching-ocr-off).
+
 ## The providers
 
 **`LocalOcrProvider`** is the default. `tesseract.js` reads the text and
@@ -57,9 +62,10 @@ run and cached in `.cache/tesseract` (override with `cachePath`).
 The worker is created lazily and reused, so only the first screenshot pays
 for the download. `warmup()` at boot moves that cost to startup. A worker
 that cannot be started does not fail the screenshot: the text comes back
-empty and the hashes are still computed — and every text rule in the
-verification feature rejects an empty text, so a broken OCR rejects a
-screenshot rather than waving it through.
+empty and the hashes are still computed — and every rule that checks the
+text rejects an empty text, so a broken OCR rejects a screenshot rather than
+waving it through. (The `any_ss` type has no rules at all; see
+[Switching OCR off](#switching-ocr-off).)
 
 Calls are serialised per provider. Quotient held one global lock around its
 OCR call; here the lock belongs to the provider, so a second provider or a
@@ -68,6 +74,99 @@ second process is not slowed down by the first.
 **`HttpOcrProvider`** talks to the Quotient-compatible service and is only
 used when `OCR_PROVIDER_URL` is configured. It posts `[{"url": ...}]` with
 an `authorization` header and reads back `{url, dhash, phash, text}`.
+
+**`DisabledOcrProvider`** is the provider for a deployment that does not use
+OCR at all. It is described under [Switching OCR off](#switching-ocr-off).
+
+## Switching OCR off
+
+A deployment that does not use screenshot verification should not pay for
+OCR. The local provider starts a Tesseract worker, which downloads a
+language model of about 15MB the first time it runs and keeps a worker
+process for the rest of the bot's life, and every screenshot costs about two
+seconds.
+
+`createOcrProvider({ enabled: false })` returns the `DisabledOcrProvider`
+instead. It **starts no worker, downloads no model and makes no network
+call** — the image is not even decoded.
+
+```ts
+const provider = createOcrProvider({ enabled: false });
+
+provider.name;                    // "disabled"
+await provider.analyze(buffer);  // { text: "", dhash: "0000000000000000", ... }
+```
+
+### What "off" means
+
+**Empty text.** The disabled provider answers with empty text and never
+reads the image. Every rule that checks the text refuses an empty text, so a
+screenshot submitted while OCR is off is rejected rather than waved through.
+
+**The one exception.** The `any_ss` screenshot type has no rules at all, and
+a `loco` or `rooter` setup whose channel name is empty has none that look
+at the text either. For those two, an empty text on its own would be
+*accepted* — so the caller has to refuse the submission itself:
+
+```ts
+import { isOcrDisabled } from "../ssverify/ocr/index.js";
+
+if (isOcrDisabled(getOcrProvider())) {
+  // refuse the submission — do not store it
+}
+```
+
+`isOcrDisabled()` looks at the provider's name, so it answers the question
+whatever provider the caller holds.
+
+The hashes of a disabled result are sixteen zero characters. No image was
+looked at, so there is no hash — the caller must not store one.
+
+### What it saves
+
+- **No language model download.** The local provider fetches about 15MB of
+  Tesseract model the first time it runs and caches it in `.cache/tesseract`.
+  Off, there is no download and no cache directory.
+- **No worker process.** The Tesseract worker is created lazily and kept
+  for the life of the bot. Off, there is nothing to keep and nothing to
+  terminate.
+- **No two-second stalls.** Every screenshot costs about two seconds of
+  recognition. Off, the answer comes back immediately.
+
+### How the decision is made
+
+Three ways:
+
+1. **Forced on** — `OCR_ENABLED=true` or `OCR_ENABLED=1`. OCR runs whatever
+   the database says. This is what a deployment that uses screenshot
+   verification sets, and it is also the right answer for a deployment with
+   `OCR_PROVIDER_URL` set: that deployment *is* using OCR.
+2. **Forced off** — `OCR_ENABLED=false` or `OCR_ENABLED=0`. OCR does not run
+   whatever the database says.
+3. **Automatic** — `OCR_ENABLED` is not set. The caller decides, and the
+   caller is the only one who can see the database: it checks whether any
+   screenshot-verification setup exists. A guild that never configured one
+   pays nothing.
+
+A value that is none of those four — `yes`, `2`, an empty string — is **not
+a guess**. It counts as unset, so a typo falls back to the automatic
+decision instead of quietly switching OCR off.
+
+`ocrEnabledFromEnv()` reads the environment half of that decision and
+returns `true`, `false`, or `undefined` for "not set, you decide":
+
+```ts
+import { createOcrProvider, ocrEnabledFromEnv } from "../ssverify/ocr/index.js";
+
+const forced = ocrEnabledFromEnv();               // true | false | undefined
+const enabled = forced ?? (await hasSsConfig());   // the caller's own check
+
+const provider = createOcrProvider({ enabled });
+```
+
+The module does not read `OCR_ENABLED` on its own, and it does not import
+from `db/`: it takes the decision as an argument, because only the caller
+can see the database.
 
 ### Adding a third provider
 
@@ -182,9 +281,10 @@ makes.
 
 | File | What it holds |
 | --- | --- |
-| `index.ts` | `OcrProvider`, `OcrResult`, `createOcrProvider` |
+| `index.ts` | `OcrProvider`, `OcrResult`, `createOcrProvider`, `ocrEnabledFromEnv` |
 | `local.ts` | `LocalOcrProvider` — Tesseract and sharp |
 | `http.ts` | `HttpOcrProvider` — the Quotient-compatible service |
+| `disabled.ts` | `DisabledOcrProvider` — the provider that is switched off |
 | `hash.ts` | `computeHashes`, `computeDhash`, `computePhash`, `hexToHash`, `hashToHex`, `hammingDistance`, `isPerceptualDuplicate` |
 | `resample.ts` | Pillow-compatible Lanczos resampling |
 | `text.ts` | `normaliseText` — Quotient's `lower_text` |
@@ -199,3 +299,10 @@ npx vitest run modules/ssverify/ocr/
 The tests never start Tesseract: the text extractor is injected, so the
 suite does not depend on the language model being downloadable. The text
 content is never asserted either, only that it is a string.
+
+`disabled.test.ts` is the exception: it mocks `tesseract.js` so that the
+worker factory can be watched, and asserts that the switched-off provider
+never calls it, never calls `fetch`, and never creates the cache directory
+the language model would be downloaded into. A control test starts a worker
+on purpose, so that "no worker was started" is a fact about the provider and
+not about a spy that never fires.

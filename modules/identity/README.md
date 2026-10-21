@@ -1,14 +1,13 @@
 # `modules/identity/` — the identity area
 
 Three features that answer one question — *who is this person, and are
-they really on this team?* — plus the tournament group manager.
+they really on this team?*
 
 | Feature | What it is |
 |---|---|
 | **Tag check** | A channel where a captain registers his team by mentioning his teammates. |
 | **Easy tag** | A channel where the bot turns the raw ids and `@names` in a message into real mentions. |
 | **Screenshot verification** | A channel where a participant proves they follow the tournament's page with a picture. |
-| **Group management** | The tournament's group channels, roles and the published group list. |
 
 Quotient modelled the first three as discord.py cogs with per-guild
 configuration rows and a lot of `if` in the listeners. Here the rules are
@@ -16,6 +15,11 @@ configuration rows and a lot of `if` in the listeners. Here the rules are
 `verification.ts`, `duplicate.ts`) and the state machines live in
 `service.ts`. The rules can be tested without a Discord connection, and
 they are.
+
+The tournament's **group manager** used to live here as well. It was a
+second, unreachable copy of the tournament area's own group manager, and
+its handlers created channels and roles without checking the caller. It
+has been deleted — the tournament area's version is the live one.
 
 ---
 
@@ -43,8 +47,13 @@ PermissionFlagsBits.ManageGuild)`), and `/tagcheck set` and `/easytag
 set` additionally check that the bot may send messages, embed links and
 manage messages **in that channel** before they write anything.
 
-The group manager has no command of its own: it is reached from the
-tournament area, which opens the panel for a tourney.
+`/ssverify` answers **ephemerally**. The panel is a moderator's control
+panel — its buttons delete a server's verification setup, repoint the
+channel the bot reads, change the role the bot grants and set the text
+the bot posts — so it does not belong in the channel. The ephemeral reply
+is not the authorisation: the panel's buttons check the caller
+themselves, because a message that only the moderator can see still
+travels. See [the panel's authorisation](#the-panels-authorisation).
 
 ### The module's entry points
 
@@ -59,9 +68,10 @@ import {
 - `registerIdentity(client, router?)` attaches the `MessageCreate`
   listener and, when a router is given, wires the panel's buttons, select
   menus and modals into it.
-- `warmIdentity()` loads the channel cache and warms the OCR provider up.
-  The manager calls it on `ClientReady`.
-- `shutdownIdentity()` releases the OCR worker and the two draft stores.
+- `warmIdentity()` decides whether the OCR runs, loads the channel cache
+  and warms the OCR provider up. The manager calls it on `ClientReady`.
+- `shutdownIdentity()` releases the OCR worker and the wizard's draft
+  store.
 
 ### The service
 
@@ -92,13 +102,46 @@ premium feature is enforced (D15): `assertChannelAllowance`,
 ### Custom ids
 
 ```
-identity:ssmod:setup:<action>:<token>   the wizard — the setup does not exist yet
+identity:ssmod:wizard:<action>:<token>   the wizard — the setup does not exist yet
 identity:ssmod:<action>:<configId>      the editor — the setup is a row
-identity:groups:<action>[:<id>]         the group manager
 ```
 
 The wizard's prefix is registered **before** the editor's, because
 `identity:ssmod` would match the wizard's ids too (D7, D18).
+
+The wizard's prefix is `wizard` and not `setup` because the list panel
+has a **Setup** button whose id is `identity:ssmod:setup` — and the
+router takes the first prefix that matches, so a wizard prefix of
+`identity:ssmod:setup` swallowed that button and it never did anything.
+
+### The panel's authorisation
+
+The panel is a **message**, so anybody who can read the channel can press
+its buttons. The buttons are not harmless: they delete a server's
+verification setup, repoint the channel the bot OCRs, change the role the
+bot grants on success, and set the text and the link the bot posts
+afterwards. That is a privilege escalation over the bot's own
+configuration, so **every** handler checks the caller itself
+(`guards.ts`), before the setup is read or written.
+
+| Rule | Where it is decided |
+|---|---|
+| The interaction must come from a guild. | `canManageSsConfig` |
+| The caller must be a moderator of that guild — Manage Server, Administrator, or the staff role the guild already uses. | `canManageSsConfig` |
+| The setup must belong to that guild. | the **lookup**: `repo.findSsConfigById(guildId, id)`, `repo.updateSsConfig(guildId, id, …)`, `repo.deleteSsConfig(guildId, id)` |
+| The wizard must belong to that guild. | the draft carries its guild: `startSsWizard(guildId)` |
+
+The third row is the important one. The row id of a setup travels in a
+custom id, so a lookup by id alone would answer a question about another
+server's configuration. A uuid primary key makes that guess unguessable
+rather than impossible, which is not a defence — so the **guild is part
+of the key** everywhere, the way the community area's `findTagById(guildId,
+id)` does it.
+
+The rest of the repository already worked this way: the slots area says
+outright that "the panel is public, so the buttons check the caller
+themselves", the tourneys area calls `refuseUnlessMod`, and the
+moderation area calls `isStaff`.
 
 ---
 
@@ -207,9 +250,13 @@ The two literal button checks are also changed: they are case-insensitive
 word matches now, and they still refuse `SUBSCRIBED` and `Following` —
 exactly as Quotient's trailing space did.
 
-**A broken OCR refuses a screenshot.** A provider that fails answers
-with an empty text, and every text rule rejects an empty text, so a
-screenshot is never waved through because the OCR was down.
+**A broken OCR rejects a screenshot — for most setups.** A provider that
+fails answers with an empty text, and most rule sets reject an empty text.
+But **not every one does**: `any_ss` has no rules at all, and a `loco` or
+`rooter` setup whose channel name is empty has none that look at the text
+either — for those, an empty text would be *accepted*. That is why the
+submission is refused **outright** when the OCR is known to be **off**
+rather than being left to the rules. See [the OCR provider](#the-ocr-provider).
 
 ### The duplicate check
 
@@ -254,8 +301,10 @@ type rules → recorded → role granted`. The stored submissions are re-read
 after every accepted screenshot, so a second screenshot in the same
 message cannot be a duplicate of the first one.
 
-**The group list.** `created → published → refreshed (every two minutes
-at most)`.
+**One submission while the OCR is off.** `refused → nothing stored`. The
+refusal comes before the duplicate check and before the rules, because
+the rules cannot refuse it on their own — see [the OCR
+provider](#the-ocr-provider).
 
 ### The premium gates
 
@@ -311,6 +360,7 @@ The clock is injectable, so the tests do not have to sleep.
 `modules/ssverify/ocr/` and is not this area's to change.
 
 - One provider for the whole bot, so the Tesseract worker starts once.
+- The **decision** whether the OCR runs at all, made **once at boot**.
 - `warmupOcr()` at boot, so the language model is downloaded at startup
   rather than on the first screenshot of the day.
 - `shutdownOcr()` on exit, so the worker is terminated and the process
@@ -319,6 +369,63 @@ The clock is injectable, so the tests do not have to sleep.
 `OCR_PROVIDER_URL` selects the Quotient-compatible remote service; when
 it is absent the local provider is used, which needs no key and no
 network.
+
+### Switching the OCR off
+
+A deployment that does not use screenshot verification should not pay for
+OCR: the local provider starts a Tesseract worker, downloads a language
+model of about 15MB and costs two seconds per screenshot. The switch is
+made **here**, at boot, and it is made **once**:
+
+| `OCR_ENABLED` | Decision |
+|---|---|
+| `true` / `1` | **Forced on** — the OCR runs whatever the database says. |
+| `false` / `0` | **Forced off** — the OCR does not run whatever the database says. |
+| unset, or a value that is not understood | **Automatic** — the OCR runs when there is at least one screenshot-verification setup. |
+
+A value that is neither of those is **not a guess**: it counts as unset,
+so a typo falls back to the automatic decision rather than quietly
+switching the OCR off.
+
+**The decision is at boot** because that is when the operator wants to
+know whether the OCR is on, and because it keeps `getOcrProvider()`
+synchronous — which is what the call sites assume. `getOcrProvider()`
+**throws** when the decision has not been made: the provider is not built
+on first use any more, because a provider built with the wrong setting
+would be the wrong provider for the whole run of the bot.
+
+`warmIdentity()` makes the decision **before** it loads the channel
+cache, because the cache is what makes a screenshot-verification channel
+live — the answer has to be there before the first screenshot can be
+processed.
+
+The automatic decision is a snapshot of the world at boot. A setup that is
+created *after* the boot does not switch the OCR on: the bot has to be
+restarted, or `OCR_ENABLED=true` has to be set. The area says so in the
+log when a setup is created while the OCR is off.
+
+### The refusal when the OCR is off
+
+The switched-off provider answers with an **empty text** and two hashes
+of nothing. That is not enough on its own: `any_ss` has no rules at all,
+and a `loco` or `rooter` setup whose channel name is empty has none that
+look at the text — an empty text would be *accepted* there.
+
+So the **submission itself** is refused when the OCR is off, before the
+duplicate check and before the rules run:
+
+```
+**Screenshot verification is not currently available. Please try again later.**
+```
+
+It is a normal refusal, not a crash and not a silent pass. **Nothing is
+stored**: no `ss_submissions` row, and no hash — the hash of nothing
+never reaches the database. The message listener refuses before it even
+downloads the picture.
+
+A **broken** OCR is a different thing from a switched-off one: it answers
+with an empty text, which most rule sets reject. It is still not enough
+on its own, which is why the refusal above is about the OCR being *off*.
 
 ---
 
@@ -330,10 +437,13 @@ network.
 | **B11** | The channel was added to the live set as soon as it was picked, so cancelling the wizard left a half-configured channel running. | The channel only goes live when the setup is saved. |
 | **B12** | The success-message editor's button was disabled for a free guild and the wizard had no guard at all, so the gate was bypassable. | One `assertEntitled` call covers both paths, and the button is never silently disabled. |
 | **B14** | `\b@\w+` matched `@name` and stopped before the discriminator, so `@their_full_discord_tag#1234` was truncated — the very form the error message advertises. And `\b` before the `@` needs a word character in front of it, so a tag at the start of a message never matched. | A full tag is matched whole, and the `@` is only required not to be preceded by a word character or a dot — which also keeps `mail@example.com` out. |
-| **B15** | The group channel was found by a name substring, so "Group 1" also matched "Group 10". | The channel is chosen by the operator and stored on the row. |
-| **B16** | The refresh button's two-minute cooldown read an `auto_now` column, so it depended on the last write of any kind. | The row's `updated_at` is written **only** by the refresh path, so it is the last refresh time. |
-| **B17** | The roles and the channels were created in a loop and the function returned on the first failure, so a failure on the fourth of five groups left the first three behind. | Everything that is created is collected and removed again when something goes wrong. |
 | **B18** | The update wrote `dict(self.record)` and relied on Tortoise internals to leave the right columns alone. | The patch is an explicit list of fields. |
+
+Three more were fixed here and have moved with the group manager to the
+tournament area, which owns the group feature: **B15** (the group channel
+was found by a name substring), **B16** (the refresh cooldown read an
+`auto_now` column) and **B17** (a failed creation left the earlier
+groups behind).
 
 The three rules that changed because the **OCR engine** changed are
 described under [the screenshot verification](#the-screenshot-verification)
@@ -344,7 +454,7 @@ checks, and the split between the raw text and the normalised text.
 
 ## The tests
 
-`npx vitest run modules/identity` — 145 tests in 9 files.
+`npx vitest run modules/identity` — 205 tests in 11 files.
 
 | File | What it covers |
 |---|---|
@@ -352,8 +462,10 @@ checks, and the split between the raw text and the normalised text.
 | `tagcheck.test.ts` | The two guards, their order, and the team name the reply shows. |
 | `duplicate.test.ts` | The threshold, the two kinds of duplicate, and the malformed hash. |
 | `verification.test.ts` | Every type's rules, against text this port's OCR provider produces. |
-| `service.test.ts` | The premium gates (nothing is written when a gate refuses) and the rate limits. |
-| `commands.test.ts` | The three commands serialise, and the adapter files register them. |
+| `service.test.ts` | The premium gates (nothing is written when a gate refuses), the rate limits, and the guild scope of a setup. |
+| `ocr.test.ts` | The boot decision (forced on, forced off, automatic) and the refusal when the OCR is off — including that **nothing is stored**. |
+| `commands.test.ts` | The three commands serialise, the adapter files register them, and `/ssverify` answers ephemerally. |
 | `ignore-role.test.ts` | The ignore role is compared by id. |
 | `cache.test.ts` | The three channel sets stay apart. |
-| `views/ssmod.test.ts` | The panel's premium gates: the draft is untouched when a gate refuses. |
+| `guards.test.ts` | Who may manage a setup: the moderator, the administrator, the ordinary member, the member of another guild. |
+| `views/ssmod.test.ts` | The panel's authorisation (an ordinary member changes nothing; a moderator may; another guild's row is not found), the premium gates, and the custom ids. |

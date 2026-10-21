@@ -17,7 +17,7 @@
  *    source's broken raw SQL (S6, row 14).
  */
 
-import { and, asc, count, eq, sql } from "drizzle-orm";
+import { and, asc, count, eq, inArray, sql } from "drizzle-orm";
 import { db, withTransaction } from "../../db/client.js";
 import {
   jobs,
@@ -207,6 +207,17 @@ export async function countTourneys(guildId: string): Promise<number> {
     .where(eq(tourneys.guildId, guildId));
 
   return rows[0]?.value ?? 0;
+}
+
+/** Every tournament whose registration is open, across every guild. */
+export async function listOpenTourneys(): Promise<TourneyRecord[]> {
+  const rows = await db
+    .select()
+    .from(tourneys)
+    .where(eq(tourneys.status, "open"))
+    .orderBy(asc(tourneys.createdAt));
+
+  return rows.map(toTourney);
 }
 
 /**
@@ -406,7 +417,7 @@ export async function listSlotsOfUser(
     .where(
       and(
         eq(tourneySlots.tourneyId, tourneyId),
-        sql`(${tourneySlots.leaderId} = ${userId} or ${tourneySlots.members} && ${[userId]}::text[])`,
+        sql`(${tourneySlots.leaderId} = ${userId} or ${tourneySlots.members} && ARRAY[${userId}]::text[])`,
       ),
     )
     .orderBy(asc(tourneySlots.num));
@@ -442,6 +453,11 @@ export async function listTeamNames(tourneyId: string): Promise<string[]> {
  * quoted the qualified names as single identifiers — so it would raise
  * `relation does not exist` at runtime and the fake-tag check had never
  * worked. Ours is a typed query over one table (S6, row 14).
+ *
+ * The array is written as `ARRAY[$1, $2]::text[]` rather than
+ * `$1::text[]`: the latter makes Postgres read the parameter as text
+ * and then cast it, and the array literal it receives is not one it can
+ * parse. Every id is still a bind parameter.
  */
 export async function findFakeTagMatches(
   tourneyId: string,
@@ -449,13 +465,18 @@ export async function findFakeTagMatches(
 ): Promise<TourneySlotRecord[]> {
   if (memberIds.length === 0) return [];
 
+  const array = sql.join(
+    memberIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+
   const rows = await db
     .select()
     .from(tourneySlots)
     .where(
       and(
         eq(tourneySlots.tourneyId, tourneyId),
-        sql`${tourneySlots.members} && ${[...memberIds]}::text[]`,
+        sql`${tourneySlots.members} && ARRAY[${array}]::text[]`,
       ),
     );
 
@@ -563,10 +584,14 @@ export async function insertSlot(
  * Ours has the constraint, so the swap goes through a temporary number:
  *
  * ```sql
- * UPDATE tourney_slots SET num = -1  WHERE id = $first;   -- park
+ * UPDATE tourney_slots SET num = -1       WHERE id = $first;   -- park
+ * UPDATE tourney_slots SET num = $firstNum WHERE id = $second;
  * UPDATE tourney_slots SET num = $secondNum WHERE id = $first;
- * UPDATE tourney_slots SET num = $firstNum  WHERE id = $second;
  * ```
+ *
+ * The order matters: the constraint is checked immediately, so the
+ * second slot has to take the first one's number **before** the first
+ * slot takes the second one's.
  *
  * `-1` cannot collide with a real number: every number comes from the
  * per-tourney sequence and is positive.
@@ -587,7 +612,7 @@ export async function swapSlotNumbers(
       .where(
         and(
           eq(tourneySlots.tourneyId, tourneyId),
-          sql`${tourneySlots.id} in (${[firstSlotId, secondSlotId]}::uuid[])`,
+          inArray(tourneySlots.id, [firstSlotId, secondSlotId]),
         ),
       );
 
@@ -605,15 +630,19 @@ export async function swapSlotNumbers(
       .set({ num: -1, updatedAt: new Date() })
       .where(eq(tourneySlots.id, firstSlotId));
 
-    await tx
-      .update(tourneySlots)
-      .set({ num: secondNum, updatedAt: new Date() })
-      .where(eq(tourneySlots.id, firstSlotId));
-
+    // The second slot takes the first one's number, which the parking
+    // step has just freed.
     await tx
       .update(tourneySlots)
       .set({ num: firstNum, updatedAt: new Date() })
       .where(eq(tourneySlots.id, secondSlotId));
+
+    // And the first slot takes the second one's number, which the step
+    // above has just freed.
+    await tx
+      .update(tourneySlots)
+      .set({ num: secondNum, updatedAt: new Date() })
+      .where(eq(tourneySlots.id, firstSlotId));
 
     return true;
   });
@@ -750,6 +779,13 @@ export async function getMediaPartnerByChannel(
   return row ? toMediaPartner(row) : null;
 }
 
+/** Every media partner, across every guild. */
+export async function listAllMediaPartners(): Promise<MediaPartnerRecord[]> {
+  const rows = await db.select().from(mediaPartners);
+
+  return rows.map(toMediaPartner);
+}
+
 /** How many media partners a guild has. */
 export async function countMediaPartners(guildId: string): Promise<number> {
   const rows = await db
@@ -827,6 +863,19 @@ export async function countMediaPartnerSlots(
     .where(eq(mediaPartnerSlots.mediaPartnerId, mediaPartnerId));
 
   return rows[0]?.value ?? 0;
+}
+
+/** The registrations that came in through a partner channel. */
+export async function listMediaPartnerSlots(
+  mediaPartnerId: string,
+): Promise<MediaPartnerSlotRecord[]> {
+  const rows = await db
+    .select()
+    .from(mediaPartnerSlots)
+    .where(eq(mediaPartnerSlots.mediaPartnerId, mediaPartnerId))
+    .orderBy(asc(mediaPartnerSlots.createdAt));
+
+  return rows.map(toMediaPartnerSlot);
 }
 
 /* ------------------------------------------------------------------ *
@@ -954,11 +1003,11 @@ export async function deleteGroupList(id: string): Promise<void> {
 /**
  * The job event that opens a tournament on schedule.
  *
- * **This name is not in the `jobs_event_check` constraint yet.** The
- * constraint is generated from `JOB_EVENTS` in `db/schema/common.ts`,
- * which is manager-owned, so the addition is a queue item — see the
- * area's README and the port report. Until it lands, the insert below
- * fails loudly (and only that feature is affected).
+ * The name is in the `jobs_event_check` constraint: the constraint is
+ * generated from `JOB_EVENTS` in `db/schema/common.ts`, and the
+ * migration that added it has been applied. The row the dispatcher
+ * deletes before it dispatches it is the only copy of the schedule —
+ * see `service.getSchedule`.
  */
 export const TOURNEY_JOB_EVENT = "tourney_open";
 
@@ -1050,6 +1099,77 @@ export function tourneyIdOf(payload: unknown): string | null {
   const tourneyId = (payload as Record<string, unknown>).tourneyId;
 
   return typeof tourneyId === "string" ? tourneyId : null;
+}
+
+/* ------------------------------------------------------------------ *
+ * The message-delete job
+ * ------------------------------------------------------------------ */
+
+/**
+ * The job event that deletes a message.
+ *
+ * The name is in the `jobs_event_check` constraint — see `JOB_EVENTS` in
+ * `db/schema/common.ts`. This area both **produces** the row (the
+ * room-credential post arms one for itself) and **handles** it
+ * (`modules/tourneys/jobs.ts`).
+ */
+export const MSG_DELETE_JOB_EVENT = "msg_delete";
+
+/**
+ * The payload of a message-delete job.
+ *
+ * **It carries no secret.** The deletion only has to know *which*
+ * message to delete, so the payload carries the channel id and the
+ * message id — never the text of the message, and never a password. A
+ * job row is a row in a table that is read, logged and copied around; it
+ * is not a place a credential can go.
+ */
+export interface MessageDeleteJobPayload {
+  /** The channel the message is in. */
+  readonly channelId: string;
+  /** The message to delete. */
+  readonly messageId: string;
+}
+
+/**
+ * Arms the deletion of a message.
+ *
+ * The scheduler is the durable `jobs` table, never a `setTimeout`: a
+ * timer that dies with the process means the message stays in the
+ * channel — and a room password that stays in a channel is the problem
+ * this job exists to solve (D39).
+ */
+export async function scheduleMessageDelete(
+  payload: MessageDeleteJobPayload,
+  expiresAt: Date,
+): Promise<string> {
+  const rows = await db
+    .insert(jobs)
+    .values({ event: MSG_DELETE_JOB_EVENT, expiresAt, payload })
+    .returning({ id: jobs.id });
+
+  const id = rows[0]?.id;
+
+  if (!id) throw new Error("the job insert returned no id");
+
+  return id;
+}
+
+/**
+ * The message-delete jobs that are armed.
+ *
+ * Every one of them carries a channel id and a message id, and nothing
+ * else — see {@link MessageDeleteJobPayload}.
+ */
+export async function listMessageDeleteJobs(): Promise<
+  { id: string; expiresAt: Date; payload: unknown }[]
+> {
+  const rows = await db
+    .select({ id: jobs.id, expiresAt: jobs.expiresAt, payload: jobs.payload })
+    .from(jobs)
+    .where(eq(jobs.event, MSG_DELETE_JOB_EVENT));
+
+  return rows;
 }
 
 /**

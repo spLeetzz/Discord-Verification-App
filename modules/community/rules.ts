@@ -158,6 +158,114 @@ export function validateTagName(input: string): TagNameValidation {
 }
 
 /* ------------------------------------------------------------------ *
+ * The member quotas
+ * ------------------------------------------------------------------ */
+
+/**
+ * How many tags a member may own in one guild.
+ *
+ * A tag is a row in the `tags` table and nothing ever removed one, so a
+ * member could fill the table with rows nobody would ever read. The
+ * allowance is per **guild**, because the tag namespace is per guild:
+ * twenty-five tags in one server is a lot of canned messages, and it is
+ * the same twenty-five in every server the member is in.
+ *
+ * The number is the area's own limit, not a premium one: the free tier
+ * (`FREE_TIER`) is about what a *guild* may configure, and this is about
+ * what a *member* may leave lying around.
+ */
+export const MAX_TAGS_PER_MEMBER = 25;
+
+/**
+ * How many reminders a member may have running at once.
+ *
+ * A reminder is a row in the `jobs` table, which the dispatcher polls
+ * every fifteen seconds, so the rows are not free. The allowance is per
+ * **member across every server**, because that is how the jobs table is
+ * keyed: `jobs.user_id` says who a reminder is for, and `/reminder list`
+ * lists all of a member's reminders wherever they were set.
+ *
+ * Twenty-five running reminders is more than anybody needs at once, and
+ * the allowance empties itself: the dispatcher deletes a reminder's row
+ * when it fires.
+ */
+export const MAX_REMINDERS_PER_MEMBER = 25;
+
+/** The things a member may have an allowance of. */
+export type QuotaSubject = "tag" | "reminder";
+
+/** Why a member may not have another one. */
+export type QuotaRefusal = "limit_reached";
+
+/** The result of the allowance check. */
+export interface QuotaAdmission {
+  /** Whether the member may have another one. */
+  readonly allowed: boolean;
+  /** Why they may not, or `null` when they may. */
+  readonly refusal: QuotaRefusal | null;
+  /** The refusal to show the user. Empty when the member may have one. */
+  readonly message: string;
+}
+
+/**
+ * How each subject is named in the refusal.
+ *
+ * The wording is here rather than in the service, so the rule is one
+ * pure function and the message cannot drift between the two callers.
+ */
+const QUOTA_SUBJECTS: Record<
+  QuotaSubject,
+  {
+    readonly plural: string;
+    readonly scope: string;
+    readonly command: string;
+    readonly verb: string;
+  }
+> = {
+  tag: {
+    plural: "tags",
+    scope: "in this server",
+    command: "/tag delete",
+    verb: "make",
+  },
+  reminder: {
+    plural: "reminders",
+    scope: "running",
+    command: "/reminder delete",
+    verb: "set",
+  },
+};
+
+/**
+ * Decides whether a member may have one more of a thing.
+ *
+ * The refusal says how to get out of it, because a member at the
+ * allowance has to be able to make room: the answer names the command
+ * that frees a slot.
+ *
+ * @param options.subject      what the member is asking for.
+ * @param options.currentCount how many they have now.
+ * @param options.limit        how many they may have.
+ */
+export function checkMemberQuota(options: {
+  subject: QuotaSubject;
+  currentCount: number;
+  limit: number;
+}): QuotaAdmission {
+  if (options.currentCount < options.limit) {
+    return { allowed: true, refusal: null, message: "" };
+  }
+
+  const subject = QUOTA_SUBJECTS[options.subject];
+
+  return {
+    allowed: false,
+    refusal: "limit_reached",
+    message: `You can have at most ${options.limit} ${subject.plural} ${subject.scope}. Delete one with \`${subject.command}\` before you ${subject.verb} another.`,
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * Auto-purge admission
  * ------------------------------------------------------------------ */
 

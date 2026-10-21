@@ -29,7 +29,7 @@ import {
   selectRow,
 } from "./components.js";
 import { tourneysId } from "./ids.js";
-import type { Panel } from "./handlers.js";
+import type { Panel, PanelComponents } from "./handlers.js";
 
 /** How many tournaments the select menu can offer. */
 const MAX_MENU_OPTIONS = 25;
@@ -59,7 +59,7 @@ export function buildManagerPanel(
     );
   }
 
-  const rows: Panel["components"] = [];
+  const rows: PanelComponents = [];
 
   if (tourneys.length > 0) {
     const menu = new StringSelectMenuBuilder()
@@ -122,7 +122,7 @@ export function buildTourneyPanel(tourney: TourneyRecord): Panel {
       ].join("\n"),
     );
 
-  const rows: Panel["components"] = [
+  const rows: PanelComponents = [
     buttonRow(
       button({
         customId: tourneysId("lifecycle", "toggle", tourney.id),

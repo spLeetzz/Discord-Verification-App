@@ -29,7 +29,7 @@ import {
   buttonRow,
 } from "./components.js";
 import { tourneysId } from "./ids.js";
-import type { Panel } from "./handlers.js";
+import type { Panel, PanelComponents } from "./handlers.js";
 
 /**
  * The slot-manager panel.
@@ -50,7 +50,7 @@ export function buildSlotManagerPanel(tourney: TourneyRecord): Panel {
       ].join("\n"),
     );
 
-  const rows: Panel["components"] = [
+  const rows: PanelComponents = [
     buttonRow(
       button({
         customId: tourneysId("slotm_cancel", tourney.id),
@@ -72,54 +72,6 @@ export function buildSlotManagerPanel(tourney: TourneyRecord): Panel {
         label: "Swap Groups",
         style: ButtonStyle.Primary,
       }),
-    ),
-  ];
-
-  assertComponentBudget(rows);
-
-  return { embeds: [embed], components: rows };
-}
-
-/**
- * The panel a moderator sees for a member's slots.
- */
-export function buildMemberSlotsPanel(options: {
-  readonly tourney: TourneyRecord;
-  readonly memberId: string;
-  readonly slots: readonly {
-    readonly id: string;
-    readonly num: number;
-    readonly teamName: string;
-    readonly confirmJumpUrl: string | null;
-  }[];
-  /** The groups the slots fall into. */
-  readonly groupNumbers: readonly number[];
-}): Panel {
-  const { tourney, memberId, slots, groupNumbers } = options;
-
-  const embed = new EmbedBuilder()
-    .setTitle(`Slots — ${tourney.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      slots.length === 0
-        ? `<@${memberId}> does not have a slot in this tournament.`
-        : slots
-            .map(
-              (slot, index) =>
-                `\`${index + 1}.\` **${slot.teamName}** (Slot ${slot.num}, Group ${groupNumbers[index] ?? "?"})`,
-            )
-            .join("\n"),
-    );
-
-  const rows: Panel["components"] = [
-    buttonRow(
-      ...slots.map((slot) =>
-        button({
-          customId: tourneysId("slotm_cancel", tourney.id, slot.id),
-          label: `Cancel ${slot.num}`,
-          style: ButtonStyle.Danger,
-        }),
-      ),
     ),
   ];
 

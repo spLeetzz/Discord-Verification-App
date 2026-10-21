@@ -1,12 +1,13 @@
 # Identity area — port report
 
-The port of Quotient's `tagcheck`, `eztag` and `ssverify` cogs, plus the
-tournament group manager (`groupm`). Everything lives in
-`modules/identity/` and `commands/esports/`.
+The port of Quotient's `tagcheck`, `eztag` and `ssverify` cogs. The
+tournament group manager (`groupm`) was ported here as well and has since
+been **deleted** — see §10. Everything lives in `modules/identity/` and
+`commands/esports/`.
 
 - `npm run typecheck` — **clean for this area** (zero errors in
   `modules/identity/` and `commands/esports/`).
-- `npm test` — **145 tests in this area, all passing** (9 files).
+- `npm test` — **205 tests in this area, all passing** (11 files).
 - `modules/identity/README.md` — the interface, the rules, the state
   machines, the premium gates, the bugs.
 
@@ -77,7 +78,7 @@ by `listCommandFiles`, and each name is registered **exactly once**.
 | `src/cogs/tagcheck/` | `tagcheck.ts` (the rules) + `service.ts` (the state machine) + `commands/tagcheck.ts` + the message listener |
 | `src/cogs/eztag/` | `easytag.ts` (the extraction and the resolution) + `service.ts` + `commands/easytag.ts` + the message listener |
 | `src/cogs/ssverify/` | `verification.ts` (the rules) + `duplicate.ts` (the duplicate check) + `service.ts` + `commands/ssverify.ts` + `views/ssmod.ts` (the panel) + the message listener |
-| `src/cogs/groupm/` | `groups.ts` (the service) + `views/groups.ts` (the panel) |
+| `src/cogs/groupm/` | **deleted** — the tournament area owns the group manager; see §10 |
 | `src/models/ssverify.py` | `db/schema/identity.ts` (the manager's file) + `repo.ts` |
 | `src/utils/default.py:find_team` | **Not** reimplemented — `core/team-name.ts` (D27) is used as is |
 
@@ -95,8 +96,17 @@ the only thing that writes.
   travels in the custom id.
 - **One submission**: `attachments → rate limits → OCR → duplicate check
   → type rules → recorded → role granted`.
-- **Group list**: `created → published → refreshed`, at most once every
-  two minutes.
+
+### The authorisation
+
+The screenshot-verification panel is a **message**, so anybody who can
+read the channel can press its buttons — and its buttons delete a
+server's verification setup, repoint the channel the bot OCRs, change the
+role the bot grants, and set the text and the link the bot posts. Every
+handler therefore checks the caller itself, before the setup is read or
+written (`guards.ts`), and every read and write of a setup is keyed by the
+guild **and** the row id. `/ssverify` answers ephemerally as well. See
+§10.
 
 ### The premium gates
 
@@ -146,9 +156,9 @@ One line each. The decision log's numbers are in brackets.
 | **B12** | The success-message editor disabled its button for a free guild and the wizard had no guard at all, so the gate was bypassable. | One `assertEntitled` call covers both paths, and the button is never silently disabled (D29). |
 | **B14** | `\b@\w+` matched `@name` and stopped before the discriminator, so `@their_full_discord_tag#1234` was truncated to `@their_full_discord_tag` — the very form the error message advertises. | A full tag is matched **whole**, discriminator included. |
 | **B14** | `\b` in front of the `@` needs a word character before it, so a tag at the start of a message, or after a space, never matched at all. | The `@` only has to be **not** preceded by a word character or a dot, which also keeps `mail@example.com` out. |
-| **B15** | The group channel was found by a name substring, so "Group 1" also matched "Group 10" and a list could be published into another group's channel. | The channel is chosen by the operator and **stored on the row** (D16). |
-| **B16** | `refresh_at` was an `auto_now` column, so the two-minute cooldown depended on the last write of any kind. | The row's `updated_at` is written **only** by the refresh path, so it *is* the last refresh time. |
-| **B17** | The roles and the channels were created in a loop and the function returned on the first failure, so a failure on the fourth of five groups left the first three behind. | Everything that is created is collected and **removed again** when something goes wrong. |
+| **B15** | The group channel was found by a name substring, so "Group 1" also matched "Group 10" and a list could be published into another group's channel. | The channel is chosen by the operator and **stored on the row** (D16). **Moved to the tournament area** with the group manager (§10). |
+| **B16** | `refresh_at` was an `auto_now` column, so the two-minute cooldown depended on the last write of any kind. | The row's `updated_at` is written **only** by the refresh path, so it *is* the last refresh time. **Moved to the tournament area** with the group manager (§10). |
+| **B17** | The roles and the channels were created in a loop and the function returned on the first failure, so a failure on the fourth of five groups left the first three behind. | Everything that is created is collected and **removed again** when something goes wrong. **Moved to the tournament area** with the group manager (§10). |
 | **B18** | The update wrote `dict(self.record)`, which includes the M2M field and relies on Tortoise internals to leave the right columns alone. | The patch is an **explicit list of fields**. |
 
 ### Three more changes the OCR engine forced
@@ -238,7 +248,7 @@ the repository uses.
 
 ## 8. The tests
 
-`npx vitest run modules/identity` — 145 tests in 9 files.
+`npx vitest run modules/identity` — 205 tests in 11 files.
 
 | File | Tests | What it covers |
 |---|---|---|
@@ -246,12 +256,108 @@ the repository uses.
 | `tagcheck.test.ts` | 13 | The two guards, their order, the "no mentions required" channel, and the team name the reply shows. |
 | `duplicate.test.ts` | 15 | The threshold **at** and **around** the boundary, the two kinds of duplicate, the absent hash, the malformed hash. |
 | `verification.test.ts` | 36 | Every type's rules, against text this port's OCR provider actually produces, plus the tolerant name match and the button checks. |
-| `service.test.ts` | 16 | The four premium gates — nothing is written when a gate refuses — and the two rate limits with an injected clock. |
-| `commands.test.ts` | 9 | The three commands serialise through `toJSON()`, the adapter files are found, and each name registers exactly once. |
+| `service.test.ts` | 20 | The four premium gates — nothing is written when a gate refuses — the two rate limits with an injected clock, and the guild scope of a setup. |
+| `ocr.test.ts` | 17 | The boot decision (forced on, forced off, automatic) and the refusal when the OCR is off — including that **nothing is stored**. |
+| `commands.test.ts` | 10 | The three commands serialise through `toJSON()`, the adapter files are found, each name registers exactly once, and `/ssverify` answers ephemerally. |
 | `ignore-role.test.ts` | 9 | The ignore role is compared by id, not by name. |
 | `cache.test.ts` | 9 | The three sets stay apart, and a database that is down does not empty a working cache. |
-| `views/ssmod.test.ts` | 9 | The panel's gates: a refused type or success message leaves the draft untouched. |
+| `guards.test.ts` | 8 | Who may manage a setup: the moderator, the administrator, the ordinary member, the member of another guild, the interaction with no guild. |
+| `views/ssmod.test.ts` | 37 | The panel's authorisation, the panel's gates, and the custom ids. |
 
 The repository's own suite was run as well: 906 tests in 63 files, all
 passing. (Two of them failed in `modules/community/repo.test.ts` while
 this area was being finished; that area has since fixed them.)
+
+---
+
+## 9. The OCR switch
+
+The product owner asked for the OCR to be switchable off, so a deployment
+that does not use screenshot verification does not pay for it. The switch
+itself is the OCR area's (`modules/ssverify/ocr/`); this area owns the
+**decision** and the **refusal**.
+
+| Piece | Where | What it does |
+|---|---|---|
+| the decision | `ocr.ts` — `decideOcr()` | Made **once, at boot**: `OCR_ENABLED` when it is set, otherwise automatic (there is at least one `ss_configs` row). |
+| `hasSsConfig()` | `repo.ts` | The automatic half's one query: is there at least one setup? |
+| the refusal | `service.ts` — `processSubmission()` | Refuses the submission when the OCR is off, before the duplicate check and before the rules, and stores nothing. |
+
+Three decisions that were not in the brief:
+
+| Decision | What | Why |
+|---|---|---|
+| `getOcrProvider()` **throws** when the decision has not been made | The provider is not built on first use any more. | A provider built with the wrong setting would be the wrong provider for the whole run of the bot. The call sites need it synchronous, so the alternative — awaiting the decision — was not available. |
+| The decision is made **before** the channel cache is loaded | `warmIdentity()` does the decision, then the cache, then the warm-up. | The cache is what makes a screenshot-verification channel live, so the answer has to be there before the first screenshot can be processed. |
+| A database that is down at boot switches the OCR **off** | The decision never throws; the failure is logged and the provider is the switched-off one. | A screenshot that cannot be checked has to be refused, and the bot has no way of knowing whether one was expected. |
+
+**The refusal is the important half.** "The rules reject an empty text" is
+not enough: `VERIFICATION_RULES.any_ss` is empty, and a `loco` or
+`rooter` setup with an empty channel name has no rule that looks at the
+text — for those, an empty text would be *accepted*. So the submission is
+refused outright, and the disabled provider's zero hashes — the hash of
+nothing — never reach the database.
+
+The claim that "every text rule rejects an empty text" was in this area's
+`ocr.ts` and `README.md`. It is not true for every setup, and it has been
+corrected in both.
+
+---
+
+## 10. The authorisation hole, and the group manager that was never reachable
+
+### The hole
+
+An independent security audit found that **the screenshot-verification
+panel performed no authorisation at all**. The panel is a *message*, and
+its buttons delete a server's verification setup, repoint the channel the
+bot OCRs, change the role the bot grants on success, and set the text and
+the link the bot posts. The three handlers that answered the buttons, the
+select menus and the modals (`handleSsModButton`, `handleSsModSelect`,
+`handleSsModModal`) had no `isStaff`, no `hasGuildPermissions` and no
+member lookup — the only gates were the premium entitlement (checked
+against the **config's own** guild, not the caller's) and the existence
+of the row.
+
+Every other public panel in the tree checks the caller and says so: the
+slots area documents the rule outright ("the panel is public, so the
+buttons check the caller themselves") and calls `canManageSlotManager`,
+the moderation area calls `isStaff` and then checks the guild, and the
+scrims and tourneys areas call `refuseUnlessMod`. **The identity area
+was the one that did not.**
+
+What was done:
+
+| Piece | What |
+|---|---|
+| `guards.ts` (new) | `canManageSsConfig(interaction, guildId)` — the caller must be a moderator of the guild the interaction came from: Manage Server, Administrator, or the staff role the guild already uses. It fails **closed**: no member, no guild, another guild — all refusals. |
+| Every handler | `handleSsModButton`, `handleSsModSelect`, `handleSsModModal`, `handleSsSetupButton`, `handleSsSetupSelect` and `handleSsSetupModal` call it **before** the setup is read or written. |
+| The rows | `repo.findSsConfigById(guildId, id)`, `repo.updateSsConfig(guildId, id, …)` and `repo.deleteSsConfig(guildId, id)` are keyed by the guild **and** the row id, the way the community area's `findTagById(guildId, id)` is. A uuid primary key makes a cross-guild guess unguessable rather than impossible, which is not a defence. |
+| The wizard | The draft carries the guild it was started in (`startSsWizard(guildId)`), so a wizard cannot be driven from another server. |
+| The command | `/ssverify` answers **ephemerally**. The panel is a moderator's control panel; it does not belong in the channel. This is not a substitute for the checks — a message only the moderator can see still travels, and the buttons still check the caller. |
+
+### The group manager
+
+The `identity:groups` handlers had the same shape: they created channels
+and roles in a guild with no authorisation, and they were **not
+reachable** — the only builder of those buttons was never called.
+
+The tournament area has its own, complete group manager
+(`modules/tourneys/views/groups.ts`, `modules/tourneys/views/group-channels.ts`,
+`modules/tourneys/groups.ts` and its own repository), and it is the live
+one. The identity copy was a **dead duplicate**, and it was **deleted**:
+`views/groups.ts`, `groups.ts`, the group's repository functions, the
+group's types and the `identity:groups` registration are gone. A latent
+path that creates roles and channels is exactly the thing that gets
+wired up by accident later.
+
+### Two buttons that did nothing
+
+Found on the way, and fixed:
+
+| Button | What was wrong |
+|---|---|
+| the list panel's **Setup** | Its id was `identity:ssmod:setup`, and the wizard's prefix was `identity:ssmod:setup` — the router takes the first prefix that matches, so the wizard's handler swallowed the button and it did nothing. The wizard's prefix is now `identity:ssmod:wizard`. |
+| the wizard's **Save & setup** and **Cancel** | They were built without the wizard's flag, so they carried the **editor's** prefix and were answered by the editor's handler, which knows no `save` action. The wizard could never be saved. |
+
+Both are pinned down by `views/ssmod.test.ts`.

@@ -12,7 +12,7 @@
  */
 
 import { PremiumRequiredError } from "../../core/errors.js";
-import { InputError, OwnershipError } from "../../core/errors.js";
+import { InputError, LimitExceededError, OwnershipError } from "../../core/errors.js";
 import { randomUUID } from "node:crypto";
 import { assertEntitled } from "../premium/entitlements.js";
 import { FREE_TIER } from "../premium/limits.js";
@@ -20,8 +20,11 @@ import { PremiumFeature } from "../../core/constants.js";
 import { logger } from "../../utils/logger.js";
 import * as repo from "./repo.js";
 import {
+  MAX_REMINDERS_PER_MEMBER,
+  MAX_TAGS_PER_MEMBER,
   buildTagBody,
   checkAutoPurgeAdmission,
+  checkMemberQuota,
   normaliseTagName,
   validateTagName,
 } from "./rules.js";
@@ -61,6 +64,11 @@ export const AUTOPURGE_FREE_TIER_LIMIT = FREE_TIER.autopurgeChannels;
  * stored is the name that is looked up. The uniqueness check is the
  * database's: `UNIQUE (guild_id, name)` refuses a second tag with the
  * same canonical name.
+ *
+ * The member's allowance is checked before the row is written: a tag is
+ * a row nobody ever removes, so the number of them a member may leave
+ * behind has to be bounded. The "name is taken" answer comes first —
+ * it is the more specific one.
  */
 export async function createTag(input: {
   guildId: string;
@@ -81,6 +89,22 @@ export async function createTag(input: {
 
   if (existing) {
     throw new InputError("That tag name is already taken.");
+  }
+
+  const owned = await repo.countOwnerTags(input.guildId, input.ownerId);
+
+  const admission = checkMemberQuota({
+    subject: "tag",
+    currentCount: owned,
+    limit: MAX_TAGS_PER_MEMBER,
+  });
+
+  if (!admission.allowed) {
+    throw new LimitExceededError(
+      owned,
+      MAX_TAGS_PER_MEMBER,
+      admission.message,
+    );
   }
 
   try {
@@ -486,6 +510,11 @@ export async function getAutoPurgeConfig(
  *
  * The reminder is a row in the durable `jobs` table, never a `setTimeout`:
  * a timer dies with the process and the reminder never fires.
+ *
+ * The member's allowance is checked before the row is written. A reminder
+ * is a row in the table the dispatcher polls every fifteen seconds, and
+ * nothing removed one by itself, so the number a member may leave
+ * running has to be bounded.
  */
 export async function createReminder(input: {
   guildId: string;
@@ -495,6 +524,22 @@ export async function createReminder(input: {
   dueAt: Date;
   sourceMessageId?: string;
 }): Promise<string> {
+  const running = await repo.countUserReminders(input.userId);
+
+  const admission = checkMemberQuota({
+    subject: "reminder",
+    currentCount: running,
+    limit: MAX_REMINDERS_PER_MEMBER,
+  });
+
+  if (!admission.allowed) {
+    throw new LimitExceededError(
+      running,
+      MAX_REMINDERS_PER_MEMBER,
+      admission.message,
+    );
+  }
+
   // The id is generated here rather than by the database, because the
   // dispatcher hands the handler the payload and nothing else: the id
   // travels with the payload so the embed and `/reminder list` agree.
@@ -531,6 +576,47 @@ export async function listReminders(
 /** How many reminders a user has running. */
 export async function countReminders(userId: string): Promise<number> {
   return repo.countUserReminders(userId);
+}
+
+/**
+ * Deletes one of a member's running reminders.
+ *
+ * The delete is the member's own row, so a member at their allowance can
+ * always make room for another one — the allowance must never be a trap.
+ *
+ * @returns whether the reminder was there and was deleted.
+ */
+export async function deleteReminder(input: {
+  id: string;
+  userId: string;
+}): Promise<boolean> {
+  return repo.deleteUserReminder(input.id, input.userId);
+}
+
+/**
+ * Deletes every running reminder of a member.
+ *
+ * @returns how many reminders were removed.
+ */
+export async function deleteReminders(userId: string): Promise<number> {
+  return repo.deleteUserReminders(userId);
+}
+
+/**
+ * Deletes the tags that have never been used and have not been touched
+ * for a while.
+ *
+ * The allowance bounds how many tags a member may have *at once*; this
+ * is what bounds how many the table keeps over the months. A tag that
+ * has been used is never touched: the usage counter bumps `updated_at`,
+ * so a tag in use keeps its row.
+ *
+ * @param days how long an unused tag is kept.
+ */
+export async function pruneUnusedTags(days: number): Promise<number> {
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  return repo.deleteUnusedTags(cutoff);
 }
 
 /* ------------------------------------------------------------------ *

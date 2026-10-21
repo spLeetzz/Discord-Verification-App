@@ -30,7 +30,7 @@ import {
   buttonRow,
 } from "./components.js";
 import { tourneysId } from "./ids.js";
-import type { Panel } from "./handlers.js";
+import type { Panel, PanelComponents } from "./handlers.js";
 
 /** The media-partner panel. */
 export function buildPartnerPanel(options: {
@@ -61,7 +61,7 @@ export function buildPartnerPanel(options: {
       ].join("\n"),
     );
 
-  const rows: Panel["components"] = [
+  const rows: PanelComponents = [
     buttonRow(
       button({
         customId: tourneysId("partner_add", tourney.id),

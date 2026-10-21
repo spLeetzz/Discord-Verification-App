@@ -8,17 +8,15 @@
  *  - `ss_configs`         — the screenshot-verification setups;
  *  - `ss_submissions`     — the screenshots that were submitted.
  *
- * Plus two read-only tables for the group management:
- *
- *  - `tourneys`, `tourney_slots` — the tournament and its registered teams;
- *  - `tourney_group_lists` — the published group lists.
- *
  * Two rules the shape of this file follows:
  *
  *  - **Roles and channels are ids.** Nothing here looks a role or a
  *    channel up by name (D16). The one exception is documented below.
  *  - **A submission belongs to exactly one configuration** (D13), so the
  *    join table is gone and the foreign key does the work.
+ *  - **A setup is looked up by its guild *and* its row id.** The row id
+ *    travels in a custom id, so the guild is part of the key: a setup of
+ *    another server is not found and cannot be written.
  */
 
 import { and, asc, eq, sql } from "drizzle-orm";
@@ -29,15 +27,10 @@ import {
   ssConfigs,
   ssSubmissions,
   tagcheckChannels,
-  tourneyGroupLists,
-  tourneySlots,
-  tourneys,
 } from "../../db/schema.js";
 import type { ScreenshotType } from "../../db/schema.js";
 import type {
   EasyTagConfig,
-  GroupListEntry,
-  GroupSlot,
   SsConfig,
   SsSubmission,
   TagCheckConfig,
@@ -448,12 +441,23 @@ export async function listSsConfigs(guildId: string): Promise<SsConfig[]> {
   return rows.map((row) => ({ ...row, ssType: asScreenshotType(row.ssType) }));
 }
 
-/** One setup, by its row id. */
-export async function findSsConfigById(id: string): Promise<SsConfig | null> {
+/**
+ * One setup, by its row id **and** its guild.
+ *
+ * The guild is part of the key on purpose. The row id travels in a custom
+ * id, so a lookup by id alone would answer a question about a setup of
+ * another server — and the panel's buttons would then edit it. A uuid
+ * makes that guess unguessable, not impossible, so the guild is checked as
+ * well: a setup of another guild is simply not found.
+ */
+export async function findSsConfigById(
+  guildId: string,
+  id: string,
+): Promise<SsConfig | null> {
   const [row] = await db
     .select(ssConfigColumns)
     .from(ssConfigs)
-    .where(eq(ssConfigs.id, id))
+    .where(and(eq(ssConfigs.guildId, guildId), eq(ssConfigs.id, id)))
     .limit(1);
 
   return row ? { ...row, ssType: asScreenshotType(row.ssType) } : null;
@@ -493,6 +497,24 @@ export async function listSsConfigChannelIds(): Promise<string[]> {
     .from(ssConfigs);
 
   return rows.map((row) => row.channelId);
+}
+
+/**
+ * Is there at least one screenshot-verification setup?
+ *
+ * The whole table, not one guild's: the question is whether **this
+ * deployment** uses screenshot verification at all, and that is what the
+ * automatic half of the OCR decision asks (see `ocr.ts`).
+ *
+ * One row is enough, so the query stops at the first one.
+ */
+export async function hasSsConfig(): Promise<boolean> {
+  const [row] = await db
+    .select({ id: ssConfigs.id })
+    .from(ssConfigs)
+    .limit(1);
+
+  return row !== undefined;
 }
 
 /** Creates a setup. */
@@ -550,8 +572,15 @@ export interface SsConfigPatch {
   readonly successMessage?: string | null;
 }
 
-/** Writes the given fields of a setup. */
+/**
+ * Writes the given fields of a setup.
+ *
+ * The write is scoped to the guild as well, so a row of another server is
+ * never touched — the guard and the lookup both say which guild the
+ * caller is acting in, and this is the last line of defence.
+ */
 export async function updateSsConfig(
+  guildId: string,
   id: string,
   patch: SsConfigPatch,
 ): Promise<void> {
@@ -576,7 +605,7 @@ export async function updateSsConfig(
   await db
     .update(ssConfigs)
     .set(values)
-    .where(eq(ssConfigs.id, id));
+    .where(and(eq(ssConfigs.guildId, guildId), eq(ssConfigs.id, id)));
 }
 
 /**
@@ -585,9 +614,16 @@ export async function updateSsConfig(
  * Its submissions go with it: `ss_submissions.ss_config_id` is a foreign
  * key with `ON DELETE CASCADE` (D13), so the source's manual
  * `SSVerify.full_delete()` dance is not needed.
+ *
+ * The delete is scoped to the guild, like the lookup and the update.
  */
-export async function deleteSsConfig(id: string): Promise<void> {
-  await db.delete(ssConfigs).where(eq(ssConfigs.id, id));
+export async function deleteSsConfig(
+  guildId: string,
+  id: string,
+): Promise<void> {
+  await db
+    .delete(ssConfigs)
+    .where(and(eq(ssConfigs.guildId, guildId), eq(ssConfigs.id, id)));
 }
 
 /* ------------------------------------------------------------------ *
@@ -667,154 +703,3 @@ export async function countSsSubmissions(
   return row?.count ?? 0;
 }
 
-/* ------------------------------------------------------------------ *
- * Group management
- * ------------------------------------------------------------------ */
-
-/** One tournament, by its row id. */
-export async function findTourney(
-  id: string,
-): Promise<{
-  id: string;
-  guildId: string;
-  name: string;
-  roleId: string;
-  groupSize: number | null;
-} | null> {
-  const [row] = await db
-    .select({
-      id: tourneys.id,
-      guildId: tourneys.guildId,
-      name: tourneys.name,
-      roleId: tourneys.roleId,
-      groupSize: tourneys.groupSize,
-    })
-    .from(tourneys)
-    .where(eq(tourneys.id, id))
-    .limit(1);
-
-  return row ?? null;
-}
-
-/**
- * The registered teams of a tournament, in slot order.
- *
- * Read-only: the tourney area owns the table.
- */
-export async function listTourneySlots(
-  tourneyId: string,
-): Promise<GroupSlot[]> {
-  const rows = await db
-    .select({
-      id: tourneySlots.id,
-      num: tourneySlots.num,
-      teamName: tourneySlots.teamName,
-      leaderId: tourneySlots.leaderId,
-    })
-    .from(tourneySlots)
-    .where(eq(tourneySlots.tourneyId, tourneyId))
-    .orderBy(asc(tourneySlots.num));
-
-  return rows;
-}
-
-/** Every published group list of a tournament. */
-export async function listGroupLists(
-  tourneyId: string,
-): Promise<GroupListEntry[]> {
-  const rows = await db
-    .select({
-      id: tourneyGroupLists.id,
-      tourneyId: tourneyGroupLists.tourneyId,
-      messageId: tourneyGroupLists.messageId,
-      channelId: tourneyGroupLists.channelId,
-      groupNumber: tourneyGroupLists.groupNumber,
-      updatedAt: tourneyGroupLists.updatedAt,
-    })
-    .from(tourneyGroupLists)
-    .where(eq(tourneyGroupLists.tourneyId, tourneyId))
-    .orderBy(asc(tourneyGroupLists.groupNumber));
-
-  return rows;
-}
-
-/** One published group list, by its row id. */
-export async function findGroupListById(
-  id: string,
-): Promise<GroupListEntry | null> {
-  const [row] = await db
-    .select({
-      id: tourneyGroupLists.id,
-      tourneyId: tourneyGroupLists.tourneyId,
-      messageId: tourneyGroupLists.messageId,
-      channelId: tourneyGroupLists.channelId,
-      groupNumber: tourneyGroupLists.groupNumber,
-      updatedAt: tourneyGroupLists.updatedAt,
-    })
-    .from(tourneyGroupLists)
-    .where(eq(tourneyGroupLists.id, id))
-    .limit(1);
-
-  return row ?? null;
-}
-
-/**
- * Records a published group list.
- *
- * The channel id is written on the row (D16 / B15). Quotient re-discovered
- * it by a name substring, so group 1 could publish into "Group 10"'s
- * channel.
- */
-export async function insertGroupList(input: {
-  tourneyId: string;
-  messageId: string;
-  channelId: string;
-  groupNumber: number;
-}): Promise<string> {
-  const [row] = await db
-    .insert(tourneyGroupLists)
-    .values({
-      tourneyId: input.tourneyId,
-      messageId: input.messageId,
-      channelId: input.channelId,
-      groupNumber: input.groupNumber,
-    })
-    .returning({ id: tourneyGroupLists.id });
-
-  if (!row) {
-    throw new Error("could not record the published group list");
-  }
-
-  return row.id;
-}
-
-/**
- * Writes the last-refresh time of a published group list.
- *
- * `updated_at` is the only timestamp the row has: the schema folds the
- * source's `refresh_at` into it (S4), and the refresh path is the only
- * thing that ever updates an existing row, so it *is* the last refresh
- * time. The source read an `auto_now` column, which meant the cooldown
- * depended on the last write of any kind (B16).
- */
-export async function touchGroupList(id: string): Promise<void> {
-  await db
-    .update(tourneyGroupLists)
-    .set({ updatedAt: new Date() })
-    .where(eq(tourneyGroupLists.id, id));
-}
-
-/** Removes the published group list of one group. */
-export async function deleteGroupList(
-  tourneyId: string,
-  groupNumber: number,
-): Promise<void> {
-  await db
-    .delete(tourneyGroupLists)
-    .where(
-      and(
-        eq(tourneyGroupLists.tourneyId, tourneyId),
-        eq(tourneyGroupLists.groupNumber, groupNumber),
-      ),
-    );
-}

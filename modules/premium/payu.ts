@@ -642,3 +642,236 @@ export function verifyPayuCallback(
 export function isSuccessfulStatus(status: string | undefined): boolean {
   return (status ?? "").trim().toLowerCase() === "success";
 }
+
+/**
+ * Did PayU report a payment that did **not** go through?
+ *
+ * PayU documents three outcomes — `success`, `failure` and `pending` —
+ * and says to treat the last two as failed. So the rule is the mirror of
+ * {@link isSuccessfulStatus}: the status has to be **there**, and it must
+ * not be `success`.
+ *
+ * A callback with no status at all is not a failure. It is nothing, and
+ * nothing must not be allowed to change a transaction.
+ */
+export function isFailureStatus(status: string | undefined): boolean {
+  const value = (status ?? "").trim().toLowerCase();
+
+  if (value === "") return false;
+
+  return value !== "success";
+}
+
+/* ------------------------------------------------------------------ *
+ * The failure callback
+ * ------------------------------------------------------------------ */
+
+/**
+ * What we expect of a failure callback.
+ */
+export interface PayuFailureExpectation {
+  /** The transaction id we issued. */
+  readonly txnId: string;
+  /** The price of the plan, as a decimal string. */
+  readonly amount: string;
+  /** The merchant credentials. */
+  readonly credentials: PayuCredentials;
+  /**
+   * The request's `Origin` header, when it had one.
+   *
+   * `undefined` for a request that carried none — a server-to-server
+   * call has no origin.
+   */
+  readonly origin?: string | undefined;
+}
+
+/**
+ * Why a failure callback was refused.
+ */
+export type PayuFailureRejection =
+  /** The transaction id is not the one we issued. */
+  | "unknown_transaction"
+  /** The callback was signed for a different merchant. */
+  | "wrong_merchant"
+  /** The callback did not report a failed payment. */
+  | "not_a_failure"
+  /** The request did not come from the gateway's origin. */
+  | "wrong_origin"
+  /** The callback carried no usable signature. */
+  | "no_signature"
+  /** The signature did not verify. */
+  | "bad_signature"
+  /** The amount is not the price of the plan. */
+  | "wrong_amount";
+
+/**
+ * The outcome of verifying a failure callback.
+ */
+export type PayuFailureVerification =
+  | {
+      readonly ok: true;
+      /** The amount PayU reported, exactly as it sent it. */
+      readonly amount: string;
+      /** The status PayU reported. */
+      readonly status: string;
+      /**
+       * Whether the callback carried a signature that verified.
+       *
+       * `false` means it was accepted on the strength of the origin
+       * alone — the gateway did not sign it, and the request could only
+       * have come from the gateway's own page.
+       */
+      readonly signed: boolean;
+    }
+  | {
+      readonly ok: false;
+      /** What went wrong, in words a buyer can read. */
+      readonly reason: string;
+      /** What went wrong, in a form code can act on. */
+      readonly code: PayuFailureRejection;
+    };
+
+/**
+ * Verifies a failure callback.
+ *
+ * **The browser redirect is signed too.** This is the part the browser
+ * route gets wrong by assumption: the *browser* does not sign anything,
+ * and it does not have to. PayU computes the response hash on its own
+ * servers and the hash travels with the redirect, exactly as it does with
+ * the server-to-server webhook. The server holds the salt, so the server
+ * can check it. The status is inside the signature, so a failure callback
+ * is as unforgeable as a successful one.
+ *
+ * So the checks are the same ones the success route makes:
+ *
+ *  1. **the transaction id is ours**;
+ *  2. **the merchant key is ours**, when the callback carries one;
+ *  3. **the status is a failure** — a callback that says `success`, or
+ *     that says nothing at all, is not a failure and must not mark one;
+ *  4. **the origin is PayU's**, when the request carried one. It is not
+ *     *required*: the gateway also calls the failure url from its own
+ *     servers, and a server-to-server call has no origin at all;
+ *  5. **the amount is the plan's price**, compared as a decimal;
+ *  6. **the signature verifies**, in constant time, over every known
+ *     layout.
+ *
+ * The one case that is not a signature: a callback with **no hash at
+ * all**. That is only accepted when the request came from the gateway's
+ * own origin, because that is the one thing a third-party site cannot
+ * forge — a browser posting from another site carries that site's
+ * origin, not the gateway's. Everything else is refused.
+ */
+export function verifyPayuFailureCallback(
+  payload: PayuCallbackPayload,
+  expectation: PayuFailureExpectation,
+): PayuFailureVerification {
+  if (!payload.txnid || payload.txnid !== expectation.txnId) {
+    return {
+      ok: false,
+      reason: "The transaction id does not match the one we issued.",
+      code: "unknown_transaction",
+    };
+  }
+
+  if (payload.key && payload.key !== expectation.credentials.key) {
+    return {
+      ok: false,
+      reason: "The callback was signed for a different merchant.",
+      code: "wrong_merchant",
+    };
+  }
+
+  if (!isFailureStatus(payload.status)) {
+    return {
+      ok: false,
+      reason: "The callback did not report a failed payment.",
+      code: "not_a_failure",
+    };
+  }
+
+  // A foreign origin is a forgery: the browser that posted it was on
+  // somebody else's page. A missing origin is not — the gateway also
+  // calls this url from its own servers, and that call has no origin.
+  if (expectation.origin && !isPayuOrigin(expectation.origin)) {
+    return {
+      ok: false,
+      reason: "The request did not come from the payment gateway.",
+      code: "wrong_origin",
+    };
+  }
+
+  if (!amountsEqual(payload.amount, expectation.amount)) {
+    return {
+      ok: false,
+      reason: "The amount does not match the price of the plan.",
+      code: "wrong_amount",
+    };
+  }
+
+  if (!payload.hash) {
+    // The gateway did not sign this one. The only thing left that
+    // cannot be forged from another site is the origin, so it has to be
+    // the gateway's.
+    if (!isPayuOrigin(expectation.origin)) {
+      return {
+        ok: false,
+        reason:
+          "The callback carried no signature and did not come from the payment gateway.",
+        code: "no_signature",
+      };
+    }
+
+    return {
+      ok: true,
+      amount: payload.amount,
+      status: payload.status,
+      signed: false,
+    };
+  }
+
+  if (!HEX_128.test(payload.hash)) {
+    return {
+      ok: false,
+      reason: "The callback carried no usable signature.",
+      code: "no_signature",
+    };
+  }
+
+  const candidates = payuResponseHashCandidates(expectation.credentials, {
+    txnId: payload.txnid,
+    amount: payload.amount,
+    productInfo: payload.productinfo,
+    firstName: payload.firstname,
+    email: payload.email,
+    udf: [
+      payload.udf1 ?? "",
+      payload.udf2 ?? "",
+      payload.udf3 ?? "",
+      payload.udf4 ?? "",
+      payload.udf5 ?? "",
+    ],
+    status: payload.status,
+  });
+
+  // Every candidate is checked, even after one matches.
+  let verified = false;
+
+  for (const candidate of candidates) {
+    if (constantTimeEquals(candidate, payload.hash)) verified = true;
+  }
+
+  if (!verified) {
+    return {
+      ok: false,
+      reason: "The callback signature did not verify.",
+      code: "bad_signature",
+    };
+  }
+
+  return {
+    ok: true,
+    amount: payload.amount,
+    status: payload.status,
+    signed: true,
+  };
+}

@@ -689,6 +689,69 @@ export function planBan(input: BanPlanInput): BanPlan {
 }
 
 /* ------------------------------------------------------------------ *
+ * The unban
+ * ------------------------------------------------------------------ */
+
+/** What an unban needs to know. */
+export interface UnbanParams {
+  /** The scrims the members are banned from. */
+  readonly scrimIds: readonly string[];
+  /** The members to unban. */
+  readonly userIds: readonly string[];
+}
+
+/** One unban, and what the log entry says about it. */
+export interface UnbanEntry {
+  /** The scrim the ban was from. */
+  readonly scrimId: string;
+  /** Who was unbanned. */
+  readonly userId: string;
+  /** Why they were banned, when the moderator gave a reason. */
+  readonly reason: string | null;
+  /** When the ban ran out, when it had a duration. */
+  readonly expires: Date | null;
+}
+
+/**
+ * Lifts the bans, and says which ones it lifted.
+ *
+ * The rule is one line: a ban is a (scrim, member) pair, and lifting it
+ * means the row goes. A pair with no row was not banned — there is
+ * nothing to lift and nothing to log.
+ *
+ * The reason and the expiry are read from the row **before** it goes,
+ * so the entry says what the ban was and not merely that it ended.
+ */
+export async function unbanUsers(
+  store: SlotStore,
+  params: UnbanParams,
+): Promise<UnbanEntry[]> {
+  const entries: UnbanEntry[] = [];
+
+  for (const scrimId of params.scrimIds) {
+    const bans = await store.listBans(scrimId);
+
+    for (const userId of params.userIds) {
+      const ban = bans.find((entry) => entry.userId === userId);
+
+      // Not banned from this scrim: nothing to lift, nothing to log.
+      if (!ban) continue;
+
+      await store.unbanUser(scrimId, userId);
+
+      entries.push({
+        scrimId,
+        userId,
+        reason: ban.reason,
+        expires: ban.expires,
+      });
+    }
+  }
+
+  return entries;
+}
+
+/* ------------------------------------------------------------------ *
  * The slot list's team operations
  * ------------------------------------------------------------------ */
 

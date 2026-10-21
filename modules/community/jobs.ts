@@ -38,6 +38,19 @@ export type CommunityJobEvent = (typeof COMMUNITY_JOB_EVENTS)[number];
 /** How long a snipe is kept. */
 export const SNIPE_RETENTION_DAYS = 10;
 
+/**
+ * How long a tag that has never been used is kept.
+ *
+ * A tag that has been used is never pruned: the usage counter bumps
+ * `updated_at`, so a tag in daily use keeps its row. What goes is the
+ * tag somebody made once and forgot about.
+ *
+ * The window is deliberately long — half a year — because a tag is
+ * somebody's text and the price of keeping it a little longer is far
+ * lower than the price of deleting a guild's rules by surprise.
+ */
+export const TAG_RETENTION_DAYS = 180;
+
 /** How often the daily housekeeping pass runs, in milliseconds. */
 export const DAILY_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -250,15 +263,19 @@ export async function onAutoPurge(
 /**
  * Runs the daily housekeeping pass.
  *
- * Two prunes:
+ * Three prunes:
  *
  *  - the snipes that are older than ten days. The source pruned them
  *    **once at startup**, which is a one-shot task and not a loop, so the
  *    rows accumulated for weeks. This runs every day;
- *  - the command-usage rows that are older than thirty days (S10).
+ *  - the command-usage rows that are older than thirty days (S10);
+ *  - the tags that have never been used and have not been touched for
+ *    six months. The allowance in `rules.ts` bounds how many tags a
+ *    member may have at once; this bounds how many the table keeps over
+ *    the months.
  *
- * Both are deletes, so the pass is idempotent: running it twice in a row
- * removes nothing the second time.
+ * All of them are deletes, so the pass is idempotent: running it twice in
+ * a row removes nothing the second time.
  *
  * The pass has no arguments, so the payload is empty. The event name is
  * the whole message.
@@ -268,10 +285,11 @@ export async function onCommunityDaily(payload: unknown): Promise<void> {
 
   try {
     const snipes = await service.pruneSnipes(SNIPE_RETENTION_DAYS);
+    const tags = await service.pruneUnusedTags(TAG_RETENTION_DAYS);
     const usage = await pruneCommandUsage();
 
     logger.info(
-      `[Community] Daily maintenance: ${snipes} snipe(s) and ${usage} command-usage row(s) removed.`,
+      `[Community] Daily maintenance: ${snipes} snipe(s), ${tags} unused tag(s) and ${usage} command-usage row(s) removed.`,
     );
   } catch (error) {
     logger.error(
