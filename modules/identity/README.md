@@ -454,7 +454,7 @@ checks, and the split between the raw text and the normalised text.
 
 ## The tests
 
-`npx vitest run modules/identity` — 205 tests in 11 files.
+`npx vitest run modules/identity` — 207 tests in 11 files.
 
 | File | What it covers |
 |---|---|
@@ -468,4 +468,4 @@ checks, and the split between the raw text and the normalised text.
 | `ignore-role.test.ts` | The ignore role is compared by id. |
 | `cache.test.ts` | The three channel sets stay apart. |
 | `guards.test.ts` | Who may manage a setup: the moderator, the administrator, the ordinary member, the member of another guild. |
-| `views/ssmod.test.ts` | The panel's authorisation (an ordinary member changes nothing; a moderator may; another guild's row is not found), the premium gates, and the custom ids. |
+| `views/ssmod.test.ts` | The panel's authorisation (an ordinary member changes nothing; a moderator may; another guild's row is not found), the premium gates, the custom ids, and the routing of the buttons. |

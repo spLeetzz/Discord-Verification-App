@@ -7,7 +7,7 @@ been **deleted** — see §10. Everything lives in `modules/identity/` and
 
 - `npm run typecheck` — **clean for this area** (zero errors in
   `modules/identity/` and `commands/esports/`).
-- `npm test` — **205 tests in this area, all passing** (11 files).
+- `npm test` — **207 tests in this area, all passing** (11 files).
 - `modules/identity/README.md` — the interface, the rules, the state
   machines, the premium gates, the bugs.
 
@@ -248,7 +248,7 @@ the repository uses.
 
 ## 8. The tests
 
-`npx vitest run modules/identity` — 205 tests in 11 files.
+`npx vitest run modules/identity` — 207 tests in 11 files.
 
 | File | Tests | What it covers |
 |---|---|---|
@@ -259,10 +259,10 @@ the repository uses.
 | `service.test.ts` | 20 | The four premium gates — nothing is written when a gate refuses — the two rate limits with an injected clock, and the guild scope of a setup. |
 | `ocr.test.ts` | 17 | The boot decision (forced on, forced off, automatic) and the refusal when the OCR is off — including that **nothing is stored**. |
 | `commands.test.ts` | 10 | The three commands serialise through `toJSON()`, the adapter files are found, each name registers exactly once, and `/ssverify` answers ephemerally. |
-| `ignore-role.test.ts` | 9 | The ignore role is compared by id, not by name. |
-| `cache.test.ts` | 9 | The three sets stay apart, and a database that is down does not empty a working cache. |
+| `ignore-role.test.ts` | 8 | The ignore role is compared by id, not by name. |
+| `cache.test.ts` | 8 | The three sets stay apart, and a database that is down does not empty a working cache. |
 | `guards.test.ts` | 8 | Who may manage a setup: the moderator, the administrator, the ordinary member, the member of another guild, the interaction with no guild. |
-| `views/ssmod.test.ts` | 37 | The panel's authorisation, the panel's gates, and the custom ids. |
+| `views/ssmod.test.ts` | 41 | The panel's authorisation, the panel's gates, the custom ids, and the routing of the buttons through the real router. |
 
 The repository's own suite was run as well: 906 tests in 63 files, all
 passing. (Two of them failed in `modules/community/repo.test.ts` while

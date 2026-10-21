@@ -31,7 +31,8 @@ import type {
 } from "discord.js";
 import { PremiumRequiredError } from "../../../core/errors.js";
 import { PremiumFeature } from "../../../core/constants.js";
-import type { SsConfig, SsDraft } from "../types.js";
+import type { SsConfig } from "../types.js";
+import type { SsDraft } from "./ssmod.js";
 
 const mocks = vi.hoisted(() => ({
   service: {
