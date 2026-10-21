@@ -157,6 +157,10 @@ outside `repo.ts` used it.
   `SQLITE_CONSTRAINT_CHECK`. A `constraintKind` helper reads either, so
   the assertion says what was violated.
 - **`count(*)::int` → `count(*)`** in `slots.test.ts` — a Postgres cast.
+- **`idp.test.ts` builds its message ids from a per-run prefix.** It
+  used a constant, and its cleanup deletes every job row that starts
+  with the prefix — so two runs sharing a database file deleted each
+  other's rows.
 - **The stale rows in `README.md` and `PORT-REPORT.md`** that described
   the array overlap and the `FOR UPDATE` lock were corrected.
 
@@ -210,3 +214,27 @@ Nothing in `db/` was needed to make this area work, and nothing in
 - `db/README.md` still describes the Postgres layer (`text[]` arrays,
   `bigserial`, `timestamptz`, the migration workflow). It reads as if
   the port to SQLite never happened.
+
+### The test database file is not unique per *run*
+
+`db/client.ts` gives every test worker its own file —
+`data/test-${VITEST_WORKER_ID}.db` — which is what keeps two workers
+from locking each other out inside one run. The busy timeout the
+client sets makes a contended write **wait** rather than fail, so two
+runs in the same tree no longer trip over each other's locks.
+
+The *rows* are still shared, though: the worker ids are counters, so a
+second run started while the first is still going picks the same file
+names. One test in this area had a fixed key and noticed — `idp.test.ts`
+built every message id from the constant `"idp-test-message"` and its
+cleanup deleted every job row starting with that prefix, so a
+concurrent run's rows went with it. The prefix is unique per run now,
+like the `GUILD_ID` the other three database tests already used.
+
+The rest of the sharing is harmless — every other key in this area is
+already unique per run — but putting the **process id** in the file
+name (`data/test-${VITEST_WORKER_ID}-${process.pid}.db`) would make a
+run's files its own, and it belongs to whoever owns `db/client.ts`.
+
+It is not a defect in this area: the same failure hits every area that
+touches the database.

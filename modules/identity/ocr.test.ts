@@ -113,6 +113,7 @@ function ssConfig(overrides: Partial<SsConfig> = {}): SsConfig {
     channelName: "Team Phoenix",
     channelLink: "",
     keywords: [],
+    duplicateThreshold: 7,
     allowSame: false,
     ssType: "youtube",
     successMessage: null,

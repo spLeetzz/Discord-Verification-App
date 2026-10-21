@@ -326,6 +326,40 @@ describe("the other types", () => {
       reason: "This is not a valid Installation Screen ss.",
     });
   });
+
+  it("names the page, not the first keyword, when it refuses", () => {
+    // The keywords are rows in a table of their own, so they are a set
+    // and have no first element: the refusal names the page.
+    const config: VerificationConfig = {
+      ssType: "custom",
+      channelName: "Installation Screen",
+      channelLink: "",
+      keywords: ["hardware", "Installation Screen"],
+    };
+
+    const result = verifyScreenshot(config, ocr("a picture of a cat"));
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "This is not a valid Installation Screen ss.",
+    });
+  });
+
+  it("names the keyword when the setup has no page name", () => {
+    const config: VerificationConfig = {
+      ssType: "custom",
+      channelName: "",
+      channelLink: "",
+      keywords: ["Installation Screen"],
+    };
+
+    const result = verifyScreenshot(config, ocr("a picture of a cat"));
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "This is not a valid Installation Screen ss.",
+    });
+  });
 });
 
 describe("the matrix", () => {

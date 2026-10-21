@@ -20,11 +20,12 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { closeDatabase, db } from "../../../db/client.js";
 import {
   guildEntitlements,
   guildSettings,
+  premiumPlans,
   premiumTransactions,
 } from "../../../db/schema.js";
 import { isEntitled } from "../entitlements.js";
@@ -223,6 +224,67 @@ describe("modules/premium/server — the routes", () => {
     });
 
     expect(response.statusCode).toBe(404);
+  });
+
+  it("renders the payment page after the catalogue is reseeded", async () => {
+    // The plan the purchase was made against is gone: the catalogue was
+    // reseeded and this plan is not in it any more. The page still has to
+    // render, because the receipt reads the **snapshot** and not the
+    // plan.
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const [plan] = await db
+      .insert(premiumPlans)
+      .values({
+        code: `premium-server-reseed-${stamp}`,
+        name: `Premium Server Reseed ${stamp}`,
+        description: "A plan that is about to disappear",
+        price: 41,
+        durationDays: 3,
+      })
+      .returning({ id: premiumPlans.id });
+
+    if (!plan) throw new Error("the temporary plan was not created");
+
+    counter += 1;
+
+    const txnId = `premium-server-reseed-txn-${stamp}-${counter}`;
+
+    await createTransaction({
+      txnId,
+      userId: USER_ID,
+      guildId: GUILD_ID,
+      planId: plan.id,
+      planSnapshot: {
+        name: "Reseeded Plan",
+        price: 41,
+        duration_days: 3,
+      },
+      email: "buyer@example.com",
+      buyerName: "Buyer",
+    });
+
+    // The catalogue is reseeded: the plan row is deleted. The foreign
+    // key is `ON DELETE SET NULL`, so the transaction survives it.
+    await db.delete(premiumPlans).where(eq(premiumPlans.id, plan.id));
+
+    const response = await server.app.inject({
+      method: "GET",
+      url: `/getpremium?txnId=${txnId}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain(`name="amount" value="41.00"`);
+
+    // The transaction is still there, with the plan detached and the
+    // snapshot intact.
+    const transaction = await findTransaction(txnId);
+
+    expect(transaction?.planId).toBeNull();
+    expect(transaction?.planSnapshot).toEqual({
+      name: "Reseeded Plan",
+      price: 41,
+      duration_days: 3,
+    });
   });
 
   it("grants the subscription on a genuine callback", async () => {

@@ -68,8 +68,17 @@ vi.mock("../../utils/logger.js", () => {
   };
 });
 
-/** The prefix of every message id this file makes. */
-const MESSAGE_ID_PREFIX = "idp-test-message";
+/**
+ * The prefix of every message id this file makes.
+ *
+ * **It is unique per run.** The cleanup deletes every job row whose
+ * message id starts with the prefix, so a fixed prefix would delete
+ * another run's rows when two runs share a database file — and the
+ * other run's test would then find nothing.
+ */
+const MESSAGE_ID_PREFIX = `idp-test-message-${Date.now()}-${Math.random()
+  .toString(36)
+  .slice(2)}`;
 /** The message id the handler tests use. Nothing writes it to a row. */
 const HANDLER_MESSAGE_ID = `${MESSAGE_ID_PREFIX}-handler`;
 

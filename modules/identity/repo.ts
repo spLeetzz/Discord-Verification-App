@@ -18,10 +18,14 @@
  *  - **A setup is looked up by its guild *and* its row id.** The row id
  *    travels in a custom id, so the guild is part of the key: a setup of
  *    another server is not found and cannot be written.
+ *
+ * **The dialect is SQLite.** The schema is dialect neutral (see
+ * `db/dialect.ts`), so a count is cast with `cast(... as integer)` and not
+ * with Postgres' `::int` — the latter is a syntax error on SQLite.
  */
 
 import { and, asc, eq, inArray, notInArray, sql } from "drizzle-orm";
-import type { SelectedFields, SQLiteUpdateSetSource } from "drizzle-orm/sqlite-core";
+import type { SQLiteUpdateSetSource } from "drizzle-orm/sqlite-core";
 import { db, withTransaction } from "../../db/client.js";
 import type { DbExecutor } from "../../db/client.js";
 import {
@@ -102,7 +106,7 @@ export async function findTagCheckById(
 /** How many tag-check channels a guild has. */
 export async function countTagCheckChannels(guildId: string): Promise<number> {
   const [row] = await db
-    .select({ count: sql<number>`count(*)::int` })
+    .select({ count: sql<number>`cast(count(*) as integer)` })
     .from(tagcheckChannels)
     .where(eq(tagcheckChannels.guildId, guildId));
 
@@ -215,7 +219,7 @@ export async function findEasyTagByChannel(
 /** How many easy-tag channels a guild has. */
 export async function countEasyTagChannels(guildId: string): Promise<number> {
   const [row] = await db
-    .select({ count: sql<number>`count(*)::int` })
+    .select({ count: sql<number>`cast(count(*) as integer)` })
     .from(easytagChannels)
     .where(eq(easytagChannels.guildId, guildId));
 
@@ -428,9 +432,14 @@ const ssConfigColumns = {
 /**
  * The row the setups table hands back.
  *
- * The keywords are not on it: they live in `ss_config_keywords`.
+ * It is the domain type without the two fields the row cannot answer: the
+ * keywords live in their own table, and the `ss_type` column is a `text`
+ * with a `CHECK` constraint, so the database guarantees the value is one
+ * of the allowed ones while the type system only knows `string`.
  */
-type SsConfigRow = SelectedFields<typeof ssConfigColumns>;
+type SsConfigRow = Omit<SsConfig, "keywords" | "ssType"> & {
+  readonly ssType: string;
+};
 
 /**
  * Anything that can run a query.
@@ -623,7 +632,7 @@ export async function findSsConfigByChannel(
 /** How many setups a guild has. */
 export async function countSsConfigs(guildId: string): Promise<number> {
   const [row] = await db
-    .select({ count: sql<number>`count(*)::int` })
+    .select({ count: sql<number>`cast(count(*) as integer)` })
     .from(ssConfigs)
     .where(eq(ssConfigs.guildId, guildId));
 
@@ -760,6 +769,17 @@ export async function updateSsConfig(
   if (!hasColumns && keywords === undefined) return;
 
   await withTransaction(async (tx) => {
+    // The guild is part of the key, and the keywords are a second table:
+    // a setup of another server must not have them rewritten either, so
+    // the check happens before anything is written.
+    const owned = await tx
+      .select({ id: ssConfigs.id })
+      .from(ssConfigs)
+      .where(and(eq(ssConfigs.guildId, guildId), eq(ssConfigs.id, id)))
+      .limit(1);
+
+    if (owned.length === 0) return;
+
     if (hasColumns) {
       values.updatedAt = new Date();
 
@@ -858,7 +878,7 @@ export async function countSsSubmissions(
   authorId: string,
 ): Promise<number> {
   const [row] = await db
-    .select({ count: sql<number>`count(*)::int` })
+    .select({ count: sql<number>`cast(count(*) as integer)` })
     .from(ssSubmissions)
     .where(
       and(

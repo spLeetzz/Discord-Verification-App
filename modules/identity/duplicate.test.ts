@@ -11,7 +11,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { checkDuplicate, submissionJumpUrl } from "./duplicate.js";
+import {
+  MAX_DUPLICATE_THRESHOLD,
+  MIN_DUPLICATE_THRESHOLD,
+  checkDuplicate,
+  resolveDuplicateThreshold,
+  submissionJumpUrl,
+} from "./duplicate.js";
 import type { StoredSubmission } from "./duplicate.js";
 
 /** The threshold the port runs with. */
@@ -328,5 +334,32 @@ describe("submissionJumpUrl", () => {
     expect(submissionJumpUrl("guild", "channel", "message")).toBe(
       "https://discord.com/channels/guild/channel/message",
     );
+  });
+});
+
+describe("the threshold of a setup", () => {
+  it("is the setup's own value", () => {
+    expect(resolveDuplicateThreshold(0)).toBe(0);
+    expect(resolveDuplicateThreshold(3)).toBe(3);
+    expect(resolveDuplicateThreshold(12)).toBe(12);
+  });
+
+  it("is the default when the setup has no threshold of its own", () => {
+    expect(resolveDuplicateThreshold(null)).toBe(THRESHOLD);
+    expect(resolveDuplicateThreshold(undefined)).toBe(THRESHOLD);
+  });
+
+  it("is the default when the value cannot be a Hamming distance", () => {
+    // A value that is not a whole number, or one that is out of range,
+    // falls back to the default rather than failing the submission.
+    expect(resolveDuplicateThreshold(-1)).toBe(THRESHOLD);
+    expect(resolveDuplicateThreshold(65)).toBe(THRESHOLD);
+    expect(resolveDuplicateThreshold(7.5)).toBe(THRESHOLD);
+    expect(resolveDuplicateThreshold(Number.NaN)).toBe(THRESHOLD);
+  });
+
+  it("accepts the whole range a 64-bit hash allows", () => {
+    expect(resolveDuplicateThreshold(MIN_DUPLICATE_THRESHOLD)).toBe(0);
+    expect(resolveDuplicateThreshold(MAX_DUPLICATE_THRESHOLD)).toBe(64);
   });
 });

@@ -331,6 +331,15 @@ function forbidFollowButton(): VerificationGuard {
  * name); the keywords are matched literally (they are the operator's own
  * words, and a tolerant match on a two-letter keyword would accept
  * anything).
+ *
+ * **Both sides are normalised when they are compared** — lowercased, with
+ * the spaces stripped — and the stored keyword is left as it was typed.
+ * The normalisation happens here, at the comparison, and not on the way
+ * into the database.
+ *
+ * The refusal names the **page**, not "the first keyword": the keywords
+ * are rows in a table of their own, so they are a set and have no first
+ * element to name.
  */
 function requireCustomKeywords(): VerificationGuard {
   return ({ image, config }) => {
@@ -346,7 +355,7 @@ function requireCustomKeywords(): VerificationGuard {
       if (image.text.includes(needle)) return null;
     }
 
-    const label = config.keywords[0] ?? config.channelName;
+    const label = config.channelName || (config.keywords[0] ?? "");
 
     return `This is not a valid ${label} ss.`;
   };

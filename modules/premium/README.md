@@ -234,6 +234,15 @@ and then finds the row already `paid`. The guild's own row is locked
 while it is read for the same reason — two purchases for the same guild
 would otherwise both read the same expiry and both extend it.
 
+> **Ported to SQLite.** `SELECT … FOR UPDATE` does not exist there, and
+> the engine has one writer anyway. The row lock became a **conditional
+> `UPDATE` plus an in-process mutex**: the conditional `UPDATE` is the
+> state machine that decides who wins, and the mutex is the lock that
+> makes the whole grant run alone. The guild's row is locked with a
+> conditional `UPDATE` too, because a write inside a transaction holds
+> SQLite's write lock for the rest of that transaction. See
+> `db/dialect.ts` and `db/README.md`.
+
 ### The `already_paid` branch repairs
 
 A callback for a transaction that is already `paid` **checks** that the
@@ -519,10 +528,10 @@ gate for a thing with no entry is unlimited.
 | `env.test.ts` | the environment reader: nothing throws, everything unset is `null`, and the warnings say what is missing |
 | `entitlements.test.ts` | the gate: allowed, no expiry, expired without a sweep, disabled, unknown feature, and that an expired entitlement is not deleted |
 | `purchase.test.ts` | the state machine, the retry, the idempotent grant, the extension of an existing subscription, the real email and name, **the grant being one transaction** (a failure half-way through the entitlement writes leaves the transaction unpaid and no rows, and the retry grants it), two concurrent callbacks granting once, a replay granting nothing extra, the repair of a paid-but-ungranted purchase, and a lapsed subscription not being resurrected |
-| `server/server.test.ts` | the routes: the health check, the payment page and its request hash, a genuine callback, a missing `Origin`, a hostile `Origin`, the other field layout, the tampered forms, the webhook, the repeated webhook, the failure and the retry, the already-paid page, **the failure redirect being verified** (no signature, a bad signature, another transaction's, a tampered amount, a success status, a foreign origin, and a forged failure not overwriting the audit data), and **the notification** (sent after the commit, a failure to notify not undoing the purchase, and a repaired purchase still being announced) |
+| `server/server.test.ts` | the routes: the health check, the payment page and its request hash, **the payment page still rendering after the catalogue is reseeded** (the receipt reads the snapshot, not the plan), a genuine callback, a missing `Origin`, a hostile `Origin`, the other field layout, the tampered forms, the webhook, the repeated webhook, the failure and the retry, the already-paid page, **the failure redirect being verified** (no signature, a bad signature, another transaction's, a tampered amount, a success status, a foreign origin, and a forged failure not overwriting the audit data), and **the notification** (sent after the commit, a failure to notify not undoing the purchase, and a repaired purchase still being announced) |
 | `gate.test.ts` | one presentation, one button, and the reason naming the feature and the way out |
 | `limits.test.ts` | the free-tier **numbers** (business data, pinned), that the module's table is the canonical one in `core/premium.ts` and not a copy of it, the generated perk list, and that a name with no entry is unlimited |
 
-The database tests run against the local Postgres on `:5433`, like
-`db/schema.test.ts`. They create rows with ids no real row can have and
-delete them afterwards.
+The database tests run against the local SQLite file the test runner
+gives them, like every other area's. They create rows with ids no real
+row can have and delete them afterwards.

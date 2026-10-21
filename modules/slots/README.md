@@ -167,6 +167,7 @@ list looks the same whoever published it.
 | `mentions.ts` | Reading member ids out of free text. |
 | `ids.ts` | The custom-id scheme. |
 | `client.ts` | The Discord client the area was registered with. |
+| `test-db.ts` | The fixtures' wait-out-a-locked-database helper. |
 | `views/panel.ts` | The public panel's body, buttons and refresh. |
 | `views/public.ts` | The public panel's handlers. |
 | `views/slotlist.ts` | The published slot list, its panel, and the ban operations. |

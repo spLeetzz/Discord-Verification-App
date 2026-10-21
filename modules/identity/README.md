@@ -310,6 +310,24 @@ The threshold is a parameter (D20), not a constant: it is only
 meaningful for a 64-bit hash, so it moves with the hash implementation
 rather than being baked into the comparison.
 
+**The threshold is the setup's own.** `ss_configs.duplicate_threshold` is
+a column of its own, and the duplicate check of a submission runs with
+**that setup's** value — the global default of 7 is only the fallback:
+
+| The setup's value | What the check runs with |
+|---|---|
+| a whole number from 0 to 64 | that number |
+| nothing (no threshold of its own) | the global default (7) |
+| not a whole number, or outside 0…64 | the global default (7) |
+
+A value that cannot be a Hamming distance **falls back** rather than
+fails: a nonsense number in a column must not stop a member from being
+verified. Zero forgives nothing; 64 is the largest distance a 64-bit hash
+can have, so nothing is ever a duplicate.
+
+The check is still on the **dHash**. The pHash is stored beside it, but
+the threshold of 7 was calibrated on the dHash.
+
 **The check never throws.** A hash that is not sixteen hex characters
 cannot be compared, and a comparison that could not be made is not a
 comparison that clears the screenshot. The check answers with a decision
@@ -322,7 +340,9 @@ instead of an exception:
 | **Somebody else's** stored row | The row is **reported and passed over**. One bad row must not block every member of the setup. |
 
 Every corrupt row is reported with the setup, the row, the member and the
-broken value, so the operator can repair or delete it.
+broken value, so the operator can repair or delete it. The threshold
+changes none of it: a row that cannot be compared is a row that cannot be
+compared, whatever the distance the setup forgives.
 
 ### The state machines
 

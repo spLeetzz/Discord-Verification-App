@@ -98,6 +98,28 @@ function isDatabaseLocked(error: unknown): boolean {
 }
 
 /**
+ * Runs a statement, waiting out a locked database.
+ *
+ * A read that overlaps a write can be told the file is busy as well, so
+ * this is used for the reads of the slot tables too. Retrying a read is
+ * always safe: it has no side effects.
+ */
+async function withBusyRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isDatabaseLocked(error)) throw error;
+      if (attempt >= BUSY_RETRIES) throw error;
+
+      const wait = BUSY_BACKOFF_MS[attempt] ?? 80;
+
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+}
+
+/**
  * Runs a write in a transaction, waiting out a locked database.
  *
  * The claim, the release and the transfer all write more than one
@@ -113,18 +135,7 @@ function isDatabaseLocked(error: unknown): boolean {
 async function withWriteTransaction<T>(
   fn: (tx: Transaction) => Promise<T>,
 ): Promise<T> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await withTransaction(fn);
-    } catch (error) {
-      if (!isDatabaseLocked(error)) throw error;
-      if (attempt >= BUSY_RETRIES) throw error;
-
-      const wait = BUSY_BACKOFF_MS[attempt] ?? 80;
-
-      await new Promise((resolve) => setTimeout(resolve, wait));
-    }
-  }
+  return withBusyRetry(() => withTransaction(fn));
 }
 
 /* ------------------------------------------------------------------ *
@@ -253,14 +264,16 @@ function groupSlots(rows: readonly SlotMemberRow[]): SlotRecord[] {
  * one thing, and a second query per slot would be a query per slot.
  */
 async function selectSlots(condition: SQL | undefined): Promise<SlotRecord[]> {
-  const rows = await db
-    .select({ slot: slots, userId: slotMembers.userId })
-    .from(slots)
-    .leftJoin(slotMembers, eq(slotMembers.slotId, slots.id))
-    .where(condition)
-    .orderBy(asc(slots.num), asc(slotMembers.createdAt), asc(slotMembers.id));
+  return withBusyRetry(async () => {
+    const rows = await db
+      .select({ slot: slots, userId: slotMembers.userId })
+      .from(slots)
+      .leftJoin(slotMembers, eq(slotMembers.slotId, slots.id))
+      .where(condition)
+      .orderBy(asc(slots.num), asc(slotMembers.createdAt), asc(slotMembers.id));
 
-  return groupSlots(rows);
+    return groupSlots(rows);
+  });
 }
 
 function toReminder(
@@ -546,12 +559,14 @@ export async function getSlotByNum(
 
 /** How many slots are free. A count, not a read-modify-write (D14). */
 export async function countFreeSlots(scrimId: string): Promise<number> {
-  const rows = await db
-    .select({ value: count() })
-    .from(slots)
-    .where(and(eq(slots.scrimId, scrimId), eq(slots.state, "free")));
+  return withBusyRetry(async () => {
+    const rows = await db
+      .select({ value: count() })
+      .from(slots)
+      .where(and(eq(slots.scrimId, scrimId), eq(slots.state, "free")));
 
-  return rows[0]?.value ?? 0;
+    return rows[0]?.value ?? 0;
+  });
 }
 
 /** What a claim writes. */
@@ -619,20 +634,24 @@ export function buildClaimStatement(
  * One row per member, and the unique constraint on
  * `(slot_id, user_id)` makes the write idempotent: nobody is in a team
  * twice, and a mention of the captain does not stack a second row.
+ *
+ * @returns the members that were written.
  */
 async function insertSlotMembers(
   tx: Transaction,
   slotId: string,
   userIds: readonly string[],
-): Promise<void> {
+): Promise<string[]> {
   const unique = [...new Set(userIds)];
 
-  if (unique.length === 0) return;
+  if (unique.length === 0) return [];
 
   await tx
     .insert(slotMembers)
     .values(unique.map((userId) => ({ slotId, userId })))
     .onConflictDoNothing();
+
+  return unique;
 }
 
 /**
@@ -662,9 +681,9 @@ export async function claimSlot(
     // written either — the transaction ends with the slot untouched.
     if (!row) return null;
 
-    await insertSlotMembers(tx, row.id, values.members);
+    const members = await insertSlotMembers(tx, row.id, values.members);
 
-    return toSlot(row, values.members);
+    return toSlot(row, members);
   });
 }
 
@@ -744,12 +763,14 @@ export async function countUserSlotsInScrim(
 
   if (exceptSlotId) conditions.push(ne(slots.id, exceptSlotId));
 
-  const rows = await db
-    .select({ value: count() })
-    .from(slots)
-    .where(and(...conditions));
+  return withBusyRetry(async () => {
+    const rows = await db
+      .select({ value: count() })
+      .from(slots)
+      .where(and(...conditions));
 
-  return rows[0]?.value ?? 0;
+    return rows[0]?.value ?? 0;
+  });
 }
 
 /**
@@ -786,9 +807,9 @@ export async function transferSlot(
 
     await tx.delete(slotMembers).where(eq(slotMembers.slotId, slotId));
 
-    await insertSlotMembers(tx, slotId, members);
+    const written = await insertSlotMembers(tx, slotId, members);
 
-    return toSlot(row, members);
+    return toSlot(row, written);
   });
 }
 
@@ -844,23 +865,25 @@ export async function findFakeTagMatches(
 
   if (exceptSlotId) conditions.push(ne(slots.id, exceptSlotId));
 
-  // The slots that hold one of the players.
-  const matched = await db
-    .selectDistinct({ id: slots.id })
-    .from(slots)
-    .innerJoin(slotMembers, eq(slotMembers.slotId, slots.id))
-    .where(and(...conditions));
+  return withBusyRetry(async () => {
+    // The slots that hold one of the players.
+    const matched = await db
+      .selectDistinct({ id: slots.id })
+      .from(slots)
+      .innerJoin(slotMembers, eq(slotMembers.slotId, slots.id))
+      .where(and(...conditions));
 
-  if (matched.length === 0) return [];
+    if (matched.length === 0) return [];
 
-  // ...and the whole team of each of them, so the answer is a slot and
-  // not a row of a slot.
-  return selectSlots(
-    inArray(
-      slots.id,
-      matched.map((row) => row.id),
-    ),
-  );
+    // ...and the whole team of each of them, so the answer is a slot
+    // and not a row of a slot.
+    return selectSlots(
+      inArray(
+        slots.id,
+        matched.map((row) => row.id),
+      ),
+    );
+  });
 }
 
 /* ------------------------------------------------------------------ *

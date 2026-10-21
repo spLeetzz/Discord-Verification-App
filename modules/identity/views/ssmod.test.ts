@@ -93,6 +93,7 @@ function makeSetup(guildId: string, id: string): SsConfig {
     channelName: "Team Phoenix",
     channelLink: "https://example.com/team-phoenix",
     keywords: ["Team Phoenix"],
+    duplicateThreshold: 7,
     allowSame: false,
     ssType: "youtube",
     successMessage: null,

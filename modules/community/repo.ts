@@ -54,23 +54,59 @@ import type {
  * ------------------------------------------------------------------ */
 
 /**
+ * The error codes that mean "a uniqueness constraint refused this row".
+ *
+ * Postgres reports one SQLSTATE. SQLite reports a base code and an
+ * extended one, and the extended one is the specific answer.
+ */
+const UNIQUE_VIOLATION_CODES: ReadonlySet<string> = new Set([
+  "23505", // Postgres: unique_violation
+  "SQLITE_CONSTRAINT_UNIQUE",
+  "SQLITE_CONSTRAINT_PRIMARYKEY",
+]);
+
+/**
+ * Every error code in the chain, outermost first.
+ *
+ * The chain is not one link long: drizzle wraps the driver's error, and
+ * the driver wraps the native one. The code that says "unique" is on the
+ * innermost link, so the whole chain is walked.
+ */
+function errorCodes(error: unknown): string[] {
+  const codes: string[] = [];
+
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== "object" || current === null) break;
+
+    const level = current as {
+      code?: unknown;
+      extendedCode?: unknown;
+      cause?: unknown;
+    };
+
+    if (typeof level.code === "string") codes.push(level.code);
+    if (typeof level.extendedCode === "string") codes.push(level.extendedCode);
+
+    current = level.cause;
+  }
+
+  return codes;
+}
+
+/**
  * Is this error a unique-constraint violation?
  *
- * Postgres reports it as SQLSTATE `23505`, and `pg` puts the error in the
- * `cause` of the one it throws. SQLite reports it as the extended code
- * `SQLITE_CONSTRAINT_UNIQUE`, which the driver puts on the error itself.
+ * Postgres reports it as SQLSTATE `23505`. SQLite reports it as the
+ * extended code `SQLITE_CONSTRAINT_UNIQUE`, one link down the wrapped
+ * error chain.
  *
  * Both are answered here, because "that name is taken" is the same
  * answer whichever engine the bot is running on.
  */
 export function isUniqueViolation(error: unknown): boolean {
-  const candidate = error as
-    | { code?: string; cause?: { code?: string } }
-    | undefined;
-
-  const code = candidate?.cause?.code ?? candidate?.code;
-
-  return code === "23505" || code === "SQLITE_CONSTRAINT_UNIQUE";
+  return errorCodes(error).some((code) => UNIQUE_VIOLATION_CODES.has(code));
 }
 
 /** A tag row, as the area sees it. */
