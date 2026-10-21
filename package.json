@@ -1,8 +1,31 @@
 {
+  "name": "discord-verification-app",
+  "version": "1.0.0",
+  "description": "Discord ticket-based verification bot for esports event registrations.",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "serve": "npm run build && node dist/main.js",
+    "dev": "tsx watch main.ts",
+    "deploy": "tsx deploy.ts",
+    "deploy:prod": "npm run build && node dist/deploy.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "tsx scripts/smoke.ts",
+    "test:mentions": "tsx scripts/integration-mentions.ts",
+    "clean": "rm -rf dist"
+  },
   "dependencies": {
     "discord.js": "^14.26.3",
     "dotenv": "^17.4.2",
     "googleapis": "^171.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
   }
 }

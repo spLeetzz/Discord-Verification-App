@@ -2,3 +2,6 @@
 node_modules
 previous.py
 bot.log
+dist
+*.tsbuildinfo
+.cache
