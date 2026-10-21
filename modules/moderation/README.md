@@ -102,14 +102,20 @@ there is nothing that can fall out of sync with Discord.
      └──────────────────────────────┘
 ```
 
-**The key** of a lockdown is what identifies its subject:
+**The key** of a lockdown is what identifies its subject. It is the
+`lockdowns.lock_key` column, and the unique constraint on it is what says
+"one lockdown per subject":
 
 | Type | Key | `channel_id` | `role_id` | `channel_ids` |
 |---|---|---|---|---|
-| `channel` | guild + channel | the channel | — | the channel |
-| `guild` | guild | the channel the command was run in | — | every locked channel |
-| `maintenance` | guild + role | the channel the command was run in | the role | every hidden channel |
-| `category` | guild + category | the category | — | every hidden channel |
+| `channel` | `channel:<channelId>` | the channel | — | the channel |
+| `guild` | `guild:<guildId>` | the channel the command was run in | — | every locked channel |
+| `maintenance` | `maintenance:<roleId>` | the channel the command was run in | the role | every hidden channel |
+| `category` | `category:<categoryId>` | the category | — | every hidden channel |
+
+The kind is in the key, so a channel id can never collide with a role id,
+and the ids are Discord snowflakes, which are unique across Discord — so
+the key is unique across the table.
 
 **Transitions**
 
@@ -139,6 +145,16 @@ there is nothing that can fall out of sync with Discord.
    something the moderator asked for.
 3. The bot must hold `manage_channels` in every channel it is about to
    change. The channels it cannot edit are left alone and counted.
+
+**The insert is refused by the database too.** The guard reads the rows
+first and explains the refusal; the unique constraint on `lock_key` is the
+backstop, and the insert is `ON CONFLICT (lock_key) DO NOTHING`. Two
+moderators who lock the same subject at the same time cannot both get
+their way: one of them gets no row, is told the subject is already locked,
+and leaves nothing behind.
+
+**The rows come back in a fixed order** — oldest first, with the id as the
+tiebreaker — so that the row an unlock lifts is always the same row.
 
 **The expiry is a row in `jobs`, never a `setTimeout`.** A timer dies
 with the process and the channel stays locked forever. The job row says
@@ -310,7 +326,7 @@ The refusals the module raises itself:
 
 ## The bugs that were fixed rather than ported
 
-### 1. The role-revert button never reverted anything
+### 1. The role-revert button — a claim that was wrong
 
 `mod/views/role.py:35`
 
@@ -318,14 +334,21 @@ The refusals the module raises itself:
 await _.remove_roles(self.role) if self.take_role else await _.add_roles(self.role)
 ```
 
-Python parses this as `await (X if cond else Y)`, where `X` is already
-the *resolved* result of a call rather than a coroutine — so the outer
-`await` raised `TypeError: object list can't be used in 'await'
-expression` and the button did nothing at all.
+This was recorded as a bug: the ternary was read as `await (X if cond
+else Y)`, where `X` would be the *resolved* result of a call rather than a
+coroutine — so the outer `await` would raise `TypeError: object list can't
+be used in 'await' expression` and the button would do nothing.
 
-**Now:** the branches are parenthesised. The revert does the opposite of
-what the original action did: an "add" is undone with a remove, a
-"remove" is undone with an add.
+**That reading is wrong.** `ast.parse` on Python 3.14 gives
+`IfExp(test=…, body=Await(remove_roles), orelse=Await(add_roles))`: the
+`await` binds to each branch, because a conditional expression binds
+looser than `await`. The source parses as `(await remove_roles) if
+take_role else (await add_roles)`, and **the source's revert worked.**
+
+**Now:** the port writes the same thing as an `if` over the action it
+recorded — an "add" is undone with a remove, a "remove" is undone with an
+add. The behaviour is the source's; only the comment was wrong, and it
+now says what the code does.
 
 ### 2. `unlock server` always raised
 
@@ -490,6 +513,7 @@ npm test
 | `purge.test.ts` | which messages each filter selects, the fourteen-day cutoff, the batching, the three-character minimum |
 | `reason.test.ts` | the reason format and the 512-character cap |
 | `lock-state.test.ts` | the transitions and the guards, including the refusal to double-lock |
+| `lockdown.test.ts` | the lockdown against the live database: the prior state round-trips, the job row, the key of the subject, the refusal of a second lockdown of the same subject by the database, and the fixed order of the rows |
 | `permissions.test.ts` | the restore-previous-state logic |
 | `hierarchy.test.ts` | the actor's and the bot's hierarchy checks |
 | `blocklist.test.ts` | the cache, and that a user and a guild with the same id do not collide |

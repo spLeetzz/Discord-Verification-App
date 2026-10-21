@@ -10,7 +10,7 @@
  * table has no column for it.
  */
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
   BLOCK_ID_TYPES,
@@ -24,6 +24,7 @@ import type {
   LockdownPriorState,
   LockdownType,
 } from "../../db/schema.js";
+import { lockKey } from "./lock-state.js";
 import type {
   BlocklistEntry,
   LockdownJobPayload,
@@ -97,12 +98,18 @@ function toLockRecord(
  * The state machine needs all of them: a channel unlock has to know
  * whether the channel is covered by a server lockdown, and a lock has to
  * know whether the same subject is already locked.
+ *
+ * **The order is fixed.** The rows come back oldest first, with the id as
+ * the tiebreaker, so that two reads of the same guild give the same list
+ * in the same order — and so that the row an unlock lifts is always the
+ * same row.
  */
 export async function listLockdowns(guildId: string): Promise<LockRecord[]> {
   const rows = await db
     .select()
     .from(lockdowns)
-    .where(eq(lockdowns.guildId, guildId));
+    .where(eq(lockdowns.guildId, guildId))
+    .orderBy(asc(lockdowns.createdAt), asc(lockdowns.id));
 
   return rows
     .map(toLockRecord)
@@ -139,18 +146,26 @@ export async function findLockdown(
     .select()
     .from(lockdowns)
     .where(and(...conditions))
+    .orderBy(asc(lockdowns.createdAt), asc(lockdowns.id))
     .limit(1);
 
   const row = rows[0];
   return row ? toLockRecord(row) : null;
 }
 
-/** What a new lockdown row holds. */
+/**
+ * What a new lockdown row holds.
+ *
+ * The key of the row is derived from the guild, the type and the subject
+ * — it is not passed in, so it cannot be the key of something else. See
+ * {@link lockKey}.
+ */
 export interface NewLockdown {
   readonly guildId: string;
   readonly type: LockdownType;
   readonly roleId: string | null;
   readonly channelId: string | null;
+  /** Every channel the lockdown touches. */
   readonly channelIds: readonly string[];
   readonly expireTime: Date | null;
   readonly authorId: string;
@@ -186,8 +201,22 @@ export interface NewLockdown {
  * schedule, and the row itself is the state — the double-lock guard reads
  * it, and the unlock finds the permission state through it. A job row that
  * never fires, used as a data store, would read as a design nobody meant.
+ *
+ * **The insert is refused by the database when the subject is already
+ * locked.** The row carries the key of its subject — `channel:<id>`,
+ * `category:<id>`, `maintenance:<roleId>` or `guild:<guildId>` — and the
+ * unique constraint on that column is what says "one lockdown per
+ * subject". The insert does `ON CONFLICT (lock_key) DO NOTHING`, so the
+ * second lockdown of a subject does not get a row: it is refused by the
+ * database, not by a read-then-write check, and two moderators who lock
+ * the same thing at the same time cannot both get their way.
+ *
+ * @returns the row that was written, or `null` when the subject is
+ *          already locked and the insert was refused.
  */
-export async function createLockdown(input: NewLockdown): Promise<LockRecord> {
+export async function createLockdown(
+  input: NewLockdown,
+): Promise<LockRecord | null> {
   return db.transaction(async (tx) => {
     const rows = await tx
       .insert(lockdowns)
@@ -206,11 +235,19 @@ export async function createLockdown(input: NewLockdown): Promise<LockRecord> {
         maintenanceChannelIds:
           input.type === "maintenance" ? [...input.maintenanceChannelIds] : [],
         authorId: input.authorId,
+        // The key of the subject, written with the row. The unique
+        // constraint on it is what refuses a second lockdown of the same
+        // subject.
+        lockKey: lockKey(input),
       })
+      .onConflictDoNothing({ target: lockdowns.lockKey })
       .returning();
 
     const row = rows[0];
-    if (!row) throw new Error("The lockdown row was not returned.");
+
+    // No row came back: the unique constraint on `lock_key` refused the
+    // insert, so the subject is already locked.
+    if (!row) return null;
 
     const record = toLockRecord(row);
     if (!record) throw new Error("The lockdown row has an unknown type.");

@@ -21,9 +21,9 @@
  * The guards are:
  *
  *  - **lock** refuses when a lockdown with the same key already exists.
- *    The key is the guild plus the type plus whatever identifies the
- *    subject: the channel for a channel lockdown, the role for a
- *    maintenance lockdown, the guild for a server lockdown.
+ *    The key is the kind of lockdown plus the subject it is about: the
+ *    channel for a channel lockdown, the category for a category one, the
+ *    role for a maintenance lockdown, the guild for a server lockdown.
  *  - **unlock** refuses when there is no lockdown to lift, and refuses
  *    when the channel is covered by a *different* lockdown (a server lock
  *    or a maintenance mode) — lifting half of that is not a thing the
@@ -73,8 +73,26 @@ export type UnlockDecision =
 /**
  * The identity of a lockdown.
  *
- * Two lockdowns conflict when they have the same key: the same guild, the
- * same kind of lockdown, and the same subject.
+ * Two lockdowns conflict when they have the same key: the same kind of
+ * lockdown, about the same subject.
+ *
+ * The key is `<kind>:<subject>` — the same shape as the block list's key.
+ * The kind is in it so that a channel id can never collide with a role
+ * id, and the subject is the thing the lockdown is about:
+ *
+ *  - `channel:<channelId>` — one channel is write-locked
+ *  - `category:<categoryId>` — a category is hidden
+ *  - `maintenance:<roleId>` — a role is locked out of the server
+ *  - `guild:<guildId>` — the whole server is locked
+ *
+ * **This string is what the `lockdowns.lock_key` column holds.** The
+ * unique constraint on that column is what makes "one lockdown per
+ * subject" a fact of the database rather than a fact of a read-then-write
+ * check: two moderators who lock the same subject at the same time cannot
+ * both get their way, because the second insert is refused.
+ *
+ * The ids are Discord snowflakes, which are unique across Discord, so the
+ * key is unique across the table without the guild in it.
  */
 export function lockKey(input: {
   readonly guildId: string;
@@ -84,12 +102,13 @@ export function lockKey(input: {
 }): string {
   switch (input.type) {
     case "channel":
+      return `channel:${input.channelId ?? ""}`;
     case "category":
-      return `${input.guildId}:${input.type}:${input.channelId ?? ""}`;
+      return `category:${input.channelId ?? ""}`;
     case "maintenance":
-      return `${input.guildId}:${input.type}:${input.roleId ?? ""}`;
+      return `maintenance:${input.roleId ?? ""}`;
     case "guild":
-      return `${input.guildId}:${input.type}`;
+      return `guild:${input.guildId}`;
   }
 }
 
@@ -97,14 +116,17 @@ export function lockKey(input: {
  * The message that says a lockdown is already in place.
  *
  * Quotient's wording, with the time left added when the lockdown has one.
+ *
+ * @param existing the lockdown that is already in place, or `null` when
+ *        the row that won the race cannot be found any more.
  */
 function alreadyLockedMessage(
   request: LockRequest,
-  existing: LockRecord,
+  existing: LockRecord | null,
   now: number,
 ): string {
   const remaining =
-    existing.expireTime === null
+    existing === null || existing.expireTime === null
       ? ""
       : ` It unlocks ${formatRelativeTime(existing.expireTime, {
           now: new Date(now),
@@ -120,6 +142,27 @@ function alreadyLockedMessage(
     case "category":
       return `That category is already hidden.${remaining}`;
   }
+}
+
+/**
+ * The refusal a second lockdown of the same subject gets.
+ *
+ * Two things refuse it, and they say the same thing: the double-lock
+ * guard, which reads the rows first, and the unique constraint on
+ * `lockdowns.lock_key`, which refuses the insert itself. The guard is the
+ * explanation; the constraint is the backstop.
+ *
+ * @param existing every lockdown the guild has now.
+ */
+export function alreadyLockedRefusal(
+  request: LockRequest,
+  existing: readonly LockRecord[],
+  now: number = Date.now(),
+): string {
+  const key = lockKey(request);
+  const clash = existing.find((record) => lockKey(record) === key) ?? null;
+
+  return alreadyLockedMessage(request, clash, now);
 }
 
 /**

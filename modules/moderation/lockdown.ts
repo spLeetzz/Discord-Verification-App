@@ -15,6 +15,14 @@
  * and the channel stays locked forever. The job row is in the database,
  * so the unlock survives a restart.
  *
+ * **One subject, one lockdown.** The row carries the key of what it
+ * locks — `channel:<id>`, `category:<id>`, `maintenance:<roleId>` or
+ * `guild:<guildId>` — and the unique constraint on that column refuses a
+ * second lockdown of the same subject. The guard in `lock-state.ts` reads
+ * the rows first and explains the refusal; the constraint is the backstop
+ * that closes the race between two moderators doing the same thing at the
+ * same time.
+ *
  * Three Quotient bugs are fixed here rather than copied:
  *
  *  1. `unlock server` called `.first()` on a coroutine and always raised
@@ -38,10 +46,20 @@ import type {
 } from "discord.js";
 import { PermissionDeniedError } from "../../core/errors.js";
 import { readOverwriteState, planRestore } from "./permissions.js";
-import { evaluateLock, evaluateUnlock } from "./lock-state.js";
+import {
+  alreadyLockedRefusal,
+  evaluateLock,
+  evaluateUnlock,
+} from "./lock-state.js";
+import type { LockRequest } from "./lock-state.js";
 import { deleteMaintenanceChannels } from "./maintenance.js";
 import type { MaintenanceChannelDeletion } from "./maintenance.js";
-import { createLockdown, listLockdowns, removeLockdown } from "./repo.js";
+import {
+  createLockdown,
+  findLockdown,
+  listLockdowns,
+  removeLockdown,
+} from "./repo.js";
 import type {
   LockPermission,
   LockRecord,
@@ -193,28 +211,76 @@ function botCanEdit(channel: LockableChannel, guild: Guild): boolean {
 /** What to lock, and how. */
 interface ApplyLockInput {
   readonly context: LockContext;
-  readonly type: LockRecord["type"];
+  /**
+   * What the lockdown is about.
+   *
+   * The request is what the guard was given and what the row is written
+   * from, so the two cannot drift apart.
+   */
+  readonly request: LockRequest;
   /** The permission that is taken away. */
   readonly permission: LockPermission;
   /** Whose permission is changed — `@everyone`, or a role. */
   readonly target: Role;
   /** The channels to change. */
   readonly channels: readonly LockableChannel[];
-  /** The channel recorded on the lockdown row. */
-  readonly channelId: string | null;
-  /** The role recorded on the lockdown row. */
-  readonly roleId: string | null;
-  /** When the lockdown lifts by itself. */
-  readonly expireTime: Date | null;
   /** The maintenance channels that were created with this lockdown. */
   readonly maintenanceChannelIds?: readonly string[];
+}
+
+/**
+ * Puts back what a refused lockdown changed.
+ *
+ * The refusal means another lockdown of the same subject won the race.
+ * That lockdown's row is the one that will be lifted later, and it records
+ * the state of every channel it covers — so those are left alone: this
+ * attempt's change to them is the same change the winner made, and the
+ * winner will put it back.
+ *
+ * The channels the winning lockdown does not cover were changed by this
+ * attempt and by nobody else, so they are put back the way they were. A
+ * refused lockdown leaves nothing behind.
+ */
+async function undoRefusedLock(input: {
+  readonly context: LockContext;
+  readonly request: LockRequest;
+  readonly permission: LockPermission;
+  readonly target: Role;
+  readonly prior: Record<string, PriorPermissionState>;
+  readonly changed: readonly string[];
+}): Promise<void> {
+  const winner = await findLockdown(
+    input.context.guild.id,
+    input.request.type,
+    input.request.channelId,
+    input.request.roleId,
+  );
+
+  const covered = new Set(winner?.channelIds ?? []);
+
+  for (const channelId of input.changed) {
+    // The winning lockdown restores this one itself.
+    if (covered.has(channelId)) continue;
+
+    const channel = input.context.guild.channels.cache.get(channelId);
+
+    if (!channel || !isLockableChannel(channel)) continue;
+
+    await restoreOverwrite(
+      channel,
+      input.target,
+      input.permission,
+      input.prior[channelId],
+      input.context.reason,
+    );
+  }
 }
 
 /**
  * Takes the permission away and records everything needed to put it back.
  */
 async function applyLock(input: ApplyLockInput): Promise<LockApplyResult> {
-  const { context, permission, target } = input;
+  const { context, permission, target, request } = input;
   const { guild } = context;
 
   const prior: Record<string, PriorPermissionState> = {};
@@ -254,22 +320,40 @@ async function applyLock(input: ApplyLockInput): Promise<LockApplyResult> {
 
   const record = await createLockdown({
     guildId: guild.id,
-    type: input.type,
-    roleId: input.roleId,
-    channelId: input.channelId,
+    type: request.type,
+    roleId: request.roleId,
+    channelId: request.channelId,
     channelIds: lockedChannels,
-    expireTime: input.expireTime,
+    expireTime: request.expireTime,
     authorId: context.author.id,
     priorState: prior,
     sourceChannelId: context.sourceChannelId,
     maintenanceChannelIds: input.maintenanceChannelIds ?? [],
   });
 
+  if (!record) {
+    // The database refused the row: the subject is already locked, and
+    // another lockdown won the race. This attempt changes nothing, so
+    // what it changed is put back before the refusal is given.
+    await undoRefusedLock({
+      context,
+      request,
+      permission,
+      target,
+      prior,
+      changed: lockedChannels,
+    });
+
+    throw new PermissionDeniedError(
+      alreadyLockedRefusal(request, await listLockdowns(guild.id)),
+    );
+  }
+
   return {
     lockdownId: record.id,
     locked: lockedChannels.length,
     failed,
-    expireTime: input.expireTime,
+    expireTime: request.expireTime,
   };
 }
 
@@ -382,21 +466,18 @@ export async function lockChannel(input: {
   const { context, channel, duration } = input;
   const { guild } = context;
 
-  const existing = await listLockdowns(guild.id);
+  const request: LockRequest = {
+    type: "channel",
+    guildId: guild.id,
+    channelId: channel.id,
+    channelIds: [channel.id],
+    roleId: null,
+    expireTime: duration,
+    authorId: context.author.id,
+    channelName: channel.name,
+  };
 
-  const decision = evaluateLock(
-    {
-      type: "channel",
-      guildId: guild.id,
-      channelId: channel.id,
-      channelIds: [channel.id],
-      roleId: null,
-      expireTime: duration,
-      authorId: context.author.id,
-      channelName: channel.name,
-    },
-    existing,
-  );
+  const decision = evaluateLock(request, await listLockdowns(guild.id));
 
   if (!decision.allowed) throw new PermissionDeniedError(decision.reason);
 
@@ -408,13 +489,10 @@ export async function lockChannel(input: {
 
   return applyLock({
     context,
-    type: "channel",
+    request,
     permission: "SendMessages",
     target: guild.roles.everyone,
     channels: [channel],
-    channelId: channel.id,
-    roleId: null,
-    expireTime: duration,
   });
 }
 
@@ -461,20 +539,17 @@ export async function lockServer(input: {
   const { context, duration } = input;
   const { guild } = context;
 
-  const existing = await listLockdowns(guild.id);
+  const request: LockRequest = {
+    type: "guild",
+    guildId: guild.id,
+    channelId: context.sourceChannelId,
+    channelIds: [],
+    roleId: null,
+    expireTime: duration,
+    authorId: context.author.id,
+  };
 
-  const decision = evaluateLock(
-    {
-      type: "guild",
-      guildId: guild.id,
-      channelId: context.sourceChannelId,
-      channelIds: [],
-      roleId: null,
-      expireTime: duration,
-      authorId: context.author.id,
-    },
-    existing,
-  );
+  const decision = evaluateLock(request, await listLockdowns(guild.id));
 
   if (!decision.allowed) throw new PermissionDeniedError(decision.reason);
 
@@ -488,13 +563,10 @@ export async function lockServer(input: {
 
   return applyLock({
     context,
-    type: "guild",
+    request,
     permission: "SendMessages",
     target: guild.roles.everyone,
     channels,
-    channelId: context.sourceChannelId,
-    roleId: null,
-    expireTime: duration,
   });
 }
 
@@ -631,21 +703,18 @@ export async function maintenanceOn(input: {
   const { context, role } = input;
   const { guild } = context;
 
-  const existing = await listLockdowns(guild.id);
+  const request: LockRequest = {
+    type: "maintenance",
+    guildId: guild.id,
+    channelId: context.sourceChannelId,
+    channelIds: [],
+    roleId: role.id,
+    expireTime: input.expireTime ?? null,
+    authorId: context.author.id,
+    roleName: role.name,
+  };
 
-  const decision = evaluateLock(
-    {
-      type: "maintenance",
-      guildId: guild.id,
-      channelId: context.sourceChannelId,
-      channelIds: [],
-      roleId: role.id,
-      expireTime: input.expireTime ?? null,
-      authorId: context.author.id,
-      roleName: role.name,
-    },
-    existing,
-  );
+  const decision = evaluateLock(request, await listLockdowns(guild.id));
 
   if (!decision.allowed) throw new PermissionDeniedError(decision.reason);
 
@@ -666,13 +735,10 @@ export async function maintenanceOn(input: {
 
   return applyLock({
     context,
-    type: "maintenance",
+    request,
     permission: "ViewChannel",
     target: role,
     channels,
-    channelId: context.sourceChannelId,
-    roleId: role.id,
-    expireTime: input.expireTime ?? null,
     maintenanceChannelIds: input.maintenanceChannelIds ?? [],
   });
 }
@@ -764,21 +830,18 @@ export async function hideCategory(input: {
   const { context, categoryId, categoryName } = input;
   const { guild } = context;
 
-  const existing = await listLockdowns(guild.id);
+  const request: LockRequest = {
+    type: "category",
+    guildId: guild.id,
+    channelId: categoryId,
+    channelIds: [],
+    roleId: null,
+    expireTime: null,
+    authorId: context.author.id,
+    channelName: categoryName,
+  };
 
-  const decision = evaluateLock(
-    {
-      type: "category",
-      guildId: guild.id,
-      channelId: categoryId,
-      channelIds: [],
-      roleId: null,
-      expireTime: null,
-      authorId: context.author.id,
-      channelName: categoryName,
-    },
-    existing,
-  );
+  const decision = evaluateLock(request, await listLockdowns(guild.id));
 
   if (!decision.allowed) throw new PermissionDeniedError(decision.reason);
 
@@ -794,13 +857,10 @@ export async function hideCategory(input: {
 
   return applyLock({
     context,
-    type: "category",
+    request,
     permission: "ViewChannel",
     target: guild.roles.everyone,
     channels,
-    channelId: categoryId,
-    roleId: null,
-    expireTime: null,
   });
 }
 

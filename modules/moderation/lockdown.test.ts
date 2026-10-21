@@ -15,11 +15,13 @@
  */
 
 import { afterAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { ChannelType, Collection, PermissionFlagsBits } from "discord.js";
 import type { Channel, Guild, GuildMember, Role } from "discord.js";
-import { closeDatabase } from "../../db/client.js";
-import { evaluateLock } from "./lock-state.js";
-import { releaseLock } from "./lockdown.js";
+import { closeDatabase, db } from "../../db/client.js";
+import { lockdowns } from "../../db/schema.js";
+import { evaluateLock, evaluateUnlock } from "./lock-state.js";
+import { lockChannel, releaseLock } from "./lockdown.js";
 import type { LockContext, LockableChannel } from "./lockdown.js";
 import {
   createLockdown,
@@ -36,6 +38,14 @@ const RUN = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 /** The guild every fixture of this file belongs to. */
 const GUILD_ID = `lockdown-test-${RUN}`;
+
+/**
+ * A second guild, for the tests that need a subject of their own.
+ *
+ * The key of a server lockdown is the guild, so a guild may only have one
+ * of them — a second one would be refused.
+ */
+const OTHER_GUILD_ID = `lockdown-test-other-${RUN}`;
 
 /** The `@everyone` role of the fake guild. */
 const EVERYONE_ID = `lockdown-test-everyone-${RUN}`;
@@ -65,7 +75,17 @@ interface OverwriteCall {
 }
 
 /** A channel whose overwrites the test can read afterwards. */
-function fakeChannel(id: string, calls: OverwriteCall[]): LockableChannel {
+function fakeChannel(
+  id: string,
+  calls: OverwriteCall[],
+  /**
+   * What happens while the channel is being changed.
+   *
+   * It is how a test makes the race happen at a chosen moment: the
+   * permission is taken away first, and the row is written afterwards.
+   */
+  onEdit?: () => Promise<void>,
+): LockableChannel {
   return {
     id,
     name: id,
@@ -76,6 +96,8 @@ function fakeChannel(id: string, calls: OverwriteCall[]): LockableChannel {
         target: Role,
         options: Record<string, boolean | null>,
       ): Promise<void> => {
+        if (onEdit) await onEdit();
+
         const permission = Object.keys(options)[0] ?? null;
 
         calls.push({
@@ -132,7 +154,7 @@ async function makeLockdown(input: {
   readonly expireTime: Date | null;
   readonly priorState: Record<string, { existed: boolean; value: boolean | null }>;
 }): Promise<LockRecord> {
-  return createLockdown({
+  const record = await createLockdown({
     guildId: GUILD_ID,
     type: "channel",
     roleId: null,
@@ -144,6 +166,20 @@ async function makeLockdown(input: {
     sourceChannelId: null,
     maintenanceChannelIds: [],
   });
+
+  if (!record) throw new Error("The lockdown row was refused.");
+
+  return record;
+}
+
+/** The key the row of a lockdown was stored under. */
+async function storedKey(id: string): Promise<string | undefined> {
+  const rows = await db
+    .select({ key: lockdowns.lockKey })
+    .from(lockdowns)
+    .where(eq(lockdowns.id, id));
+
+  return rows[0]?.key;
 }
 
 /* ------------------------------------------------------------------ *
@@ -154,6 +190,10 @@ afterAll(async () => {
   // Every fixture of this file belongs to one guild, and a lockdown takes
   // its timer with it.
   for (const record of await listLockdowns(GUILD_ID)) {
+    await removeLockdown(record.id);
+  }
+
+  for (const record of await listLockdowns(OTHER_GUILD_ID)) {
     await removeLockdown(record.id);
   }
 
@@ -383,5 +423,295 @@ describe("the double-lock guard", () => {
     expect(decision.allowed === false && decision.reason).toContain(
       "already locked",
     );
+  });
+});
+
+describe("the lock key", () => {
+  it("stores the key of the subject a channel lockdown is about", async () => {
+    const channel = channelId("key-channel");
+
+    const record = await makeLockdown({ channel, expireTime: null, priorState: {} });
+
+    expect(await storedKey(record.id)).toBe(`channel:${channel}`);
+  });
+
+  it("stores the key of the subject a maintenance lockdown is about", async () => {
+    const record = await createLockdown({
+      guildId: GUILD_ID,
+      type: "maintenance",
+      roleId: EVERYONE_ID,
+      channelId: null,
+      channelIds: [],
+      expireTime: null,
+      authorId: `lockdown-test-moderator-${RUN}`,
+      priorState: {},
+      sourceChannelId: null,
+      maintenanceChannelIds: [],
+    });
+
+    if (!record) throw new Error("The lockdown row was refused.");
+
+    expect(await storedKey(record.id)).toBe(`maintenance:${EVERYONE_ID}`);
+  });
+
+  it("stores the key of the subject a server lockdown is about", async () => {
+    const record = await createLockdown({
+      guildId: GUILD_ID,
+      type: "guild",
+      roleId: null,
+      channelId: null,
+      channelIds: [],
+      expireTime: null,
+      authorId: `lockdown-test-moderator-${RUN}`,
+      priorState: {},
+      sourceChannelId: null,
+      maintenanceChannelIds: [],
+    });
+
+    if (!record) throw new Error("The lockdown row was refused.");
+
+    expect(await storedKey(record.id)).toBe(`guild:${GUILD_ID}`);
+  });
+
+  it("stores the key of the subject a category lockdown is about", async () => {
+    const category = channelId("key-category");
+
+    const record = await createLockdown({
+      guildId: GUILD_ID,
+      type: "category",
+      roleId: null,
+      channelId: category,
+      channelIds: [],
+      expireTime: null,
+      authorId: `lockdown-test-moderator-${RUN}`,
+      priorState: {},
+      sourceChannelId: null,
+      maintenanceChannelIds: [],
+    });
+
+    if (!record) throw new Error("The lockdown row was refused.");
+
+    expect(await storedKey(record.id)).toBe(`category:${category}`);
+  });
+});
+
+describe("two lockdowns of the same subject at once", () => {
+  it("writes one row, and refuses the other in the database", async () => {
+    const channel = channelId("concurrent");
+
+    const input = {
+      guildId: GUILD_ID,
+      type: "channel" as const,
+      roleId: null,
+      channelId: channel,
+      channelIds: [channel],
+      expireTime: null,
+      authorId: `lockdown-test-moderator-${RUN}`,
+      priorState: {},
+      sourceChannelId: null,
+      maintenanceChannelIds: [],
+    };
+
+    // Both go in at once, and neither of them reads the table first: the
+    // refusal comes from the unique constraint, not from a guard.
+    const [first, second] = await Promise.all([
+      createLockdown(input),
+      createLockdown(input),
+    ]);
+
+    expect([first, second].filter((record) => record !== null)).toHaveLength(1);
+    expect([first, second].filter((record) => record === null)).toHaveLength(1);
+
+    // One row, and one row only.
+    const rows = await db
+      .select()
+      .from(lockdowns)
+      .where(eq(lockdowns.lockKey, `channel:${channel}`));
+
+    expect(rows).toHaveLength(1);
+  });
+
+  it("refuses the second lockdown with the good message", async () => {
+    const channel = channelId("concurrent-command");
+    const calls: OverwriteCall[] = [];
+    const lockable = fakeChannel(channel, calls);
+    const guild = fakeGuild([lockable]);
+
+    const results = await Promise.allSettled([
+      lockChannel({ context: fakeContext(guild), channel: lockable, duration: null }),
+      lockChannel({ context: fakeContext(guild), channel: lockable, duration: null }),
+    ]);
+
+    const refused = results.filter((result) => result.status === "rejected");
+
+    expect(refused).toHaveLength(1);
+
+    const reason =
+      refused[0]?.status === "rejected" ? String(refused[0].reason) : "";
+
+    expect(reason).toContain("already locked");
+
+    // And the guild has one lockdown of that channel, not two.
+    const rows = await db
+      .select()
+      .from(lockdowns)
+      .where(eq(lockdowns.lockKey, `channel:${channel}`));
+
+    expect(rows).toHaveLength(1);
+  });
+
+  it("refuses a lockdown the database refuses, and says until when", async () => {
+    const channel = channelId("refused-by-the-database");
+    const calls: OverwriteCall[] = [];
+
+    // The other moderator gets there first: their row is written while
+    // this lockdown is changing the channel's permissions, so the guard
+    // has already said yes and the insert is the one that refuses.
+    const lockable = fakeChannel(channel, calls, async () => {
+      await createLockdown({
+        guildId: GUILD_ID,
+        type: "channel",
+        roleId: null,
+        channelId: channel,
+        channelIds: [channel],
+        expireTime: inAMinute(),
+        authorId: `lockdown-test-other-moderator-${RUN}`,
+        priorState: {},
+        sourceChannelId: null,
+        maintenanceChannelIds: [],
+      });
+    });
+
+    const guild = fakeGuild([lockable]);
+
+    let reason = "";
+
+    try {
+      await lockChannel({
+        context: fakeContext(guild),
+        channel: lockable,
+        duration: null,
+      });
+    } catch (error) {
+      reason = String(error);
+    }
+
+    // The refusal is the guard's message, with the time left of the
+    // lockdown that won.
+    expect(reason).toContain("already locked");
+    expect(reason).toContain("It unlocks in 1 minute.");
+
+    // One row for the subject, and one only.
+    const rows = await db
+      .select()
+      .from(lockdowns)
+      .where(eq(lockdowns.lockKey, `channel:${channel}`));
+
+    expect(rows).toHaveLength(1);
+
+    // And the winning lockdown stands: the channel is still write-locked,
+    // because the row that will lift it is the one that is there.
+    expect(calls.filter((call) => call.kind === "delete")).toHaveLength(0);
+    expect(calls.filter((call) => call.kind === "edit")).toHaveLength(1);
+  });
+});
+
+describe("the order of the lockdowns", () => {
+  it("lists the lockdowns of a guild in the order they were made", async () => {
+    const older = channelId("order-older");
+    const newer = channelId("order-newer");
+
+    // The lockdown that was made first is written to the table last: the
+    // order comes from the row, not from the order of the writes.
+    await makeLockdown({ channel: newer, expireTime: null, priorState: {} });
+
+    await db.insert(lockdowns).values({
+      guildId: GUILD_ID,
+      type: "channel",
+      roleId: null,
+      channelId: older,
+      channelIds: [older],
+      expireTime: null,
+      priorState: {},
+      authorId: `lockdown-test-moderator-${RUN}`,
+      lockKey: `channel:${older}`,
+      createdAt: new Date("2020-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2020-01-01T00:00:00.000Z"),
+    });
+
+    const order = (await listLockdowns(GUILD_ID)).map((record) => record.channelId);
+
+    expect(order.indexOf(older)).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf(older)).toBeLessThan(order.indexOf(newer));
+  });
+
+  it("lifts the row it means to, every time", async () => {
+    const channel = channelId("lifted-by-key");
+
+    const channelLock = await createLockdown({
+      guildId: OTHER_GUILD_ID,
+      type: "channel",
+      roleId: null,
+      channelId: channel,
+      channelIds: [channel],
+      expireTime: null,
+      authorId: `lockdown-test-moderator-${RUN}`,
+      priorState: {},
+      sourceChannelId: null,
+      maintenanceChannelIds: [],
+    });
+
+    if (!channelLock) throw new Error("The lockdown row was refused.");
+
+    const guildLock = await createLockdown({
+      guildId: OTHER_GUILD_ID,
+      type: "guild",
+      roleId: null,
+      channelId: null,
+      channelIds: [],
+      expireTime: null,
+      authorId: `lockdown-test-moderator-${RUN}`,
+      priorState: {},
+      sourceChannelId: null,
+      maintenanceChannelIds: [],
+    });
+
+    if (!guildLock) throw new Error("The lockdown row was refused.");
+
+    const channelRequest = {
+      type: "channel" as const,
+      guildId: OTHER_GUILD_ID,
+      channelId: channel,
+      channelIds: [channel],
+      roleId: null,
+      expireTime: null,
+      authorId: `lockdown-test-moderator-${RUN}`,
+    };
+
+    const guildRequest = {
+      type: "guild" as const,
+      guildId: OTHER_GUILD_ID,
+      channelId: null,
+      channelIds: [],
+      roleId: null,
+      expireTime: null,
+      authorId: `lockdown-test-moderator-${RUN}`,
+    };
+
+    for (const _round of [1, 2]) {
+      const existing = await listLockdowns(OTHER_GUILD_ID);
+
+      const channelDecision = evaluateUnlock(channelRequest, existing);
+      const guildDecision = evaluateUnlock(guildRequest, existing);
+
+      expect(channelDecision.allowed).toBe(true);
+      expect(channelDecision.allowed && channelDecision.record?.id).toBe(
+        channelLock.id,
+      );
+      expect(guildDecision.allowed).toBe(true);
+      expect(guildDecision.allowed && guildDecision.record?.id).toBe(
+        guildLock.id,
+      );
+    }
   });
 });

@@ -2,17 +2,22 @@
  * The role-revert button.
  *
  * After a moderator adds or removes a role, the success message carries a
- * button that puts it back. Quotient's version was broken: the ternary
+ * button that puts it back.
+ *
+ * Quotient's version was a ternary:
  *
  * ```python
  * await _.remove_roles(self.role) if self.take_role else await _.add_roles(self.role)
  * ```
  *
- * parses as `await (X if cond else Y)`, where `X` is already the resolved
- * result of a call rather than a coroutine — so the `await` raised
- * `TypeError: object list can't be used in 'await' expression` and the
- * revert never happened. The port parenthesises the branches, which is
- * the whole fix.
+ * Python parses that as `(await _.remove_roles(...)) if self.take_role
+ * else (await _.add_roles(...))` — the `await` binds to each branch, not
+ * to the whole conditional expression, because a conditional expression
+ * binds looser than `await`. **The source's revert worked.**
+ *
+ * The port writes the same thing as an `if` over the action it recorded:
+ * a role that was added is taken away again, and a role that was removed
+ * is given back.
  *
  * The button is **public** (D43): the moderator who ran the command is
  * not the only person who may need to undo it, and an ephemeral message

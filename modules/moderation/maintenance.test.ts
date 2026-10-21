@@ -176,7 +176,7 @@ async function makeMaintenanceLockdown(input: {
   readonly channelIds: readonly string[];
   readonly maintenanceChannelIds: readonly string[];
 }): Promise<LockRecord> {
-  return createLockdown({
+  const record = await createLockdown({
     guildId: GUILD_ID,
     type: "maintenance",
     roleId: EVERYONE_ID,
@@ -188,6 +188,10 @@ async function makeMaintenanceLockdown(input: {
     sourceChannelId: null,
     maintenanceChannelIds: input.maintenanceChannelIds,
   });
+
+  if (!record) throw new Error("The lockdown row was refused.");
+
+  return record;
 }
 
 /* ------------------------------------------------------------------ *
@@ -254,6 +258,8 @@ describe("the maintenance lockdown row", () => {
       // maintenance lockdown has none.
       maintenanceChannelIds: [channelId("never-mine")],
     });
+
+    if (!record) throw new Error("The lockdown row was refused.");
 
     const read = await findLockdown(GUILD_ID, "channel", channel);
 
@@ -404,6 +410,8 @@ describe("maintenance off", () => {
       sourceChannelId: null,
       maintenanceChannelIds: [],
     });
+
+    if (!channelLock) throw new Error("The lockdown row was refused.");
 
     await makeMaintenanceLockdown({
       channelIds: [],

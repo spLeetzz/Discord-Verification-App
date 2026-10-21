@@ -44,6 +44,7 @@ export { planRestore, readOverwriteState } from "./permissions.js";
 
 /* The lockdown state machine */
 export {
+  alreadyLockedRefusal,
   evaluateLock,
   evaluateUnlock,
   findCoveringLock,

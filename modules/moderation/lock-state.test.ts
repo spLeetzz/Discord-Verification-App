@@ -7,7 +7,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { evaluateLock, evaluateUnlock, findCoveringLock, lockKey } from "./lock-state.js";
+import {
+  alreadyLockedRefusal,
+  evaluateLock,
+  evaluateUnlock,
+  findCoveringLock,
+  lockKey,
+} from "./lock-state.js";
 import type { LockRecord } from "./types.js";
 
 /** A lockdown row, with the parts a test cares about overridden. */
@@ -45,19 +51,32 @@ function request(overrides: Partial<Parameters<typeof evaluateLock>[0]> = {}) {
 describe("lockKey", () => {
   it("gives a channel lockdown a key of its own", () => {
     expect(lockKey({ guildId: "g", type: "channel", channelId: "c", roleId: null })).toBe(
-      "g:channel:c",
+      "channel:c",
     );
   });
 
   it("gives a maintenance lockdown a key of its own", () => {
     expect(lockKey({ guildId: "g", type: "maintenance", channelId: null, roleId: "r" })).toBe(
-      "g:maintenance:r",
+      "maintenance:r",
     );
   });
 
   it("gives a server lockdown a key of its own", () => {
     expect(lockKey({ guildId: "g", type: "guild", channelId: null, roleId: null })).toBe(
-      "g:guild",
+      "guild:g",
+    );
+  });
+
+  it("gives a category lockdown a key of its own", () => {
+    expect(lockKey({ guildId: "g", type: "category", channelId: "c", roleId: null })).toBe(
+      "category:c",
+    );
+  });
+
+  it("never lets a channel id and a role id collide", () => {
+    // The same id as a channel and as a role are two different subjects.
+    expect(lockKey({ guildId: "g", type: "channel", channelId: "x", roleId: null })).not.toBe(
+      lockKey({ guildId: "g", type: "maintenance", channelId: null, roleId: "x" }),
     );
   });
 });
@@ -152,6 +171,32 @@ describe("evaluateLock", () => {
     expect(decision.allowed === false && decision.reason).not.toContain(
       "It unlocks",
     );
+  });
+});
+
+describe("alreadyLockedRefusal", () => {
+  it("says the subject is already locked, and until when", () => {
+    const now = 1_700_000_000_000;
+    const existing = [
+      record({
+        type: "channel",
+        channelId: "channel-1",
+        expireTime: new Date(now + 3_600_000),
+      }),
+    ];
+
+    const reason = alreadyLockedRefusal(request(), existing, now);
+
+    expect(reason).toContain("already locked");
+    expect(reason).toContain("It unlocks in 1 hour.");
+  });
+
+  it("says the same thing when the row that won the race is gone", () => {
+    // The refusal is still a refusal, even when the time left is unknown.
+    const reason = alreadyLockedRefusal(request(), []);
+
+    expect(reason).toContain("already locked");
+    expect(reason).not.toContain("It unlocks");
   });
 });
 
