@@ -228,7 +228,11 @@ const tagCommand: CommunityCommand = {
           option
             .setName("name")
             .setDescription("The name of the tag.")
-            .setMaxLength(TAG_NAME_MAX_LENGTH),
+            .setMaxLength(TAG_NAME_MAX_LENGTH)
+            // Required, and before the other required option: Discord
+            // rejects a subcommand whose required options follow an
+            // optional one.
+            .setRequired(true),
         )
         .addUserOption((option) =>
           option

@@ -28,6 +28,7 @@ import {
 } from "../repo/sheet.js";
 import type { Command } from "../types/command.js";
 import { listCommandFiles } from "../utils/command-files.js";
+import { findRequiredOptionOrderProblems } from "../utils/command-shape.js";
 import {
   buildDocRequirements,
   buildPinnedContent,
@@ -648,6 +649,21 @@ check(
 // ------------------------------------------------------- deploy payload ----
 
 section("deploy payload");
+
+// Every command the bot ships, not just the pre-existing eight. Discord
+// rejects the whole payload for one malformed subcommand, so this has to
+// cover everything that is about to be deployed.
+const allCommandPayloads = [...client.commands.values()].map((cmd) =>
+  cmd.data.toJSON(),
+);
+
+const optionOrderProblems = findRequiredOptionOrderProblems(allCommandPayloads);
+
+check(
+  "no required option follows an optional one",
+  optionOrderProblems.length === 0,
+  optionOrderProblems.join("; "),
+);
 
 const payload = expected.map((name) => client.commands.get(name)!.data.toJSON());
 check("payload has one entry per command", payload.length === expected.length);
