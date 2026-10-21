@@ -8,23 +8,32 @@
  * verified, so the column names here are the real ones — `tourneys.status`,
  * `tourney_slots.num`, `tourney_group_lists.channel_id` and so on.
  *
+ * **The engine is SQLite.** The schema is dialect neutral (see
+ * `db/dialect.ts`), so nothing here spells out an engine's dialect: a
+ * list of ids is a join table, a timestamp is a `Date`, a boolean is a
+ * `boolean` and a JSON column is a parsed object, on both.
+ *
  * Three statements matter more than the rest:
  *
  *  - {@link insertSlot}, which takes the next number from a **per-tourney
  *    sequence** rather than `max(num) + 1` (D25);
  *  - {@link swapSlotNumbers}, which is one transaction (D25);
- *  - {@link findFakeTagMatches}, which is the **typed** rewrite of the
- *    source's broken raw SQL (S6, row 14).
+ *  - {@link findFakeTagMatches}, which is a **join** against the member
+ *    table (S6, row 14).
  */
 
-import { and, asc, count, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, count, eq, exists, inArray, ne, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { db, withTransaction } from "../../db/client.js";
+import type { DbExecutor } from "../../db/client.js";
 import {
   jobs,
+  mediaPartnerSlotMembers,
   mediaPartnerSlots,
   mediaPartners,
   tourneyBannedUsers,
   tourneyGroupLists,
+  tourneySlotMembers,
   tourneySlots,
   tourneys,
 } from "../../db/schema.js";
@@ -95,9 +104,17 @@ function toTourney(row: typeof tourneys.$inferSelect): TourneyRecord {
   };
 }
 
-/** Turns a database row into the domain type. */
+/**
+ * Turns a database row into the domain type.
+ *
+ * **The members are not on the row.** `tourney_slots.members` used to be
+ * a `text[]`; it is a join table now (`tourney_slot_members`), so the
+ * list is read separately and handed in. The domain type is unchanged —
+ * a slot still has a `members` array.
+ */
 function toSlot(
   row: typeof tourneySlots.$inferSelect,
+  members: readonly string[],
 ): TourneySlotRecord {
   return {
     id: row.id,
@@ -105,7 +122,7 @@ function toSlot(
     num: row.num,
     teamName: row.teamName,
     leaderId: row.leaderId,
-    members: row.members,
+    members,
     messageId: row.messageId,
     jumpUrl: row.jumpUrl,
     confirmJumpUrl: row.confirmJumpUrl,
@@ -127,9 +144,15 @@ function toMediaPartner(
   };
 }
 
-/** Turns a database row into the domain type. */
+/**
+ * Turns a database row into the domain type.
+ *
+ * The members come from `media_partner_slot_members`, for the same
+ * reason the tourney slot's do.
+ */
 function toMediaPartnerSlot(
   row: typeof mediaPartnerSlots.$inferSelect,
+  members: readonly string[],
 ): MediaPartnerSlotRecord {
   return {
     id: row.id,
@@ -137,7 +160,7 @@ function toMediaPartnerSlot(
     userId: row.userId,
     messageId: row.messageId,
     jumpUrl: row.jumpUrl,
-    members: row.members,
+    members,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -156,6 +179,93 @@ function toGroupList(
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Slot members
+ *
+ * `tourney_slots.members` was a `text[]`. It is a join table now
+ * (`tourney_slot_members`), so the list is read from there and written
+ * there. The domain type did not change: a slot still has a `members`
+ * array, and the code above this file never learned about the join.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The members of a set of tourney slots, keyed by the slot's row id.
+ *
+ * **One query for the whole set.** The slots of a tournament are read
+ * together, and a query per slot would be a round-trip per row.
+ */
+async function loadSlotMembers(
+  slotIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const members = new Map<string, string[]>();
+
+  if (slotIds.length === 0) return members;
+
+  const rows = await db
+    .select({
+      slotId: tourneySlotMembers.tourneySlotId,
+      userId: tourneySlotMembers.userId,
+    })
+    .from(tourneySlotMembers)
+    .where(inArray(tourneySlotMembers.tourneySlotId, [...slotIds]))
+    .orderBy(asc(tourneySlotMembers.createdAt), asc(tourneySlotMembers.userId));
+
+  for (const row of rows) {
+    const list = members.get(row.slotId);
+
+    if (list) list.push(row.userId);
+    else members.set(row.slotId, [row.userId]);
+  }
+
+  return members;
+}
+
+/**
+ * Turns slot rows into domain records, with their members.
+ *
+ * The member list is read in one query for the whole set and handed to
+ * each row, so the join table never turns into a query per row.
+ */
+async function toSlots(
+  rows: readonly (typeof tourneySlots.$inferSelect)[],
+): Promise<TourneySlotRecord[]> {
+  const members = await loadSlotMembers(rows.map((row) => row.id));
+
+  return rows.map((row) => toSlot(row, members.get(row.id) ?? []));
+}
+
+/**
+ * Writes the members of a slot.
+ *
+ * One row per member, in one statement. The unique key on
+ * `(tourney_slot_id, user_id)` makes a repeated member a no-op instead
+ * of a second row.
+ *
+ * **The leader is always one of them.** The leader is a member of their
+ * own team, and the fake-tag check reads the member table — so a slot
+ * whose leader is missing from it would let the same person register
+ * twice.
+ *
+ * @returns the members that were written, in order.
+ */
+async function writeSlotMembers(
+  executor: DbExecutor,
+  slotId: string,
+  leaderId: string,
+  memberIds: readonly string[],
+): Promise<string[]> {
+  const members = [...new Set([leaderId, ...memberIds])];
+
+  if (members.length === 0) return [];
+
+  await executor
+    .insert(tourneySlotMembers)
+    .values(members.map((userId) => ({ tourneySlotId: slotId, userId })))
+    .onConflictDoNothing();
+
+  return members;
 }
 
 /* ------------------------------------------------------------------ *
@@ -356,7 +466,7 @@ export async function listSlots(tourneyId: string): Promise<TourneySlotRecord[]>
     .where(eq(tourneySlots.tourneyId, tourneyId))
     .orderBy(asc(tourneySlots.num));
 
-  return rows.map(toSlot);
+  return toSlots(rows);
 }
 
 /** One slot, by its row id. */
@@ -367,9 +477,9 @@ export async function getSlot(slotId: string): Promise<TourneySlotRecord | null>
     .where(eq(tourneySlots.id, slotId))
     .limit(1);
 
-  const row = rows[0];
+  const slots = await toSlots(rows);
 
-  return row ? toSlot(row) : null;
+  return slots[0] ?? null;
 }
 
 /** How many slots a tournament has. */
@@ -399,13 +509,18 @@ export async function getSlotByMessage(
     .where(and(eq(tourneySlots.tourneyId, tourneyId), eq(tourneySlots.messageId, messageId)))
     .limit(1);
 
-  const row = rows[0];
+  const slots = await toSlots(rows);
 
-  return row ? toSlot(row) : null;
+  return slots[0] ?? null;
 }
 
 /**
  * The slot a user leads, or is a member of, in a tournament.
+ *
+ * The membership half is an `EXISTS` against the member table: the
+ * source's `members && ARRAY[$1]::text[]` was a Postgres array overlap,
+ * and SQLite has no arrays. The subquery is the same question — "is
+ * this user on that slot?" — and the index on `user_id` answers it.
  */
 export async function listSlotsOfUser(
   tourneyId: string,
@@ -417,12 +532,34 @@ export async function listSlotsOfUser(
     .where(
       and(
         eq(tourneySlots.tourneyId, tourneyId),
-        sql`(${tourneySlots.leaderId} = ${userId} or ${tourneySlots.members} && ARRAY[${userId}]::text[])`,
+        sql`(${tourneySlots.leaderId} = ${userId} or ${userIsOnSlot(userId)})`,
       ),
     )
     .orderBy(asc(tourneySlots.num));
 
-  return rows.map(toSlot);
+  return toSlots(rows);
+}
+
+/**
+ * The "is this user on that slot?" subquery.
+ *
+ * It is a correlated `EXISTS` against the member table: the slot the
+ * outer query is looking at is named by `tourney_slots.id`, and the
+ * subquery asks whether the member table holds a row for that slot and
+ * that user. The index on `user_id` answers it.
+ */
+function userIsOnSlot(userId: string): SQL {
+  return exists(
+    db
+      .select({ one: sql`1` })
+      .from(tourneySlotMembers)
+      .where(
+        and(
+          eq(tourneySlotMembers.tourneySlotId, tourneySlots.id),
+          eq(tourneySlotMembers.userId, userId),
+        ),
+      ),
+  );
 }
 
 /** The users who lead a registered slot in a tournament. */
@@ -452,35 +589,48 @@ export async function listTeamNames(tourneyId: string): Promise<string[]> {
  * (`$2 && SLOTS.MEMBERS`) against a schema-qualified join table, and
  * quoted the qualified names as single identifiers — so it would raise
  * `relation does not exist` at runtime and the fake-tag check had never
- * worked. Ours is a typed query over one table (S6, row 14).
+ * worked.
  *
- * The array is written as `ARRAY[$1, $2]::text[]` rather than
- * `$1::text[]`: the latter makes Postgres read the parameter as text
- * and then cast it, and the array literal it receives is not one it can
- * parse. Every id is still a bind parameter.
+ * **Ours is a join.** The member list is a table
+ * (`tourney_slot_members`), so the question "which slots of this
+ * tournament hold one of these users?" is a join between the two, and
+ * the answer is a set of slots — which is what the source's `&&`
+ * operator meant. A join is faster than the operator was, and it is the
+ * same query on both engines.
+ *
+ * `DISTINCT` matters: a slot that holds *two* of the mentioned users
+ * matches twice, and the answer is a set of slots, not a set of
+ * matches.
+ *
+ * @param exceptSlotId a slot to leave out of the answer — the slot
+ *                     being checked, when there is one.
  */
 export async function findFakeTagMatches(
   tourneyId: string,
   memberIds: readonly string[],
+  exceptSlotId?: string,
 ): Promise<TourneySlotRecord[]> {
   if (memberIds.length === 0) return [];
 
-  const array = sql.join(
-    memberIds.map((id) => sql`${id}`),
-    sql`, `,
-  );
-
   const rows = await db
-    .select()
+    .selectDistinct({ slot: tourneySlots })
     .from(tourneySlots)
+    .innerJoin(
+      tourneySlotMembers,
+      eq(tourneySlotMembers.tourneySlotId, tourneySlots.id),
+    )
     .where(
       and(
         eq(tourneySlots.tourneyId, tourneyId),
-        sql`${tourneySlots.members} && ARRAY[${array}]::text[]`,
+        inArray(tourneySlotMembers.userId, [...memberIds]),
+        exceptSlotId === undefined
+          ? undefined
+          : ne(tourneySlots.id, exceptSlotId),
       ),
-    );
+    )
+    .orderBy(asc(tourneySlots.num));
 
-  return rows.map(toSlot);
+  return toSlots(rows.map((row) => row.slot));
 }
 
 /** What a slot insert writes. */
@@ -499,34 +649,46 @@ export interface InsertSlotValues {
  *
  * **A per-tourney sequence, not `max(num) + 1`.** The source took
  * `max(num) + 1` under a module-global lock that died with the process,
- * so two registrations could be handed the same number. Ours locks the
- * **tournament row** for the duration of the transaction, which
- * serialises the allocation without any in-process state: the lock is
- * held by the database, so it survives a restart and works across
- * processes.
+ * so two registrations could be handed the same number. Ours takes the
+ * number inside a transaction that holds the tournament row, and the
+ * transaction is behind a per-tourney mutex — so two registrations for
+ * the same tournament queue up, and two registrations for different
+ * tournaments do not.
  *
  * The number is always positive, which is what lets the swap use `-1` as
  * a temporary.
+ *
+ * The mutex is taken here and nowhere else: a caller that already holds
+ * it must use {@link insertSlot}, which allocates and writes in one go.
  */
-export async function nextSlotNumber(
-  tourneyId: string,
-  tx?: Parameters<Parameters<typeof withTransaction>[0]>[0],
-): Promise<number> {
-  if (tx) return nextSlotNumberIn(tx, tourneyId);
-
-  return withTransaction((handle) => nextSlotNumberIn(handle, tourneyId));
+export async function nextSlotNumber(tourneyId: string): Promise<number> {
+  return withTourneyLock(tourneyId, () =>
+    withTransaction((handle) => nextSlotNumberIn(handle, tourneyId)),
+  );
 }
 
-/** The next slot number, inside an existing transaction. */
+/**
+ * The next slot number, inside an existing transaction.
+ *
+ * **SQLite has no `SELECT … FOR UPDATE`.** The equivalent is a *write*:
+ * a conditional `UPDATE` on the tournament row takes the write lock for
+ * the rest of the transaction, and it is conditional on the row still
+ * being there — zero rows updated means the tournament was deleted
+ * underneath us, and the number would be meaningless.
+ */
 async function nextSlotNumberIn(
   tx: Parameters<Parameters<typeof withTransaction>[0]>[0],
   tourneyId: string,
 ): Promise<number> {
-  // Lock the tournament row. Two registrations for the same tournament
-  // queue up here; two registrations for different tournaments do not.
-  await tx.execute(
-    sql`select id from ${tourneys} where id = ${tourneyId} for update`,
-  );
+  const locked = await tx
+    .update(tourneys)
+    .set({ updatedAt: new Date() })
+    .where(eq(tourneys.id, tourneyId))
+    .returning({ id: tourneys.id });
+
+  if (locked.length === 0) {
+    throw new Error("the tournament no longer exists");
+  }
 
   const rows = await tx
     .select({ value: sql<number>`coalesce(max(${tourneySlots.num}), 0)` })
@@ -536,38 +698,95 @@ async function nextSlotNumberIn(
   return (rows[0]?.value ?? 0) + 1;
 }
 
+/* ------------------------------------------------------------------ *
+ * The per-tourney mutex
+ *
+ * SQLite has no `SELECT … FOR UPDATE`, so the lock that used to
+ * serialise the number allocation is a write (see
+ * {@link nextSlotNumberIn}) — and a write only holds the lock for the
+ * length of its own transaction. Two transactions in the *same* process
+ * would still race for the number, so the transaction is behind a
+ * mutex: one registration per tournament at a time.
+ *
+ * The mutex is per tournament, not global: two registrations for
+ * different tournaments do not wait for each other.
+ * ------------------------------------------------------------------ */
+
+/** The tail of each tournament's lock chain. */
+const tourneyLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * Runs `fn` with the tournament's lock held.
+ *
+ * The lock is a chain of promises: every caller appends itself to the
+ * tournament's chain and waits for the one before it. A caller that
+ * throws does not break the chain for the next one.
+ */
+async function withTourneyLock<T>(
+  tourneyId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous = tourneyLocks.get(tourneyId) ?? Promise.resolve();
+
+  const result = previous.then(fn, fn);
+
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+
+  tourneyLocks.set(tourneyId, settled);
+
+  void settled.then(() => {
+    if (tourneyLocks.get(tourneyId) === settled) {
+      tourneyLocks.delete(tourneyId);
+    }
+  });
+
+  return result;
+}
+
 /**
  * Inserts a slot with the next number of its tournament.
  *
- * The allocation and the insert share one transaction, so the number
- * cannot be handed out twice.
+ * The allocation, the insert and the member rows share one transaction,
+ * so the number cannot be handed out twice and a slot never exists
+ * without its team.
  */
 export async function insertSlot(
   values: InsertSlotValues,
 ): Promise<TourneySlotRecord> {
-  return withTransaction(async (tx) => {
-    const num = await nextSlotNumberIn(tx, values.tourneyId);
+  return withTourneyLock(values.tourneyId, () =>
+    withTransaction(async (tx) => {
+      const num = await nextSlotNumberIn(tx, values.tourneyId);
 
-    const rows = await tx
-      .insert(tourneySlots)
-      .values({
-        tourneyId: values.tourneyId,
-        num,
-        teamName: values.teamName,
-        leaderId: values.leaderId,
-        members: [...values.members],
-        messageId: values.messageId,
-        jumpUrl: values.jumpUrl,
-        confirmJumpUrl: values.confirmJumpUrl,
-      })
-      .returning();
+      const rows = await tx
+        .insert(tourneySlots)
+        .values({
+          tourneyId: values.tourneyId,
+          num,
+          teamName: values.teamName,
+          leaderId: values.leaderId,
+          messageId: values.messageId,
+          jumpUrl: values.jumpUrl,
+          confirmJumpUrl: values.confirmJumpUrl,
+        })
+        .returning();
 
-    const row = rows[0];
+      const row = rows[0];
 
-    if (!row) throw new Error("the tourney slot insert returned no row");
+      if (!row) throw new Error("the tourney slot insert returned no row");
 
-    return toSlot(row);
-  });
+      const members = await writeSlotMembers(
+        tx,
+        row.id,
+        values.leaderId,
+        values.members,
+      );
+
+      return toSlot(row, members);
+    }),
+  );
 }
 
 /**
@@ -659,9 +878,9 @@ export async function updateSlotTeamName(
     .where(eq(tourneySlots.id, slotId))
     .returning();
 
-  const row = rows[0];
+  const slots = await toSlots(rows);
 
-  return row ? toSlot(row) : null;
+  return slots[0] ?? null;
 }
 
 /** Writes a slot's confirmation message link. */
@@ -675,9 +894,9 @@ export async function updateSlotConfirmUrl(
     .where(eq(tourneySlots.id, slotId))
     .returning();
 
-  const row = rows[0];
+  const slots = await toSlots(rows);
 
-  return row ? toSlot(row) : null;
+  return slots[0] ?? null;
 }
 
 /** Deletes a slot. */
@@ -844,12 +1063,35 @@ export async function insertMediaPartnerSlot(
     readonly members: readonly string[];
   },
 ): Promise<void> {
-  await db.insert(mediaPartnerSlots).values({
-    mediaPartnerId: values.mediaPartnerId,
-    userId: values.userId,
-    messageId: values.messageId,
-    jumpUrl: values.jumpUrl,
-    members: [...values.members],
+  await withTransaction(async (tx) => {
+    const rows = await tx
+      .insert(mediaPartnerSlots)
+      .values({
+        mediaPartnerId: values.mediaPartnerId,
+        userId: values.userId,
+        messageId: values.messageId,
+        jumpUrl: values.jumpUrl,
+      })
+      .returning({ id: mediaPartnerSlots.id });
+
+    const row = rows[0];
+
+    if (!row) throw new Error("the media partner slot insert returned no row");
+
+    // The members are a join table too, so they are written as rows.
+    const members = [...new Set([values.userId, ...values.members])];
+
+    if (members.length > 0) {
+      await tx
+        .insert(mediaPartnerSlotMembers)
+        .values(
+          members.map((userId) => ({
+            mediaPartnerSlotId: row.id,
+            userId,
+          })),
+        )
+        .onConflictDoNothing();
+    }
   });
 }
 
@@ -875,7 +1117,35 @@ export async function listMediaPartnerSlots(
     .where(eq(mediaPartnerSlots.mediaPartnerId, mediaPartnerId))
     .orderBy(asc(mediaPartnerSlots.createdAt));
 
-  return rows.map(toMediaPartnerSlot);
+  if (rows.length === 0) return [];
+
+  const memberRows = await db
+    .select({
+      slotId: mediaPartnerSlotMembers.mediaPartnerSlotId,
+      userId: mediaPartnerSlotMembers.userId,
+    })
+    .from(mediaPartnerSlotMembers)
+    .where(
+      inArray(
+        mediaPartnerSlotMembers.mediaPartnerSlotId,
+        rows.map((row) => row.id),
+      ),
+    )
+    .orderBy(
+      asc(mediaPartnerSlotMembers.createdAt),
+      asc(mediaPartnerSlotMembers.userId),
+    );
+
+  const members = new Map<string, string[]>();
+
+  for (const row of memberRows) {
+    const list = members.get(row.slotId);
+
+    if (list) list.push(row.userId);
+    else members.set(row.slotId, [row.userId]);
+  }
+
+  return rows.map((row) => toMediaPartnerSlot(row, members.get(row.id) ?? []));
 }
 
 /* ------------------------------------------------------------------ *
@@ -1123,13 +1393,18 @@ export const MSG_DELETE_JOB_EVENT = "msg_delete";
  * message id — never the text of the message, and never a password. A
  * job row is a row in a table that is read, logged and copied around; it
  * is not a place a credential can go.
+ *
+ * It is a type alias rather than an interface because the column it is
+ * written to is a JSON column, and a JSON column takes a
+ * `Record<string, unknown>`: an interface has no implicit index
+ * signature, a type alias of an object literal type has one.
  */
-export interface MessageDeleteJobPayload {
+export type MessageDeleteJobPayload = {
   /** The channel the message is in. */
   readonly channelId: string;
   /** The message to delete. */
   readonly messageId: string;
-}
+};
 
 /**
  * Arms the deletion of a message.

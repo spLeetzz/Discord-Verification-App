@@ -2,8 +2,10 @@
  * Lockdowns and maintenance mode.
  *
  * A lockdown is a row in the `lockdowns` table. The row *is* the state: it
- * says which channels are locked, by whom, until when, and what their
- * permissions looked like before. Nothing is stored anywhere else.
+ * says by whom, until when, and what the permissions looked like before.
+ * The channels it covers are rows of the `lockdown_channels` join table —
+ * one row per (lockdown, channel) — and the maintenance channels the bot
+ * created are rows of `lockdown_maintenance_channels`.
  *
  * A lockdown with a duration also has a row in the durable `jobs` table.
  * That row is the **timer** and nothing else: it says when the lockdown

@@ -19,7 +19,7 @@ config/events.ts     per-event config (existing verification flow only)
 handlers/            interaction routing + command loader
 commands/<group>/    one file per command — thin adapters, thin on purpose
 modules/<feature>/   the deep part: domain logic, state machines, DB access
-db/                  Postgres: schema, migrations, query layer
+db/                  SQLite: schema, migrations, query layer
 core/                shared runtime: guards, scheduler, pagination, cache, errors
 web/                 dashboard (server + assets)
 repo/                Google Sheets access (EXISTING, unchanged)
@@ -56,14 +56,14 @@ in-memory TTL cache is `core/ttl-cache.ts`. Never call it `cache.ts` next to
 
 | # | Decision | Rationale |
 |---|---|---|
-| D1 | **Drizzle ORM** + `node-postgres`, `drizzle-kit` migrations | Type-safe schema in TS so illegal states are unrepresentable; no codegen in the build; ESM-friendly. Tortoise maps ~1:1 onto it. |
+| D1 | **Drizzle ORM** + `@libsql/client` (SQLite), `drizzle-kit` migrations | Type-safe schema in TS so illegal states are unrepresentable; no codegen in the build; ESM-friendly. Tortoise maps ~1:1 onto it. **The engine was moved from Postgres to SQLite** when the target was fixed at 1 CPU / 2 GB; the schema is written in a dialect-neutral subset and `db/dialect.ts` is the only file that knows which engine is in use. |
 | D2 | **Fastify** for the dashboard server | TS-native, schema validation, small, fast. |
 | D3 | **socket.io** for realtime | python-socketio's room/event model ports 1:1; no reinvention. |
 | D4 | **Slash-first**: every command is a slash command; one generic `!name` prefix bridge resolves to the same definition | Quotient has 109 command/group defs, many declared twice (prefix + slash). One definition, two surfaces — halves the surface and keeps the two from drifting. |
 | D5 | Keep the existing **folder-scanning command loader**; extend the `Command` interface with `premium` / `guildOnly` guards | The loader already works and is tested by the smoke test. Don't swap frameworks. |
 | D6 | `core/scheduler.ts` for background tasks; `croner` for cron, `chrono-node` for natural-language dates | Replaces discord.py `Task` loops and `dateparser`/`parsedatetime`. |
 | D7 | `core/ttl-cache.ts` for in-memory caching | Replaces aiocache. No Redis for a single-process bot. |
-| D8 | Per-guild settings live in **Postgres**, not in `config/events.ts` | `config/events.ts` is deploy-time config for the existing verification flow; Quotient's guild settings are runtime state. Different lifecycles — do not unify. |
+| D8 | Per-guild settings live in **the database** (SQLite), not in `config/events.ts` | `config/events.ts` is deploy-time config for the existing verification flow; Quotient's guild settings are runtime state. Different lifecycles — do not unify. |
 | D9 | **vitest** + keep `npm run smoke` | A port this size needs real tests. Smoke stays because it needs no DB either. |
 | D10 | `sharp` for image work | Replaces Pillow. Perceptual hashing (dHash) implemented over `sharp` raw pixels. |
 | D11 | Existing 8 staff commands and the Google Sheet flow are **frozen** | Zero behaviour change to the working bot. New code only. |
@@ -123,12 +123,19 @@ Rules:
 
 ## 5. Database
 
-Postgres 16 in Docker (`docker-compose.yml` in the repo root, service
-`postgres`, host port `5433`).
+**SQLite**, through `@libsql/client`. The bot runs on a 1-CPU, 2 GB VPS,
+and a Postgres server does not fit in that. The schema is written in a
+dialect-neutral subset of SQL and `db/dialect.ts` is the only file that
+knows which engine is in use, so moving to Postgres later is a
+configuration change rather than a rewrite.
 
 ```
-DATABASE_URL=postgres://bssa:bssa@localhost:5433/bssa
+DB_FILE=file:/opt/openship/data/app.db
 ```
+
+**The database file must live outside the release directory.** The deploy
+clones into a *new* directory and swaps it; a database file inside the
+release tree is deleted on the next deploy. See `docs/DEPLOY.md`.
 
 Schema is owned by the models engineer; every other engineer imports it from
 `db/schema.ts` and never writes DDL.
@@ -138,9 +145,14 @@ Tables live under `db/schema/*.ts` grouped by area, re-exported from
 
 Migrations: `npm run db:generate` (drizzle-kit) and `npm run db:migrate`
 (applies them). **Never hand-edit a migration file**; regenerate instead.
+**The bot also applies its own migrations at boot**, before it does anything
+else, and refuses to start if one cannot be applied — the deploy pipeline
+has no separate migration step, and that is deliberate.
 
 Rules:
 
+- **No arrays.** SQLite has none, so every list of ids is a join table.
+  That is also what Postgres ends up with, so the two dialects agree.
 - Every table gets `id` (uuid or serial — the models engineer decides, once,
   and it applies everywhere), `created_at`, `updated_at`.
 - Every foreign key declares `ON DELETE` behaviour explicitly.

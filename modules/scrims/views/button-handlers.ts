@@ -22,7 +22,7 @@ import {
 import { prompt } from "../../../core/prompt.js";
 import { parseNaturalTime } from "../../../core/time.js";
 import { Day, PremiumFeature } from "../../../core/constants.js";
-import type { Weekday } from "../../../db/schema/common.js";
+import type { AutocleanKind, Weekday } from "../../../db/schema/common.js";
 import { assertEntitled, FREE_TIER, isEntitled } from "../../premium/index.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
@@ -1266,7 +1266,9 @@ async function handleAutocleanButton(
   }
 
   if (action === "channel" || action === "role") {
-    const kind = action === "channel" ? "channel" : "role";
+    // The kind is one of the two the schema knows. It is typed, because
+    // a conditional expression widens its literal branches to `string`.
+    const kind: AutocleanKind = action === "channel" ? "channel" : "role";
     const next = scrim.autoclean.includes(kind)
       ? scrim.autoclean.filter((entry) => entry !== kind)
       : [...scrim.autoclean, kind];

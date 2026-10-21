@@ -1,14 +1,15 @@
 /**
  * All the SQL the identity area owns, and nothing else.
  *
- * Four tables are touched here:
+ * Five tables are touched here:
  *
  *  - `tagcheck_channels`  — the channels where a captain registers a team;
  *  - `easytag_channels`   — the channels where raw ids become mentions;
  *  - `ss_configs`         — the screenshot-verification setups;
+ *  - `ss_config_keywords` — the words a setup's custom filter matches on;
  *  - `ss_submissions`     — the screenshots that were submitted.
  *
- * Two rules the shape of this file follows:
+ * Three rules the shape of this file follows:
  *
  *  - **Roles and channels are ids.** Nothing here looks a role or a
  *    channel up by name (D16). The one exception is documented below.
@@ -19,11 +20,13 @@
  *    another server is not found and cannot be written.
  */
 
-import { and, asc, eq, sql } from "drizzle-orm";
-import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
-import { db } from "../../db/client.js";
+import { and, asc, eq, inArray, notInArray, sql } from "drizzle-orm";
+import type { SelectedFields, SQLiteUpdateSetSource } from "drizzle-orm/sqlite-core";
+import { db, withTransaction } from "../../db/client.js";
+import type { DbExecutor } from "../../db/client.js";
 import {
   easytagChannels,
+  ssConfigKeywords,
   ssConfigs,
   ssSubmissions,
   tagcheckChannels,
@@ -416,11 +419,26 @@ const ssConfigColumns = {
   requiredSs: ssConfigs.requiredSs,
   channelName: ssConfigs.channelName,
   channelLink: ssConfigs.channelLink,
-  keywords: ssConfigs.keywords,
   allowSame: ssConfigs.allowSame,
+  duplicateThreshold: ssConfigs.duplicateThreshold,
   ssType: ssConfigs.ssType,
   successMessage: ssConfigs.successMessage,
 } as const;
+
+/**
+ * The row the setups table hands back.
+ *
+ * The keywords are not on it: they live in `ss_config_keywords`.
+ */
+type SsConfigRow = SelectedFields<typeof ssConfigColumns>;
+
+/**
+ * Anything that can run a query.
+ *
+ * The database itself and a transaction handle both qualify, so a helper
+ * used from both paths does the same thing in both.
+ */
+type Executor = Pick<DbExecutor, "select" | "insert" | "update" | "delete">;
 
 /**
  * The `ss_type` column is a `text` with a `CHECK` constraint, so the
@@ -430,6 +448,119 @@ const ssConfigColumns = {
 const asScreenshotType = (value: string): ScreenshotType =>
   value as ScreenshotType;
 
+/**
+ * A setup, with the keywords that belong to it.
+ *
+ * The keywords are read from their own table, so they are handed in.
+ */
+function toSsConfig(row: SsConfigRow, keywords: readonly string[]): SsConfig {
+  return {
+    ...row,
+    keywords: [...keywords],
+    ssType: asScreenshotType(row.ssType),
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * The keywords of a setup
+ *
+ * The keywords used to be a `text[]` column on `ss_configs`. They are
+ * rows in `ss_config_keywords` now, one row per keyword, with a unique
+ * index on `(ss_config_id, keyword)`.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The keywords of several setups, keyed by the setup's id.
+ *
+ * One query for the whole list: a panel that shows ten setups must not
+ * make ten round trips.
+ *
+ * **The order.** The join table has no ordinal, so the order is the
+ * order the rows were written in — `created_at` first, and the keyword
+ * itself for the rows written in the same millisecond. The *set* is what
+ * the rules use; the order only decides which keyword a refusal names.
+ */
+async function readKeywords(
+  executor: Executor,
+  ssConfigIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const byConfig = new Map<string, string[]>();
+
+  if (ssConfigIds.length === 0) return byConfig;
+
+  const rows = await executor
+    .select({
+      ssConfigId: ssConfigKeywords.ssConfigId,
+      keyword: ssConfigKeywords.keyword,
+    })
+    .from(ssConfigKeywords)
+    .where(inArray(ssConfigKeywords.ssConfigId, [...ssConfigIds]))
+    .orderBy(asc(ssConfigKeywords.createdAt), asc(ssConfigKeywords.keyword));
+
+  for (const row of rows) {
+    const list = byConfig.get(row.ssConfigId) ?? [];
+
+    list.push(row.keyword);
+
+    byConfig.set(row.ssConfigId, list);
+  }
+
+  return byConfig;
+}
+
+/**
+ * Writes a setup's keyword set.
+ *
+ * **Two statements, both about the whole set.** The keywords that are
+ * wanted go in with a conflict clause — the unique index on
+ * `(ss_config_id, keyword)` makes the insert idempotent, so a keyword
+ * that is already there is stored once and the write cannot fail on it —
+ * and the ones that are gone are deleted. Neither statement reads the
+ * table first: this is a write, not a read followed by a write.
+ *
+ * The two statements have to run together, so the caller puts them in one
+ * transaction: a reader must never see the union of the old set and the
+ * new one.
+ *
+ * **The keywords are stored as they were given.** The comparison
+ * normalises them — case-insensitively, with the spaces stripped — when
+ * it looks at them, so normalising here would change what the operator
+ * typed and lose the raw value.
+ */
+async function writeKeywords(
+  executor: Executor,
+  ssConfigId: string,
+  keywords: readonly string[],
+): Promise<void> {
+  const wanted = [...new Set(keywords)];
+
+  if (wanted.length > 0) {
+    await executor
+      .insert(ssConfigKeywords)
+      .values(wanted.map((keyword) => ({ ssConfigId, keyword })))
+      .onConflictDoNothing();
+  }
+
+  // An empty set is "no keyword at all", which is not the same as "keep
+  // the ones that are there" — so the whole set goes.
+  if (wanted.length === 0) {
+    await executor
+      .delete(ssConfigKeywords)
+      .where(eq(ssConfigKeywords.ssConfigId, ssConfigId));
+
+    return;
+  }
+
+  await executor
+    .delete(ssConfigKeywords)
+    .where(
+      and(
+        eq(ssConfigKeywords.ssConfigId, ssConfigId),
+        notInArray(ssConfigKeywords.keyword, wanted),
+      ),
+    );
+}
+
 /** Every setup of a guild, oldest first. */
 export async function listSsConfigs(guildId: string): Promise<SsConfig[]> {
   const rows = await db
@@ -438,7 +569,12 @@ export async function listSsConfigs(guildId: string): Promise<SsConfig[]> {
     .where(eq(ssConfigs.guildId, guildId))
     .orderBy(asc(ssConfigs.createdAt));
 
-  return rows.map((row) => ({ ...row, ssType: asScreenshotType(row.ssType) }));
+  const keywords = await readKeywords(
+    db,
+    rows.map((row) => row.id),
+  );
+
+  return rows.map((row) => toSsConfig(row, keywords.get(row.id) ?? []));
 }
 
 /**
@@ -460,7 +596,11 @@ export async function findSsConfigById(
     .where(and(eq(ssConfigs.guildId, guildId), eq(ssConfigs.id, id)))
     .limit(1);
 
-  return row ? { ...row, ssType: asScreenshotType(row.ssType) } : null;
+  if (!row) return null;
+
+  const keywords = await readKeywords(db, [row.id]);
+
+  return toSsConfig(row, keywords.get(row.id) ?? []);
 }
 
 /** One setup, by its channel id. */
@@ -473,7 +613,11 @@ export async function findSsConfigByChannel(
     .where(eq(ssConfigs.channelId, channelId))
     .limit(1);
 
-  return row ? { ...row, ssType: asScreenshotType(row.ssType) } : null;
+  if (!row) return null;
+
+  const keywords = await readKeywords(db, [row.id]);
+
+  return toSsConfig(row, keywords.get(row.id) ?? []);
 }
 
 /** How many setups a guild has. */
@@ -517,7 +661,13 @@ export async function hasSsConfig(): Promise<boolean> {
   return row !== undefined;
 }
 
-/** Creates a setup. */
+/**
+ * Creates a setup.
+ *
+ * The row and its keywords go in together: a setup whose keywords could
+ * not be written is not a setup, and a keyword row without a setup is
+ * nothing at all. The transaction is what makes the two one write.
+ */
 export async function insertSsConfig(input: {
   guildId: string;
   channelId: string;
@@ -530,27 +680,30 @@ export async function insertSsConfig(input: {
   ssType: ScreenshotType;
   successMessage: string | null;
 }): Promise<string> {
-  const [row] = await db
-    .insert(ssConfigs)
-    .values({
-      guildId: input.guildId,
-      channelId: input.channelId,
-      roleId: input.roleId,
-      requiredSs: input.requiredSs,
-      channelName: input.channelName,
-      channelLink: input.channelLink,
-      keywords: [...input.keywords],
-      allowSame: input.allowSame,
-      ssType: input.ssType,
-      successMessage: input.successMessage,
-    })
-    .returning({ id: ssConfigs.id });
+  return withTransaction(async (tx) => {
+    const [row] = await tx
+      .insert(ssConfigs)
+      .values({
+        guildId: input.guildId,
+        channelId: input.channelId,
+        roleId: input.roleId,
+        requiredSs: input.requiredSs,
+        channelName: input.channelName,
+        channelLink: input.channelLink,
+        allowSame: input.allowSame,
+        ssType: input.ssType,
+        successMessage: input.successMessage,
+      })
+      .returning({ id: ssConfigs.id });
 
-  if (!row) {
-    throw new Error("could not create the screenshot-verification setup");
-  }
+    if (!row) {
+      throw new Error("could not create the screenshot-verification setup");
+    }
 
-  return row.id;
+    await writeKeywords(tx, row.id, input.keywords);
+
+    return row.id;
+  });
 }
 
 /**
@@ -578,34 +731,48 @@ export interface SsConfigPatch {
  * The write is scoped to the guild as well, so a row of another server is
  * never touched — the guard and the lookup both say which guild the
  * caller is acting in, and this is the last line of defence.
+ *
+ * The keywords are not a column, so they are a second statement — and it
+ * shares the transaction with the columns, so a reader never sees half of
+ * the edit.
  */
 export async function updateSsConfig(
   guildId: string,
   id: string,
   patch: SsConfigPatch,
 ): Promise<void> {
-  const values: PgUpdateSetSource<typeof ssConfigs> = {};
+  const values: SQLiteUpdateSetSource<typeof ssConfigs> = {};
 
   if (patch.channelId !== undefined) values.channelId = patch.channelId;
   if (patch.roleId !== undefined) values.roleId = patch.roleId;
   if (patch.requiredSs !== undefined) values.requiredSs = patch.requiredSs;
   if (patch.channelName !== undefined) values.channelName = patch.channelName;
   if (patch.channelLink !== undefined) values.channelLink = patch.channelLink;
-  if (patch.keywords !== undefined) values.keywords = [...patch.keywords];
   if (patch.allowSame !== undefined) values.allowSame = patch.allowSame;
   if (patch.ssType !== undefined) values.ssType = patch.ssType;
   if (patch.successMessage !== undefined) {
     values.successMessage = patch.successMessage;
   }
 
-  if (Object.keys(values).length === 0) return;
+  const hasColumns = Object.keys(values).length > 0;
+  const keywords = patch.keywords;
 
-  values.updatedAt = new Date();
+  if (!hasColumns && keywords === undefined) return;
 
-  await db
-    .update(ssConfigs)
-    .set(values)
-    .where(and(eq(ssConfigs.guildId, guildId), eq(ssConfigs.id, id)));
+  await withTransaction(async (tx) => {
+    if (hasColumns) {
+      values.updatedAt = new Date();
+
+      await tx
+        .update(ssConfigs)
+        .set(values)
+        .where(and(eq(ssConfigs.guildId, guildId), eq(ssConfigs.id, id)));
+    }
+
+    if (keywords !== undefined) {
+      await writeKeywords(tx, id, keywords);
+    }
+  });
 }
 
 /**

@@ -2,27 +2,33 @@
  * The OCR provider this area talks to.
  *
  * The provider itself lives in `modules/ssverify/ocr/` and is **not** ours
- * to change — it is the piece that is bit-exact with Python's `imagehash`
- * 4.3.2, which is what keeps the duplicate threshold of 7 meaning what it
- * meant. This file only owns the lifecycle:
+ * to change. This file only owns the lifecycle:
  *
- *  - **one provider for the whole bot**, so the Tesseract worker is started
- *    once and the calls stay serialised per provider;
+ *  - **one provider for the whole bot**, so the calls stay serialised per
+ *    provider and only one of them is ever shut down;
  *  - **the decision whether the OCR runs at all**, made **once at boot**;
- *  - **`warmup()` at boot**, so the language model is downloaded at startup
- *    rather than on the first screenshot of the day;
- *  - **`shutdown()` on exit**, so the worker is terminated and the process
- *    can go.
+ *  - **`shutdown()` on exit**, so the requests that are on the wire are
+ *    aborted and the process can go.
  *
- * The OCR takes about two seconds per screenshot, so every caller has to
- * defer its interaction first.
+ * ## There is no local engine
+ *
+ * The provider is a **remote service**. It does the text recognition *and*
+ * the hashing, and it fetches the image itself — so the image has to be a
+ * publicly reachable URL, not a buffer. There is no Tesseract worker, no
+ * language model and no image library behind it, and there is no local
+ * fallback: a deployment that configures no service has no OCR at all.
+ *
+ * That is why the decision below is not the whole story. The provider that
+ * comes back is the last word, and the area asks the **provider** whether
+ * the OCR runs rather than the flag it passed in — see
+ * {@link isOcrAvailable}.
  *
  * ## The decision
  *
  * A deployment that does not use screenshot verification should not pay for
- * OCR, so the provider can be **switched off**: no worker, no language
- * model download, no network call. The decision is made here, at boot, and
- * it is made **once**:
+ * OCR, so the provider can be **switched off**: no request, no service, no
+ * answer but a refusal. The decision is made here, at boot, and it is made
+ * **once**:
  *
  *  - `OCR_ENABLED` decides it when it is set — "true" or "1" forces it on,
  *    "false" or "0" forces it off, and anything else counts as unset;
@@ -39,35 +45,28 @@
  *
  * ## A broken OCR is not a switched-off one
  *
- * A provider that *fails* answers with an empty text, and most rule sets
- * refuse an empty text — but **not every one does**. `any_ss` has no rules
- * at all, and a `loco` or `rooter` setup whose channel name is empty has
- * none that look at the text either, so an empty text on its own would be
- * *accepted* there.
+ * A provider that *fails* — the service is down, it answers with rubbish,
+ * it sends a hash nobody can compare — is a screenshot that cannot be
+ * verified. It has to be **refused**, and a refusal is a decision rather
+ * than an exception: the member gets an answer and nothing is stored. That
+ * is what {@link analyzeScreenshot} is for.
  *
- * That is why the submission itself is refused when the OCR is known to be
- * off (see `service.ts`), and why the disabled provider's zero hashes — the
- * hash of nothing — never reach the database.
+ * That is also why the submission is refused when the OCR is known to be
+ * off (see `service.ts`): most rule sets refuse an empty text, but **not
+ * every one does**. `any_ss` has no rules at all, and a `loco` or `rooter`
+ * setup whose channel name is empty has none that look at the text either,
+ * so an empty text on its own would be *accepted* there.
  */
 
 import { logger } from "../../utils/logger.js";
 import {
+  analyzeImage,
   createOcrProvider,
   isOcrDisabled,
   ocrEnabledFromEnv,
 } from "../ssverify/ocr/index.js";
-import type { OcrProvider } from "../ssverify/ocr/index.js";
+import type { OcrAnalysis, OcrProvider } from "../ssverify/ocr/index.js";
 import * as repo from "./repo.js";
-
-/**
- * A provider that can be started ahead of time.
- *
- * `warmup()` is on the local provider, not on the interface, because the
- * remote one has nothing to warm up.
- */
-interface WarmableProvider {
-  warmup?(): Promise<void>;
-}
 
 /**
  * The provider, once the decision has been made.
@@ -111,7 +110,10 @@ let decision: Promise<boolean> | null = null;
  *
  * Calling it twice keeps the first decision.
  *
- * @returns whether the OCR runs.
+ * @returns whether the OCR **runs** — the effective state of the provider
+ *          that was built, not the flag that was passed to it. A provider
+ *          that was asked for and got the switched-off one (no service
+ *          configured) does not run.
  */
 export async function decideOcr(): Promise<boolean> {
   if (!decision) {
@@ -137,14 +139,26 @@ async function makeDecision(): Promise<boolean> {
 
   provider = createOcrProvider({ enabled });
 
-  logger.info(
-    enabled
-      ? `[Identity] The OCR is on (${provider.name}).`
-      : "[Identity] The OCR is off: no screenshot-verification setup exists, " +
-          "or OCR_ENABLED says so. Screenshots will be refused.",
-  );
+  // The provider is the last word. `createOcrProvider({ enabled: true })`
+  // still hands back the switched-off provider when no service is
+  // configured, so the flag that was passed in is **not** the state the
+  // bot runs in. The log line below has to say what is actually true.
+  const running = !isOcrDisabled(provider);
 
-  return enabled;
+  if (running) {
+    logger.info(`[Identity] The OCR is on (${provider.name}).`);
+  } else {
+    logger.info(
+      `[Identity] The OCR is off (${provider.name}): ${
+        enabled
+          ? "no OCR service is configured (OCR_PROVIDER_URL is not set)"
+          : "OCR_ENABLED says so, or no screenshot-verification setup exists " +
+            "(or the setups could not be read)"
+      }. Screenshots will be refused.`,
+    );
+  }
+
+  return running;
 }
 
 /**
@@ -198,6 +212,10 @@ export function getOcrProvider(): OcrProvider {
  * `false` when the OCR is switched off, and `false` when the decision has
  * not been made yet: there is no OCR to run in either case, so a screenshot
  * must not be accepted.
+ *
+ * The question is asked of the **provider**, not of the flag the decision
+ * passed in: a deployment that asked for the OCR and configured no service
+ * has no OCR.
  */
 export function isOcrAvailable(): boolean {
   // A provider that has not been decided on yet is no provider at all, and
@@ -207,32 +225,33 @@ export function isOcrAvailable(): boolean {
 }
 
 /**
- * Starts the provider ahead of time.
+ * Analyses one screenshot and answers with a decision, never an exception.
  *
- * Worth calling once at boot: the first Tesseract worker downloads the
- * language model, and doing that lazily means the first screenshot of the
- * day waits for the download.
+ * The image is a **publicly reachable URL**: the service fetches it
+ * itself. A `Buffer` is refused by the remote provider, so a caller that
+ * has the picture's bytes has nothing to hand over.
  *
- * The switched-off provider has no `warmup()`, and neither has the remote
- * one, so the guard below skips both.
- *
- * A provider that cannot be started is not fatal — it answers with an
- * empty text. A broken OCR rejects a screenshot for most rule sets, but
- * not for every one of them, which is why the submission is refused
- * outright when the OCR is known to be **off** (see `service.ts`).
+ * A provider that cannot do its job — the service is down, it answered
+ * with rubbish, it sent a hash nobody can compare — answers
+ * `{ ok: false, reason }`. The caller turns that into a refusal: the
+ * member gets an answer, and nothing is stored.
  */
-export async function warmupOcr(): Promise<void> {
-  // Nothing to warm up when the decision has not been made: there is no
-  // provider yet, and the decision is what failed.
-  if (!provider) return;
+export async function analyzeScreenshot(
+  image: Buffer | string,
+): Promise<OcrAnalysis> {
+  // A provider that is not there is a screenshot that cannot be read, not
+  // a crash: the boot decision has not been made (or the bot is on its way
+  // out), and the member still gets an answer.
+  if (!provider) {
+    return {
+      ok: false,
+      reason:
+        "the OCR provider has not been decided on yet: warmIdentity() has " +
+        "to run before a screenshot can be processed",
+    };
+  }
 
-  const current = provider;
-
-  const warmable = current as OcrProvider & WarmableProvider;
-
-  if (typeof warmable.warmup !== "function") return;
-
-  await warmable.warmup();
+  return analyzeImage(provider, image);
 }
 
 /**
@@ -246,7 +265,7 @@ export async function shutdownOcr(): Promise<void> {
   const current = provider;
 
   // The provider is dropped first, so a shutdown that runs twice does not
-  // terminate the same worker twice.
+  // abort the same requests twice.
   provider = null;
 
   await current.shutdown?.();

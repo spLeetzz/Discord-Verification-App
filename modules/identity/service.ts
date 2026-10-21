@@ -17,12 +17,11 @@ import { PremiumFeature } from "../../core/constants.js";
 import { logger } from "../../utils/logger.js";
 import { assertEntitled } from "../premium/entitlements.js";
 import { FREE_TIER } from "../premium/limits.js";
-import { DEFAULT_DUPLICATE_THRESHOLD } from "../ssverify/ocr/hash.js";
 import * as repo from "./repo.js";
 import * as cache from "./cache.js";
-import { getOcrProvider, isOcrAvailable } from "./ocr.js";
-import { findDuplicate, submissionJumpUrl } from "./duplicate.js";
-import type { DuplicateMatch } from "./duplicate.js";
+import { analyzeScreenshot, isOcrAvailable } from "./ocr.js";
+import { checkDuplicate, resolveDuplicateThreshold, submissionJumpUrl } from "./duplicate.js";
+import type { CorruptSubmission, DuplicateMatch } from "./duplicate.js";
 import { verifyScreenshot } from "./verification.js";
 import type { VerificationOutcome } from "./verification.js";
 import type {
@@ -378,8 +377,14 @@ export const submissionLimiters: SubmissionLimiters = createSubmissionLimiters()
 
 /** One screenshot that was submitted. */
 export interface SubmittedImage {
-  /** The image data. */
-  readonly buffer: Buffer;
+  /**
+   * The publicly reachable URL of the image.
+   *
+   * The OCR service **fetches the image itself**, so this is a URL and not
+   * the picture's bytes: the bot never downloads the attachment, which
+   * saves the bandwidth and the memory of a ten-megabyte screenshot.
+   */
+  readonly url: string;
   /** The channel the screenshot was posted in. */
   readonly channelId: string;
   /** The message the screenshot came with. */
@@ -409,6 +414,26 @@ export const OCR_UNAVAILABLE_MESSAGE =
   "**Screenshot verification is not currently available. Please try again later.**";
 
 /**
+ * What the bot says when a stored hash cannot be compared.
+ *
+ * A different refusal from the one above, and it has to be: the OCR is
+ * working, but the bot cannot tell whether this screenshot repeats one of
+ * the member's own, because one of their stored submissions is corrupt.
+ * The member is not at fault, and the operator has to fix the row — so the
+ * message says so.
+ */
+export const DUPLICATE_CHECK_FAILED_MESSAGE =
+  "**A previous screenshot of yours could not be checked, so this one cannot be verified either. Please contact a moderator.**";
+
+/**
+ * How many corrupt rows one log line names.
+ *
+ * A badly broken table can hold thousands of them, and a log line that
+ * lists every one of them is unreadable.
+ */
+const MAX_REPORTED_CORRUPT_ROWS = 5;
+
+/**
  * Checks the screenshots of one message and records the good ones.
  *
  * The order is Quotient's:
@@ -422,6 +447,15 @@ export const OCR_UNAVAILABLE_MESSAGE =
  * second screenshot in the same message cannot be a duplicate of the first
  * one.
  *
+ * ## The threshold is the setup's own
+ *
+ * The duplicate check runs with the setup's own threshold
+ * (`ss_configs.duplicate_threshold`), not with the global default — a
+ * guild whose screenshots rescale differently may need a different one
+ * (D20). A setup with no threshold of its own, or with a value that
+ * cannot be a Hamming distance over a 64-bit hash, falls back to the
+ * global default: a bad number in a column must not fail a submission.
+ *
  * ## The OCR being off refuses the submission
  *
  * When the OCR is switched off the submission is refused **before** the
@@ -433,6 +467,13 @@ export const OCR_UNAVAILABLE_MESSAGE =
  * none that look at the text — so an empty text would be *accepted* there.
  * The switched-off provider's zero hashes are the hash of nothing, and a
  * hash of nothing must never reach the database.
+ *
+ * ## A provider that fails refuses the submission
+ *
+ * The service is down, it answers with rubbish, it sends a hash nobody can
+ * compare — the screenshot cannot be verified, so it is refused and
+ * **nothing is stored**. The member gets an answer either way: a refusal
+ * is a decision, not a crash.
  */
 export async function processSubmission(
   config: SsConfig,
@@ -453,30 +494,65 @@ export async function processSubmission(
     };
   }
 
-  const provider = getOcrProvider();
-
   const stored = await repo.listSsSubmissions(config.id);
+
+  // The setup's **own** threshold (D20), with the global default as the
+  // fallback when it has none or when the value cannot be a Hamming
+  // distance. The check is still on the dHash — the pHash is stored
+  // beside it, but the threshold was calibrated on the dHash.
+  const threshold = resolveDuplicateThreshold(config.duplicateThreshold);
 
   const lines: string[] = [];
 
   let accepted = 0;
 
   for (const image of images) {
-    const result = await provider.analyze(image.buffer);
+    // The service fetches the image itself, so it is handed the URL and
+    // not the picture's bytes. A provider that cannot do its job answers
+    // with a reason rather than an exception.
+    const analysis = await analyzeScreenshot(image.url);
+
+    if (!analysis.ok) {
+      logger.warn(
+        `[Identity] A screenshot could not be read, so it is refused: ${analysis.reason}`,
+      );
+
+      lines.push(OCR_UNAVAILABLE_MESSAGE);
+
+      continue;
+    }
+
+    const result = analysis.result;
 
     if (!config.allowSame) {
-      const duplicate = findDuplicate(
+      const checked = checkDuplicate(
         {
           authorId,
           dhash: result.dhash,
           phash: result.phash,
         },
         stored,
-        DEFAULT_DUPLICATE_THRESHOLD,
+        threshold,
       );
 
-      if (duplicate) {
-        lines.push(describeDuplicate(config, duplicate));
+      if (!checked.ok) {
+        reportCorruptRows(config, checked.corrupt);
+
+        lines.push(
+          checked.kind === "corrupt-history"
+            ? DUPLICATE_CHECK_FAILED_MESSAGE
+            : OCR_UNAVAILABLE_MESSAGE,
+        );
+
+        continue;
+      }
+
+      if (checked.corrupt.length > 0) {
+        reportCorruptRows(config, checked.corrupt);
+      }
+
+      if (checked.duplicate) {
+        lines.push(describeDuplicate(config, checked.duplicate));
 
         continue;
       }
@@ -523,6 +599,38 @@ export async function processSubmission(
     submitted,
     verified: submitted >= config.requiredSs,
   };
+}
+
+/**
+ * Reports the stored rows that could not be compared.
+ *
+ * A corrupt row is a broken row in the database, and the operator has to
+ * fix it — so the report names the setup, the row and the value, and says
+ * how many rows there are when there are more than the log line lists.
+ */
+function reportCorruptRows(
+  config: SsConfig,
+  corrupt: readonly CorruptSubmission[],
+): void {
+  if (corrupt.length === 0) return;
+
+  const named = corrupt
+    .slice(0, MAX_REPORTED_CORRUPT_ROWS)
+    .map(
+      (entry) =>
+        `row ${entry.submission.id} (member ${entry.submission.authorId}, ` +
+        `${entry.field}="${entry.value}")`,
+    )
+    .join(", ");
+
+  const rest = corrupt.length - MAX_REPORTED_CORRUPT_ROWS;
+
+  logger.error(
+    `[Identity] A stored screenshot hash cannot be compared, so the duplicate ` +
+      `check is incomplete. Setup ${config.id} in guild ${config.guildId}: ` +
+      `${named}${rest > 0 ? ` and ${rest} more` : ""}. ` +
+      `The row has to be repaired or deleted.`,
+  );
 }
 
 /**

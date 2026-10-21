@@ -121,8 +121,8 @@ public panel ──"Claim Slot"──▶ pick the scrim and the slot number
   source protected this with a module-global `asyncio.Lock` that died
   with the process, so two users could own one slot.
 - The claim form collects the **teammate mentions**, like the
-  registration flow does, and they are written into `slots.members` by
-  the same statement that claims the slot.
+  registration flow does, and they are written into `slot_members` in the
+  same transaction that claims the slot.
 - The checks run **before** the statement: the scrim exists, the member
   is not banned, the member does not already hold a slot (unless
   multi-claim is on), and the team name is usable.
@@ -235,7 +235,7 @@ never hard-coded (D45). The feature values are the schema's own
 |---|---|---|
 | **B1** | The claim race, guarded by a process-global `asyncio.Lock` that died with the process (and never protected a second bot process). | The claim is one conditional `UPDATE … WHERE state='free'`. Zero rows updated means somebody else won. No lock, no array, no read-modify-write. |
 | **B2** | The "Remind Me" filter removed the matches from the list it was iterating, so **every second match survived**. | The excluded ids go into a `Set` and the candidates are filtered against it. Every match is excluded and none is skipped. Proved by a test that bans three scrims and expects nothing left. |
-| **B3** | The claim recorded only the claimer as a member, so the ID-Pass transfer could never find a teammate — **the feature had never worked**. | The claim form collects the teammate mentions and they are written to `slots.members` by the claim statement itself. |
+| **B3** | The claim recorded only the claimer as a member, so the ID-Pass transfer could never find a teammate — **the feature had never worked**. | The claim form collects the teammate mentions and they are written to `slot_members` in the same transaction as the claim. |
 | **B4** | "Add Team" offered `range(start_from, 30)` — a hard-coded thirty that ignored `total_slots` and offered numbers the scrim did not have. | The numbers offered are the scrim's own: `start_from … start_from + total_slots - 1`. |
 | **B9** | The ID-Pass transfer removed the captain from `slot.members` **in memory only**; the database kept listing the old captain. | The transfer writes the new owner **and** the new member list back. |
 | **B10** | `guild.get_member()` may be null; the source crashed on it inside a detached task. | The members that cannot be resolved are dropped, and the member is told when nobody is left. |
@@ -243,7 +243,7 @@ never hard-coded (D45). The feature values are the schema's own
 | **B6** | `ephermeral=True` — a typo that raised a `TypeError`. | `MessageFlags.Ephemeral`. |
 | **B7** | The refusal said "Cancel Reminder" for the remind feature. | "You can't set reminder in any scrim at this time." |
 | — | The punish flow asked for a free-text reason with a chat-message collector, and the ban type was a **four-keycap button row with no stable custom id** — the ban type could not be routed at all. | The ban type is a **select menu** and the reason and the duration are asked for in a **modal** (D17). All four modes are kept. |
-| — | The claim's teammate list was never persisted at all. | `members` is part of the claim statement, so it is written atomically with the claim. |
+| — | The claim's teammate list was never persisted at all. | The member rows are written in the same transaction as the claim, so the team is there with the slot or not at all. |
 | — | The "Change Team" flow left the previous captain with the ID/Pass role. | The old leader's role is removed when they hold no other slot in that scrim — the same rule the cancel uses. |
 
 ### Preserved deliberately

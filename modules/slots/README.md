@@ -270,7 +270,7 @@ The claim statement, verbatim:
 
 ```sql
 UPDATE slots
-   SET state = 'claimed', team_name = $3, owner_user_id = $4, members = $5
+   SET state = 'claimed', team_name = $3, owner_user_id = $4
  WHERE scrim_id = $1 AND num = $2 AND state = 'free'
  RETURNING id;
 ```
@@ -283,12 +283,33 @@ The cancel statement, verbatim:
 
 ```sql
 UPDATE slots
-   SET state = 'free', team_name = null, owner_user_id = null, members = '{}'
+   SET state = 'free', team_name = null, owner_user_id = null
  WHERE id = $1 AND owner_user_id = $2;
 ```
 
 The `owner_user_id` predicate is what stops one member from cancelling
 another member's slot.
+
+### The team of a slot
+
+The team of a slot is a **join table**, `slot_members`: one row per
+(slot, member). It was a `text[]` column, and SQLite has no arrays.
+
+| What | How |
+|---|---|
+| The claim writes the team | the rows are inserted in the **same transaction** as the claim, so a claimed slot always has its team |
+| The cancel clears the team | the rows are deleted in the same transaction as the release |
+| The ID-Pass transfer replaces the team | the old rows go and the new ones are written, in the same transaction as the ownership |
+| The fake-tag check reads the team | a join against `slot_members` and an `IN` over the ids, instead of a Postgres array overlap |
+
+**The list is never assembled in JavaScript and written back.** A claim
+that read the slot, appended a member and wrote the list back is a race
+two moderators can lose. Every write of the list is a set of rows, and
+the unique constraint on `(slot_id, user_id)` makes it idempotent: a
+mention of the captain does not stack a second row.
+
+The repository reads the rows back into the `members` array of
+`SlotRecord`, so nothing above the repository knows the difference.
 
 ### The rules that are load-bearing
 
@@ -335,7 +356,7 @@ business model — so nothing is silently disabled.
 |---|---|---|---|
 | B1 | The slot-claim race, guarded by a process-global lock. | `views/public.ts`, `repo.ts` | The claim is one conditional `UPDATE … WHERE state = 'free'`. Zero rows updated means somebody else won. There is no lock, no read-modify-write and no array. |
 | B2 | The "remind" filter mutated the list it was iterating, so every second match survived. | `service.ts` (`filterReminderCandidates`) | The excluded ids are collected into a `Set` and the candidates are filtered against it. Every match is excluded; none is skipped. |
-| B3 | The claim recorded only the claimer as a member, so the ID-Pass transfer could never find a teammate. **The feature had never worked.** | `views/modals.ts`, `service.ts` (`claimMembers`) | The claim form collects the teammate mentions, like the registration flow does, and they are written to `slots.members`. |
+| B3 | The claim recorded only the claimer as a member, so the ID-Pass transfer could never find a teammate. **The feature had never worked.** | `views/modals.ts`, `service.ts` (`claimMembers`) | The claim form collects the teammate mentions, like the registration flow does, and they are written to `slot_members`. |
 | B4 | The "Add Team" button hard-coded `range(start_from, 30)`, ignoring `total_slots`. | `service.ts` (`slotNumbersOf`), `views/slotlist.ts` | The numbers offered are the scrim's own: `start_from … start_from + total_slots - 1`. |
 | B9 | The IDP transfer removed the captain from `slot.members` **in memory only**; the database still listed the old captain. | `service.ts` (`applyIdpTransfer`) | The transfer writes the new owner **and** the new member list back. |
 | B10 | `guild.get_member()` may be null; the source crashed on it inside a detached task. | `views/helpers.ts` (`resolveMembers`) | The members that cannot be resolved are dropped, and the caller is told when nobody is left. |
@@ -343,7 +364,7 @@ business model — so nothing is silently disabled.
 | B6 | `ephermeral=True` — a typo that raised a `TypeError`. | everywhere | `MessageFlags.Ephemeral`. |
 | B7 | The error said "Cancel Reminder" for the remind feature. | `views/public.ts` | "You can't set reminder in any scrim at this time." |
 | — | The punish flow asked for a free-text reason with a chat-message collector, and the ban type was a four-keycap button row with **no stable custom id**. | `views/slotlist.ts`, `views/pick.ts` | The ban type is a **select menu** and the reason and the duration are asked for in a **modal** (D17). All four ban modes are kept. |
-| — | The claim's teammate list was never persisted. | `repo.ts` (`claimSlot`) | The member list is part of the claim statement, so it is written atomically with the claim. |
+| — | The claim's teammate list was never persisted. | `repo.ts` (`claimSlot`) | The member rows are written in the same transaction as the claim, so the team is there with the slot or not at all. |
 
 ### Preserved deliberately
 
@@ -376,6 +397,22 @@ business model — so nothing is silently disabled.
 
 ## Notes for the next engineer
 
+- **The fake-tag check is this area's.** The members of a slot live in
+  `slot_members`, and this area owns that table, so the check that
+  reads it lives here too: `repo.findFakeTagMatches(scrimId, memberIds,
+  exceptSlotId?)`, exported from `index.ts`. The scrims area's
+  registration flow is the caller — it used to run the check itself as
+  raw SQL with a Postgres array-overlap operator, and it should call
+  this one instead. The slot being checked is excluded, so a slot is
+  never a fake tag of itself.
+- **SQLite has one writer, and the client has no busy timeout.** Two
+  writes that overlap make the second one fail with `SQLITE_BUSY`, and
+  `db/client.ts` does not set a timeout, so the failure is immediate
+  rather than a wait. `repo.withWriteTransaction` retries a write that
+  is told the file is busy. **The central fix is a `timeout` on
+  `createClient`** — the client applies it to every connection it
+  opens, including the ones a transaction borrows — and this retry is
+  the belt to that pair of braces.
 - **The command's punish flow cannot ask for a free-text reason. This
   is a Discord limitation, not an oversight — do not try to add a modal
   to the command path.** A slash command is deferred by the dispatcher

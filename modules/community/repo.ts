@@ -5,30 +5,38 @@
  * runs any. The tables are imported from `db/schema.ts`; this file never
  * spells out DDL and never names a column the schema does not have.
  *
- * Two statements are hand-written SQL, and both are for a reason:
+ * **Nothing here is written for one engine.** The schema is a dialect
+ * neutral subset of SQL and the differences are confined to `db/dialect.ts`,
+ * so this file never says `ILIKE`, never says `now()`, and never casts
+ * with `::`. The two rules that used to need hand-written SQL are now
+ * ordinary builder statements:
  *
  *  - the tag usage counter is an atomic `usage = usage + 1`, which has to
  *    be one statement (S6, query 6);
- *  - the auto-role toggle is an `INSERT … ON CONFLICT DO UPDATE` that adds
- *    or removes a role id in the array **atomically**. Quotient did the
- *    same thing with `ARRAY_APPEND`/`ARRAY_REMOVE`, and a read-modify-write
- *    here would race two moderators clicking at once.
+ *  - the auto-role toggle adds or removes a role **atomically**. The
+ *    roles live in a join table now, and the toggle is an insert that
+ *    conflicts — the database's own answer to "is it there already?" —
+ *    followed, when it did conflict, by a delete. A read-modify-write here
+ *    would race two moderators clicking at once, which is exactly what
+ *    Quotient's `ARRAY_APPEND` did.
  */
 
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
   autoroleConfigs,
+  autoroleRoles,
   autopurgeConfigs,
   commandUsage,
   jobs,
   snipes,
   tags,
 } from "../../db/schema.js";
+import type { AutoroleKind as SchemaAutoroleKind } from "../../db/schema.js";
 import type { JobEvent } from "../../db/schema.js";
 import type {
   AutoroleConfig,
-  AutoPurgeConfig,
+  AutoroleKind,  AutoPurgeConfig,
   CommandUsageEntry,
   GuildTagStats,
   JobRecord,
@@ -48,15 +56,21 @@ import type {
 /**
  * Is this error a unique-constraint violation?
  *
- * Postgres reports it as SQLSTATE `23505`, and `pg` puts the error in
- * the `cause` of the one it throws.
+ * Postgres reports it as SQLSTATE `23505`, and `pg` puts the error in the
+ * `cause` of the one it throws. SQLite reports it as the extended code
+ * `SQLITE_CONSTRAINT_UNIQUE`, which the driver puts on the error itself.
+ *
+ * Both are answered here, because "that name is taken" is the same
+ * answer whichever engine the bot is running on.
  */
 export function isUniqueViolation(error: unknown): boolean {
   const candidate = error as
     | { code?: string; cause?: { code?: string } }
     | undefined;
 
-  return (candidate?.cause?.code ?? candidate?.code) === "23505";
+  const code = candidate?.cause?.code ?? candidate?.code;
+
+  return code === "23505" || code === "SQLITE_CONSTRAINT_UNIQUE";
 }
 
 /** A tag row, as the area sees it. */
@@ -141,6 +155,12 @@ export async function listTagsByOwner(
  * The tags whose name contains the query, case-insensitively.
  *
  * The source's `name__icontains`. At most `limit` of them.
+ *
+ * **`lower(col) LIKE lower(?)`, not `ILIKE`.** `ILIKE` is Postgres-only.
+ * SQLite's `LIKE` is already case-insensitive for ASCII, and the
+ * `lower()` on *both* sides is what makes the two engines behave the
+ * same: the column is folded and the pattern is folded, so the
+ * comparison is an exact one between two folded strings.
  */
 export async function listTagsMatching(
   guildId: string,
@@ -153,7 +173,7 @@ export async function listTagsMatching(
     .where(
       and(
         eq(tags.guildId, guildId),
-        sql`${tags.name} ILIKE ${`%${query}%`}`,
+        sql`lower(${tags.name}) LIKE lower(${`%${query}%`})`,
       ),
     )
     .orderBy(asc(tags.name))
@@ -202,7 +222,7 @@ export async function countOwnerTags(
   ownerId: string,
 ): Promise<number> {
   const rows = await db
-    .select({ count: sql<number>`count(*)::int` })
+    .select({ count: sql<number>`cast(count(*) as integer)` })
     .from(tags)
     .where(and(eq(tags.guildId, guildId), eq(tags.ownerId, ownerId)));
 
@@ -280,14 +300,21 @@ export async function deleteTagsByOwner(
  *
  * Atomic on purpose: `usage = usage + 1` has to be one statement, or two
  * people using the tag at the same time lose a count (S6, query 6).
+ *
+ * The statement is a builder statement rather than hand-written SQL, and
+ * that is what makes the timestamp portable: `updated_at` is epoch
+ * milliseconds on SQLite and a `timestamptz` on Postgres, and the driver
+ * encodes the `Date` the way the column stores it. A raw `now()` would
+ * only ever mean one engine's clock.
  */
 export async function incrementTagUsage(
   guildId: string,
   name: string,
 ): Promise<void> {
-  await db.execute(
-    sql`UPDATE tags SET usage = usage + 1, updated_at = now() WHERE guild_id = ${guildId} AND name = ${name}`,
-  );
+  await db
+    .update(tags)
+    .set({ usage: sql`${tags.usage} + 1`, updatedAt: new Date() })
+    .where(and(eq(tags.guildId, guildId), eq(tags.name, name)));
 }
 
 /* ------------------------------------------------------------------ *
@@ -329,7 +356,7 @@ export async function countTagUsesByUser(
   const rows = await db
     .select({
       userId: commandUsage.userId,
-      uses: sql<number>`count(*)::int`,
+      uses: sql<number>`cast(count(*) as integer)`,
     })
     .from(commandUsage)
     .where(and(eq(commandUsage.guildId, guildId), TAG_COMMAND_FILTER))
@@ -355,7 +382,7 @@ export async function countTagCommandUses(
   userId: string,
 ): Promise<number> {
   const rows = await db
-    .select({ uses: sql<number>`count(*)::int` })
+    .select({ uses: sql<number>`cast(count(*) as integer)` })
     .from(commandUsage)
     .where(
       and(
@@ -385,7 +412,7 @@ export async function countTagsByOwner(
   const rows = await db
     .select({
       ownerId: tags.ownerId,
-      count: sql<number>`count(*)::int`,
+      count: sql<number>`cast(count(*) as integer)`,
     })
     .from(tags)
     .where(eq(tags.guildId, guildId))
@@ -417,8 +444,8 @@ export async function countGuildTagTotals(
 ): Promise<{ totalTags: number; totalUses: number }> {
   const rows = await db
     .select({
-      totalTags: sql<number>`count(*)::int`,
-      totalUses: sql<number>`coalesce(sum(${tags.usage}), 0)::int`,
+      totalTags: sql<number>`cast(count(*) as integer)`,
+      totalUses: sql<number>`cast(coalesce(sum(${tags.usage}), 0) as integer)`,
     })
     .from(tags)
     .where(eq(tags.guildId, guildId));
@@ -455,8 +482,8 @@ export async function listMemberTagStats(
     .select({
       name: tags.name,
       usage: tags.usage,
-      totalTags: sql<number>`count(*) OVER ()::int`,
-      totalUses: sql<number>`sum(${tags.usage}) OVER ()::int`,
+      totalTags: sql<number>`cast(count(*) OVER () as integer)`,
+      totalUses: sql<number>`cast(sum(${tags.usage}) OVER () as integer)`,
     })
     .from(tags)
     .where(and(eq(tags.guildId, guildId), eq(tags.ownerId, ownerId)))
@@ -608,7 +635,7 @@ export async function listAutoPurgeConfigs(
 /** How many auto-purge channels a guild has. */
 export async function countAutoPurgeConfigs(guildId: string): Promise<number> {
   const rows = await db
-    .select({ count: sql<number>`count(*)::int` })
+    .select({ count: sql<number>`cast(count(*) as integer)` })
     .from(autopurgeConfigs)
     .where(eq(autopurgeConfigs.guildId, guildId));
 
@@ -650,70 +677,146 @@ export async function deleteAutoPurgeConfig(channelId: string): Promise<void> {
  * Auto-roles
  * ------------------------------------------------------------------ */
 
-/** An auto-role row, as the area sees it. */
-function toAutoroleConfig(
-  row: typeof autoroleConfigs.$inferSelect,
-): AutoroleConfig {
-  return {
-    id: row.id,
-    guildId: row.guildId,
-    humans: row.humans,
-    bots: row.bots,
-  };
+/**
+ * The two auto-role lists, in the schema's vocabulary.
+ *
+ * The command surface says "humans" and "bots" — those are the
+ * subcommand names — and the join table says "human" and "bot". The
+ * mapping is here so the two vocabularies meet in exactly one place.
+ *
+ * `satisfies` is what keeps the two in step: a kind the schema does not
+ * have, or a list with no kind, is a compile error rather than a row
+ * nobody can read back.
+ */
+const AUTOROLE_LIST_KIND = {
+  humans: "human",
+  bots: "bot",
+} as const satisfies Record<AutoroleKind, SchemaAutoroleKind>;
+
+/**
+ * Makes sure the guild has an auto-role config row.
+ *
+ * The config row is the parent of every role row, so it has to exist
+ * before one can be written. The insert is a statement of its own and it
+ * is atomic: two moderators toggling roles at the same moment both run
+ * it, and the unique constraint on `guild_id` means exactly one of them
+ * writes the row.
+ */
+async function ensureAutoroleConfig(guildId: string): Promise<void> {
+  await db
+    .insert(autoroleConfigs)
+    .values({ guildId })
+    .onConflictDoNothing({ target: autoroleConfigs.guildId });
 }
 
-/** The auto-role config of a guild. */
+/**
+ * The role ids of one auto-role list, oldest first.
+ */
+async function listAutoroleRoles(
+  guildId: string,
+  kind: SchemaAutoroleKind,
+): Promise<string[]> {
+  const rows = await db
+    .select({ roleId: autoroleRoles.roleId })
+    .from(autoroleRoles)
+    .where(
+      and(
+        eq(autoroleRoles.guildId, guildId),
+        eq(autoroleRoles.kind, kind),
+      ),
+    )
+    .orderBy(asc(autoroleRoles.createdAt), asc(autoroleRoles.roleId));
+
+  return rows.map((row) => row.roleId);
+}
+
+/**
+ * The auto-role config of a guild.
+ *
+ * The roles live in a join table now, so the config is the config row
+ * plus the rows that belong to it. The two lists are folded back into
+ * the shape the area has always spoken in, so nothing above this file
+ * knows that the storage changed.
+ */
 export async function findAutoroleConfig(
   guildId: string,
 ): Promise<AutoroleConfig | null> {
-  const rows = await db
-    .select()
-    .from(autoroleConfigs)
-    .where(eq(autoroleConfigs.guildId, guildId))
-    .limit(1);
+  const [configRows, roleRows] = await Promise.all([
+    db
+      .select()
+      .from(autoroleConfigs)
+      .where(eq(autoroleConfigs.guildId, guildId))
+      .limit(1),
+    db
+      .select({ kind: autoroleRoles.kind, roleId: autoroleRoles.roleId })
+      .from(autoroleRoles)
+      .where(eq(autoroleRoles.guildId, guildId)),
+  ]);
 
-  const row = rows[0];
+  const config = configRows[0];
 
-  return row ? toAutoroleConfig(row) : null;
+  if (!config) return null;
+
+  const humans: string[] = [];
+  const bots: string[] = [];
+
+  for (const row of roleRows) {
+    if (row.kind === "human") humans.push(row.roleId);
+    else if (row.kind === "bot") bots.push(row.roleId);
+  }
+
+  return { id: config.id, guildId: config.guildId, humans, bots };
 }
 
 /**
  * Adds a role to an auto-role list, or removes it when it is already there.
  *
- * The whole thing is one statement, so two moderators clicking at the same
- * moment cannot lose a role. The source did the same with
- * `ARRAY_APPEND`/`ARRAY_REMOVE`, but read the row first and wrote it back
- * afterwards.
+ * **The toggle is decided by the database, not by a read.** The insert
+ * carries the unique constraint on `(guild_id, kind, role_id)`, so:
  *
- * @returns the list after the change.
+ *  - the role is not there yet, the insert succeeds and returns the row:
+ *    the role has been added;
+ *  - the role is there already, the insert conflicts and returns nothing:
+ *    the role has to come out, and the delete removes it.
+ *
+ * There is no read of the list anywhere in that decision, so there is no
+ * window in which two moderators clicking at once can lose a role. The
+ * source did the same thing with `ARRAY_APPEND`/`ARRAY_REMOVE`, but read
+ * the row first and wrote it back afterwards, and the read-then-write is
+ * exactly the race.
+ *
+ * @returns the list after the change, and whether the role was added.
  */
 export async function toggleAutoroleRole(
   guildId: string,
-  kind: "humans" | "bots",
+  kind: AutoroleKind,
   roleId: string,
-): Promise<string[]> {
-  const column = kind === "humans" ? "humans" : "bots";
+): Promise<{ roles: string[]; added: boolean }> {
+  const schemaKind = AUTOROLE_LIST_KIND[kind];
 
-  // The column is qualified with the table name in the `DO UPDATE`
-  // clause: an unqualified name there is ambiguous between the row that
-  // is being updated and the row that is being inserted.
-  const rows = await db.execute<{ humans: string[]; bots: string[] }>(sql`
-    INSERT INTO ${autoroleConfigs} (guild_id, ${sql.raw(column)}, created_at, updated_at)
-    VALUES (${guildId}, ARRAY[${roleId}]::text[], now(), now())
-    ON CONFLICT (guild_id) DO UPDATE SET
-      ${sql.raw(column)} = CASE
-        WHEN ${roleId} = ANY(autorole_configs.${sql.raw(column)}) THEN array_remove(autorole_configs.${sql.raw(column)}, ${roleId}::text)
-        ELSE array_append(autorole_configs.${sql.raw(column)}, ${roleId}::text)
-      END,
-      updated_at = now()
-    RETURNING humans, bots
-  `);
+  await ensureAutoroleConfig(guildId);
 
-  const row = rows.rows[0];
+  const inserted = await db
+    .insert(autoroleRoles)
+    .values({ guildId, kind: schemaKind, roleId })
+    .onConflictDoNothing()
+    .returning({ id: autoroleRoles.id });
 
-  if (!row) return [];
+  const added = inserted.length > 0;
 
-  return kind === "humans" ? row.humans : row.bots;
+  if (!added) {
+    await db
+      .delete(autoroleRoles)
+      .where(
+        and(
+          eq(autoroleRoles.guildId, guildId),
+          eq(autoroleRoles.kind, schemaKind),
+          eq(autoroleRoles.roleId, roleId),
+        ),
+      );
+  }
+
+  return { roles: await listAutoroleRoles(guildId, schemaKind), added };
 }
 
 /**
@@ -724,25 +827,29 @@ export async function toggleAutoroleRole(
  */
 export async function removeAutoroleRole(
   guildId: string,
-  kind: "humans" | "bots",
+  kind: AutoroleKind,
   roleId: string,
 ): Promise<void> {
-  const column = kind === "humans" ? "humans" : "bots";
-
-  await db.execute(sql`
-    UPDATE ${autoroleConfigs}
-       SET ${sql.raw(column)} = array_remove(${autoroleConfigs}.${sql.raw(column)}, ${roleId}::text),
-           updated_at = now()
-     WHERE guild_id = ${guildId}
-  `);
+  await db
+    .delete(autoroleRoles)
+    .where(
+      and(
+        eq(autoroleRoles.guildId, guildId),
+        eq(autoroleRoles.kind, AUTOROLE_LIST_KIND[kind]),
+        eq(autoroleRoles.roleId, roleId),
+      ),
+    );
 }
 
-/** Empties both auto-role lists. */
+/**
+ * Empties both auto-role lists.
+ *
+ * The config row stays: it says the guild has auto-roles, not that it
+ * has any at the moment. That is the shape the command has always
+ * spoken in, and `/autorole config` still answers.
+ */
 export async function clearAutoroleRoles(guildId: string): Promise<void> {
-  await db
-    .update(autoroleConfigs)
-    .set({ humans: [], bots: [], updatedAt: new Date() })
-    .where(eq(autoroleConfigs.guildId, guildId));
+  await db.delete(autoroleRoles).where(eq(autoroleRoles.guildId, guildId));
 }
 
 /* ------------------------------------------------------------------ *
@@ -818,7 +925,8 @@ export async function findJob(id: string): Promise<JobRecord | null> {
 export async function listUserReminders(
   userId: string,
   limit = 10,
-): Promise<ReminderRecord[]> {  const rows = await db
+): Promise<ReminderRecord[]> {
+  const rows = await db
     .select({
       id: jobs.id,
       expiresAt: jobs.expiresAt,
@@ -849,7 +957,7 @@ export async function listUserReminders(
 /** How many reminders a user has running. */
 export async function countUserReminders(userId: string): Promise<number> {
   const rows = await db
-    .select({ count: sql<number>`count(*)::int` })
+    .select({ count: sql<number>`cast(count(*) as integer)` })
     .from(jobs)
     .where(and(eq(jobs.event, "reminder"), eq(jobs.userId, userId)));
 

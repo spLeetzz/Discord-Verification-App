@@ -16,9 +16,8 @@
  */
 
 import { sql } from "drizzle-orm";
-import type { SQL } from "drizzle-orm";
 import { check } from "../dialect.js";
-import type { PortableColumn } from "../dialect.js";
+import type { CheckBuilder, PortableColumn } from "../dialect.js";
 
 /* ------------------------------------------------------------------ *
  * Closed unions
@@ -189,7 +188,7 @@ export function oneOfCheck(
   name: string,
   column: PortableColumn,
   allowed: readonly string[],
-): SQL {
+): CheckBuilder {
   const list = allowed
     .map((value) => `'${value.replaceAll("'", "''")}'`)
     .join(", ");

@@ -51,7 +51,13 @@ export interface AutoPurgeConfig {
   readonly createdAt: Date;
 }
 
-/** The roles automatically given to new members. */
+/**
+ * The roles automatically given to new members.
+ *
+ * The roles live in a join table — one row per (guild, kind, role) — and
+ * this is the shape they are folded back into. The area still speaks in
+ * two lists, because that is what the command surface speaks in.
+ */
 export interface AutoroleConfig {
   readonly id: string;
   readonly guildId: string;
@@ -61,7 +67,12 @@ export interface AutoroleConfig {
   readonly bots: readonly string[];
 }
 
-/** Which list of an auto-role config a role belongs to. */
+/**
+ * Which list of an auto-role config a role belongs to.
+ *
+ * These are the two lists the command offers. The join table's own
+ * vocabulary is `human` and `bot`; `repo.ts` is where the two meet.
+ */
 export type AutoroleKind = "humans" | "bots";
 
 /** A running reminder, as the `/reminder list` command shows it. */

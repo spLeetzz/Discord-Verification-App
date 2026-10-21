@@ -27,9 +27,104 @@
  * for a 64-bit hash, so it has to move with the hash implementation rather
  * than being baked into the comparison — which is why the hashing lives in
  * `modules/ssverify/ocr/` and every stored hash comes from it.
+ *
+ * The threshold a submission is checked against is the **setup's own**
+ * (`ss_configs.duplicate_threshold`), with the global default as the
+ * fallback — see {@link resolveDuplicateThreshold}. The check is still on
+ * the **dHash**: the pHash is stored beside it, but the threshold of 7 was
+ * calibrated on the dHash.
+ *
+ * ## The check never throws
+ *
+ * Quotient's `imagehash.hex_to_hash` **raises** on a stored hash that is
+ * not sixteen hex characters, and the exception left the submission with no
+ * answer at all. Here the check is **total**: it answers with a decision,
+ * and every hash that cannot be compared is reported rather than thrown
+ * over.
+ *
+ * Two kinds of "cannot be compared", and they are not the same:
+ *
+ *  - **the screenshot's own hash** (from the service) is not a hash. The
+ *    screenshot cannot be verified at all, so it is **refused**. The
+ *    service's own provider refuses such an answer before it gets here, so
+ *    this is the second line of defence.
+ *  - **a stored row** is corrupt. One row is broken, not the screenshot:
+ *
+ *    - when it is the **member's own** row, the check cannot tell whether
+ *      this screenshot repeats one of their own, so the submission is
+ *      **refused** — the same answer the check gave before, only a message
+ *      instead of a crash;
+ *    - when it is **somebody else's** row, the submission goes through and
+ *      the row is **reported**. Refusing there would let one bad row block
+ *      every member of the setup, and the row can only hide one exact
+ *      re-submission.
+ *
+ * Every corrupt row is reported either way, with enough detail to find it
+ * and fix it.
  */
 
-import { hammingDistance, HASH_HEX_LENGTH } from "../ssverify/ocr/hash.js";
+import {
+  DEFAULT_DUPLICATE_THRESHOLD,
+  compareHashes,
+  isHashHex,
+} from "../ssverify/ocr/hash.js";
+
+/* ------------------------------------------------------------------ *
+ * The threshold
+ * ------------------------------------------------------------------ */
+
+/**
+ * The smallest Hamming distance a setup may use.
+ *
+ * Zero means "only the very same hash is a duplicate" — a setup that
+ * refuses to forgive a single changed pixel.
+ */
+export const MIN_DUPLICATE_THRESHOLD = 0;
+
+/**
+ * The largest Hamming distance a setup may use.
+ *
+ * The hash is 64 bits wide, so two hashes are never more than 64 bits
+ * apart: a threshold of 64 can never fire, and nothing is ever a
+ * duplicate. It is the last value that still means something.
+ */
+export const MAX_DUPLICATE_THRESHOLD = 64;
+
+/**
+ * The threshold a setup's duplicate check runs with.
+ *
+ * The setup has a threshold of its own (`ss_configs.duplicate_threshold`),
+ * and the global default is only the fallback:
+ *
+ *  - **no threshold at all** — the setup has no value of its own, so the
+ *    default is used;
+ *  - **a value that cannot be a Hamming distance** — it is not a whole
+ *    number, or it is outside `0…64`, so the default is used.
+ *
+ * A bad number falls back to the default rather than failing: a column
+ * with a nonsense value must not stop a member from being verified, and
+ * the check itself is total — it answers with a decision, never an
+ * exception (see the note at the top of this file).
+ *
+ * @param value the setup's own threshold, if it has one.
+ */
+export function resolveDuplicateThreshold(
+  value: number | null | undefined,
+): number {
+  if (value === null || value === undefined) {
+    return DEFAULT_DUPLICATE_THRESHOLD;
+  }
+
+  if (!Number.isInteger(value)) {
+    return DEFAULT_DUPLICATE_THRESHOLD;
+  }
+
+  if (value < MIN_DUPLICATE_THRESHOLD || value > MAX_DUPLICATE_THRESHOLD) {
+    return DEFAULT_DUPLICATE_THRESHOLD;
+  }
+
+  return value;
+}
 
 /** The stored submission a new screenshot is compared against. */
 export interface StoredSubmission {
@@ -67,58 +162,49 @@ export interface DuplicateMatch {
 }
 
 /**
- * A stored hash that is not a hash.
+ * A stored row whose hash cannot be compared.
  *
- * `hexToHash` throws on anything that is not exactly sixteen hex
- * characters, and that is deliberate: a truncated row must fail loudly
- * instead of comparing as "a different picture", because a duplicate that
- * hides itself is a duplicate that lets a member farm a role.
+ * The row is corrupt: a truncated hash, a column written by an older
+ * version, a hand-edited row. It is reported rather than skipped in
+ * silence, because a row that cannot be compared is a row that cannot be
+ * trusted.
  */
-export class MalformedHashError extends Error {
-  /** The hash that could not be read. */
-  readonly hash: string;
-
-  constructor(hash: string, detail: string) {
-    super(`A screenshot hash is malformed and cannot be compared: ${detail}`);
-
-    this.name = "MalformedHashError";
-    this.hash = hash;
-  }
+export interface CorruptSubmission {
+  /** The row that is corrupt. */
+  readonly submission: StoredSubmission;
+  /** Which hash of it is broken. */
+  readonly field: "dhash" | "phash";
+  /** The value that is not a hash. */
+  readonly value: string;
 }
 
-/** What a hash looks like: sixteen hex characters. */
-const HASH_PATTERN = new RegExp(
-  `^[0-9a-fA-F]{${HASH_HEX_LENGTH}}$`,
-);
+/** Why the check could not be made. */
+export type DuplicateFailure =
+  /** The screenshot's own hash is not a hash, so it verifies nothing. */
+  | "unusable-hash"
+  /** The member's own stored submission cannot be compared. */
+  | "corrupt-history";
 
-/**
- * Is this a hash?
- */
-function isHashHex(value: string): boolean {
-  return HASH_PATTERN.test(value);
-}
-
-/**
- * The Hamming distance between two hashes.
- *
- * @throws MalformedHashError when either side is not sixteen hex
- *         characters. The error names the hash that is actually
- *         malformed, which is the one the caller has to look at.
- */
-export function safeHammingDistance(a: string, b: string): number {
-  try {
-    return hammingDistance(a, b);
-  } catch (error) {
-    // `hammingDistance` reads the first argument first, so the first
-    // argument is the one that is malformed when only one of them is.
-    const malformed = isHashHex(a) ? b : a;
-
-    throw new MalformedHashError(
-      malformed,
-      error instanceof Error ? error.message : String(error),
-    );
-  }
-}
+/** What the duplicate check found. */
+export type DuplicateOutcome =
+  | {
+      /** The check could be made. */
+      readonly ok: true;
+      /** The submission the screenshot duplicates, if there is one. */
+      readonly duplicate: DuplicateMatch | null;
+      /** The stored rows that could not be compared. */
+      readonly corrupt: readonly CorruptSubmission[];
+    }
+  | {
+      /** The check could not be made, so the screenshot is refused. */
+      readonly ok: false;
+      /** Which of the two reasons it is. */
+      readonly kind: DuplicateFailure;
+      /** Why not, in words. */
+      readonly reason: string;
+      /** The stored rows that could not be compared. */
+      readonly corrupt: readonly CorruptSubmission[];
+    };
 
 /**
  * Finds the submission a new screenshot duplicates.
@@ -127,16 +213,30 @@ export function safeHammingDistance(a: string, b: string): number {
  * @param stored    every submission of the configuration, oldest first.
  * @param threshold the Hamming distance at or below which two screenshots
  *                  count as the same picture.
- * @returns the duplicate, or `null` when the screenshot is new.
- * @throws MalformedHashError when a stored dHash is not a hash. A row that
- *         cannot be compared must not be skipped silently: the check would
- *         wave the screenshot through.
+ * @returns the decision: the duplicate that was found (if any), the rows
+ *          that could not be compared, or the reason the check could not be
+ *          made at all. It never throws.
  */
-export function findDuplicate(
+export function checkDuplicate(
   candidate: CandidateHashes,
   stored: readonly StoredSubmission[],
   threshold: number,
-): DuplicateMatch | null {
+): DuplicateOutcome {
+  // The screenshot's own hashes have to be usable. A hash that cannot be
+  // compared verifies nothing, so the screenshot is refused.
+  if (!isHashHex(candidate.dhash) || !isHashHex(candidate.phash)) {
+    return {
+      ok: false,
+      kind: "unusable-hash",
+      reason:
+        `The screenshot's hashes cannot be compared: ` +
+        `dhash="${candidate.dhash}", phash="${candidate.phash}".`,
+      corrupt: [],
+    };
+  }
+
+  const corrupt: CorruptSubmission[] = [];
+
   // 1. The member's own submissions.
   for (const submission of stored) {
     if (submission.authorId !== candidate.authorId) continue;
@@ -147,22 +247,67 @@ export function findDuplicate(
     // malformed hash — it is an absent one — so it is skipped.
     if (dhash === null) continue;
 
-    const distance = safeHammingDistance(candidate.dhash, dhash);
+    if (!isHashHex(dhash)) {
+      // The member's own history cannot be compared, so the check cannot
+      // tell whether this screenshot repeats one of their own. That is a
+      // refusal, and the row is reported so it can be cleaned up.
+      return {
+        ok: false,
+        kind: "corrupt-history",
+        reason:
+          `A stored screenshot hash of the member cannot be compared: ` +
+          `dhash="${dhash}".`,
+        corrupt: [...corrupt, { submission, field: "dhash", value: dhash }],
+      };
+    }
 
-    if (distance <= threshold) {
-      return { kind: "own", submission };
+    const comparison = compareHashes(candidate.dhash, dhash, threshold);
+
+    // Both sides are hashes, so this cannot happen — but the comparison
+    // is total, and a comparison that could not be made is a comparison
+    // that cannot clear the screenshot.
+    if (!comparison.ok) {
+      return {
+        ok: false,
+        kind: "unusable-hash",
+        reason: comparison.reason,
+        corrupt,
+      };
+    }
+
+    if (comparison.duplicate) {
+      return { ok: true, duplicate: { kind: "own", submission }, corrupt };
     }
   }
 
   // 2. The same picture, whoever submitted it.
   for (const submission of stored) {
-    if (submission.dhash !== candidate.dhash) continue;
-    if (submission.phash !== candidate.phash) continue;
+    const dhash = submission.dhash;
+    const phash = submission.phash;
 
-    return { kind: "same", submission };
+    if (dhash === null || phash === null) continue;
+
+    // A row that cannot be compared cannot be "the same picture" either.
+    // It is reported and passed over: refusing here would let one corrupt
+    // row block every member of the setup.
+    if (!isHashHex(dhash)) {
+      corrupt.push({ submission, field: "dhash", value: dhash });
+      continue;
+    }
+
+    if (dhash !== candidate.dhash) continue;
+
+    if (!isHashHex(phash)) {
+      corrupt.push({ submission, field: "phash", value: phash });
+      continue;
+    }
+
+    if (phash !== candidate.phash) continue;
+
+    return { ok: true, duplicate: { kind: "same", submission }, corrupt };
   }
 
-  return null;
+  return { ok: true, duplicate: null, corrupt };
 }
 
 /**

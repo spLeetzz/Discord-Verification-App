@@ -11,29 +11,27 @@
  * configuration.
  */
 
-import { sql } from "drizzle-orm";
-import {
-  boolean,
-  index,
-  integer,
-  jsonb,
-  pgTable,
-  primaryKey,
-  text,
-  timestamp,
-  unique,
-} from "drizzle-orm/pg-core";
 import {
   ENTITLEMENT_FEATURES,
   ENTITLEMENT_SOURCES,
   PREMIUM_TRANSACTION_STATUSES,
-  createdAt,
-  discordId,
-  foreignId,
   oneOfCheck,
-  primaryId,
-  updatedAt,
 } from "./common.js";
+import {
+  boolCol,
+  createdAtCol,
+  defineTable,
+  foreignIdCol,
+  idCol,
+  index,
+  intCol,
+  jsonCol,
+  primaryKey,
+  textCol,
+  tsCol,
+  unique,
+  updatedAtCol,
+} from "../dialect.js";
 
 /**
  * A premium plan.
@@ -46,19 +44,19 @@ import {
  * ids stay stable across restarts without hard-coding them. `name` is the
  * display name and is unique too — the source used it as the key.
  */
-export const premiumPlans = pgTable(
+export const premiumPlans = defineTable(
   "premium_plans",
   {
-    id: primaryId(),
-    code: text("code").notNull(),
-    name: text("name").notNull(),
-    description: text("description"),
+    id: idCol(),
+    code: textCol("code").notNull(),
+    name: textCol("name").notNull(),
+    description: textCol("description"),
     /** Price in whole rupees. */
-    price: integer("price").notNull(),
+    price: intCol("price").notNull(),
     /** Length of the subscription, in whole days. */
-    durationDays: integer("duration_days").notNull(),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    durationDays: intCol("duration_days").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("premium_plans_code_unique").on(t.code),
@@ -95,28 +93,28 @@ export interface PremiumPlanSnapshot {
  * break the catalogue reseed, and a `CASCADE` would destroy paid
  * transactions. `plan_snapshot` is what the payment page reads instead.
  */
-export const premiumTransactions = pgTable(
+export const premiumTransactions = defineTable(
   "premium_transactions",
   {
-    id: primaryId(),
-    txnId: text("txn_id").notNull(),
-    status: text("status").notNull().default("pending"),
-    userId: discordId("user_id").notNull(),
-    guildId: discordId("guild_id").notNull(),
-    planId: foreignId("plan_id").references(() => premiumPlans.id, {
+    id: idCol(),
+    txnId: textCol("txn_id").notNull(),
+    status: textCol("status").notNull().default("pending"),
+    userId: textCol("user_id").notNull(),
+    guildId: textCol("guild_id").notNull(),
+    planId: foreignIdCol("plan_id").references(() => premiumPlans.id, {
       onDelete: "set null",
     }),
     /** The plan as it was when the purchase was made. */
-    planSnapshot: jsonb("plan_snapshot").$type<PremiumPlanSnapshot | null>(),
+    planSnapshot: jsonCol<PremiumPlanSnapshot | null>("plan_snapshot"),
     /** The buyer's real address — Quotient sent a placeholder to the gateway. */
-    email: text("email"),
+    email: textCol("email"),
     /** The buyer's Discord display name, for the receipt. */
-    buyerName: text("buyer_name"),
+    buyerName: textCol("buyer_name"),
     /** The raw provider payload, kept for audit. */
-    rawData: jsonb("raw_data").notNull().default(sql`'{}'::jsonb`),
-    paidAt: timestamp("paid_at", { withTimezone: true, mode: "date" }),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    rawData: jsonCol<Record<string, unknown>>("raw_data", {}),
+    paidAt: tsCol("paid_at"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("premium_transactions_txn_id_unique").on(t.txnId),
@@ -140,17 +138,17 @@ export const premiumTransactions = pgTable(
  * `assertEntitled(guildId, feature)` is the only place a gate is read, and
  * it is always called *before* the state it guards changes.
  */
-export const guildEntitlements = pgTable(
+export const guildEntitlements = defineTable(
   "guild_entitlements",
   {
-    guildId: discordId("guild_id").notNull(),
-    feature: text("feature").notNull(),
-    enabled: boolean("enabled").notNull().default(false),
-    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }),
+    guildId: textCol("guild_id").notNull(),
+    feature: textCol("feature").notNull(),
+    enabled: boolCol("enabled").notNull().default(false),
+    expiresAt: tsCol("expires_at"),
     /** How the entitlement was granted: bought, owner-given, or manual. */
-    source: text("source").notNull().default("owner"),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    source: textCol("source").notNull().default("owner"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     primaryKey({ columns: [t.guildId, t.feature] }),

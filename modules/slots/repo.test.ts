@@ -7,16 +7,18 @@
  * enforces.
  *
  * These tests are not unit tests with a mocked database. They connect to
- * the Postgres the bot talks to and assert the things the port
+ * the database the bot talks to and assert the things the port
  * actually promises:
  *
  *  - the statement the database receives is the conditional `UPDATE`
  *    from S7, and not a read-then-write;
  *  - a free slot can be claimed;
  *  - **a slot that is already taken cannot be claimed again** — the
- *    second claim updates nothing;
- *  - the member list is persisted, so the ID-Pass transfer has a
- *    teammate to find;
+ *    second claim updates nothing, even when the two claims race;
+ *  - the member list is persisted in `slot_members`, so the ID-Pass
+ *    transfer has a teammate to find;
+ *  - the ID-Pass transfer replaces the member list;
+ *  - the fake-tag check finds a player who is already on another slot;
  *  - only the owner may release a slot.
  *
  * The fixtures use ids no real row can have, and they are deleted
@@ -26,16 +28,20 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { closeDatabase, db } from "../../db/client.js";
-import { scrims, slots } from "../../db/schema.js";
+import { scrims, slotMembers, slots } from "../../db/schema.js";
 import {
   buildClaimStatement,
   buildReleaseStatement,
   claimSlot,
   countUserSlotsInScrim,
+  findFakeTagMatches,
   getSlot,
+  getSlotByNum,
   releaseSlot,
   setScrimSlotlistMessage,
+  transferSlot,
 } from "./repo.js";
+import { withBusyRetry } from "./test-db.js";
 
 /** A guild id no real row can have, unique to this test run. */
 const GUILD_ID = `slots-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -49,31 +55,35 @@ let scrimId = "";
 
 /** Creates the fixture scrim and its three slots. */
 async function seed(): Promise<void> {
-  const rows = await db
-    .insert(scrims)
-    .values({
-      guildId: GUILD_ID,
-      name: "Slots test scrim",
-      status: "closed",
-      registrationChannelId: "900000000000000001",
-      slotlistChannelId: "900000000000000002",
-      roleId: "900000000000000003",
-      openTime: new Date(),
-      totalSlots: 3,
-      startFrom: 1,
-      hostId: "900000000000000004",
-      closedAt: new Date(),
-      matchTime: new Date(Date.now() + 3_600_000),
-    })
-    .returning({ id: scrims.id });
+  const rows = await withBusyRetry(() =>
+    db
+      .insert(scrims)
+      .values({
+        guildId: GUILD_ID,
+        name: "Slots test scrim",
+        status: "closed",
+        registrationChannelId: "900000000000000001",
+        slotlistChannelId: "900000000000000002",
+        roleId: "900000000000000003",
+        openTime: new Date(),
+        totalSlots: 3,
+        startFrom: 1,
+        hostId: "900000000000000004",
+        closedAt: new Date(),
+        matchTime: new Date(Date.now() + 3_600_000),
+      })
+      .returning({ id: scrims.id }),
+  );
 
   scrimId = rows[0]?.id ?? "";
 
-  await db.insert(slots).values([
-    { scrimId, num: 1 },
-    { scrimId, num: 2 },
-    { scrimId, num: 3 },
-  ]);
+  await withBusyRetry(() =>
+    db.insert(slots).values([
+      { scrimId, num: 1 },
+      { scrimId, num: 2 },
+      { scrimId, num: 3 },
+    ]),
+  );
 }
 
 /** Removes every fixture. */
@@ -82,8 +92,11 @@ async function clean(): Promise<void> {
 
   // The slots cascade with the scrim, but the delete is explicit so the
   // test does not depend on the cascade.
-  await db.delete(slots).where(eq(slots.scrimId, scrimId));
-  await db.delete(scrims).where(eq(scrims.id, scrimId));
+  await withBusyRetry(() =>
+    db.delete(slots).where(eq(slots.scrimId, scrimId)),
+  );
+
+  await withBusyRetry(() => db.delete(scrims).where(eq(scrims.id, scrimId)));
 }
 
 beforeEach(async () => {
@@ -93,14 +106,17 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await clean();
-  await db.delete(scrims).where(eq(scrims.guildId, GUILD_ID));
+
+  await withBusyRetry(() =>
+    db.delete(scrims).where(eq(scrims.guildId, GUILD_ID)),
+  );
 
   await closeDatabase();
 });
 
 describe("the claim statement", () => {
   it("is one conditional UPDATE, not a read-then-write", () => {
-    const statement = buildClaimStatement(scrimId, 1, {
+    const statement = buildClaimStatement(db, scrimId, 1, {
       teamName: "Team Alpha",
       ownerUserId: OWNER,
       members: [OWNER, TEAMMATE],
@@ -108,17 +124,18 @@ describe("the claim statement", () => {
 
     const { sql: text, params } = statement.toSQL();
 
-    // The statement the database receives.
+    // The statement the database receives. The placeholders are `?`
+    // because the engine is SQLite; the shape of the statement is the
+    // same on both.
     expect(text).toContain('update "slots"');
-    expect(text).toContain('"state" = $');
-    expect(text).toContain('"team_name" = $');
-    expect(text).toContain('"owner_user_id" = $');
-    expect(text).toContain('"members" = $');
+    expect(text).toContain('"state" = ?');
+    expect(text).toContain('"team_name" = ?');
+    expect(text).toContain('"owner_user_id" = ?');
 
     // The three predicates that make it a race the database settles.
-    expect(text).toContain('"scrim_id" = $');
-    expect(text).toContain('"num" = $');
-    expect(text).toContain('"state" = $');
+    expect(text).toContain('"scrim_id" = ?');
+    expect(text).toContain('"num" = ?');
+    expect(text).toContain('"state" = ?');
     expect(text).toContain("returning");
 
     // The values.
@@ -131,6 +148,10 @@ describe("the claim statement", () => {
 
     // There is no SELECT anywhere in the statement.
     expect(text).not.toContain("select");
+
+    // The team is not a column of the slot any more: it is a join
+    // table, and it is written in the same transaction.
+    expect(text).not.toContain("members");
   });
 });
 
@@ -160,6 +181,14 @@ describe("the claim", () => {
     const stored = await getSlot(slot?.id ?? "");
 
     expect(stored?.members).toEqual([OWNER, TEAMMATE]);
+
+    // The team is a join table now: one row per member.
+    const rows = await db
+      .select({ userId: slotMembers.userId })
+      .from(slotMembers)
+      .where(eq(slotMembers.slotId, slot?.id ?? ""));
+
+    expect(rows.map((row) => row.userId).sort()).toEqual([OWNER, TEAMMATE]);
   });
 
   it("refuses a slot somebody else already took", async () => {
@@ -187,6 +216,42 @@ describe("the claim", () => {
     expect(stored?.teamName).toBe("Team Alpha");
   });
 
+  it("lets only one of two claims that race each other win", async () => {
+    // The two claims are fired at the same time, so the database — not
+    // the order the promises resolved in — decides. One of them
+    // updates a row; the other updates nothing.
+    const [first, second] = await Promise.all([
+      claimSlot(scrimId, 1, {
+        teamName: "Team Alpha",
+        ownerUserId: OWNER,
+        members: [OWNER],
+      }),
+      claimSlot(scrimId, 1, {
+        teamName: "Team Bravo",
+        ownerUserId: OTHER,
+        members: [OTHER],
+      }),
+    ]);
+
+    const winners = [first, second].filter((slot) => slot !== null);
+
+    expect(winners).toHaveLength(1);
+
+    // The slot has exactly one owner, and it is the winner's.
+    const stored = await getSlot(winners[0]?.id ?? "");
+
+    expect(stored?.ownerUserId).toBe(winners[0]?.ownerUserId);
+    expect(stored?.members).toEqual([winners[0]?.ownerUserId]);
+
+    // The loser wrote nothing: no team rows of its own.
+    const rows = await db
+      .select({ userId: slotMembers.userId })
+      .from(slotMembers)
+      .where(eq(slotMembers.slotId, winners[0]?.id ?? ""));
+
+    expect(rows).toHaveLength(1);
+  });
+
   it("leaves the other slots alone", async () => {
     await claimSlot(scrimId, 1, {
       teamName: "Team Alpha",
@@ -210,14 +275,18 @@ describe("the claim", () => {
 
 describe("the release statement", () => {
   it("is one conditional UPDATE that names the owner", () => {
-    const statement = buildReleaseStatement("00000000-0000-0000-0000-000000000000", OWNER);
+    const statement = buildReleaseStatement(
+      db,
+      "00000000-0000-0000-0000-000000000000",
+      OWNER,
+    );
 
     const { sql: text, params } = statement.toSQL();
 
     expect(text).toContain('update "slots"');
-    expect(text).toContain('"state" = $');
-    expect(text).toContain('"owner_user_id" = $');
-    expect(text).toContain('"id" = $');
+    expect(text).toContain('"state" = ?');
+    expect(text).toContain('"owner_user_id" = ?');
+    expect(text).toContain('"id" = ?');
     expect(params).toContain(OWNER);
     expect(text).not.toContain("select");
   });
@@ -286,6 +355,92 @@ describe("the last-slot rule", () => {
     expect(
       await countUserSlotsInScrim(scrimId, OWNER, first?.id ?? ""),
     ).toBe(0);
+  });
+});
+
+describe("the ID-Pass transfer", () => {
+  it("replaces the member list", async () => {
+    // BUG-9: the source removed the captain from the member list **in
+    // memory only** and never wrote it back, so the database kept
+    // listing the old captain.
+    const slot = await claimSlot(scrimId, 1, {
+      teamName: "Team Alpha",
+      ownerUserId: OWNER,
+      members: [OWNER, TEAMMATE],
+    });
+
+    const transferred = await transferSlot(slot?.id ?? "", TEAMMATE, [
+      TEAMMATE,
+    ]);
+
+    expect(transferred?.ownerUserId).toBe(TEAMMATE);
+    expect(transferred?.members).toEqual([TEAMMATE]);
+
+    // The old captain is gone from the table, not just from the
+    // record.
+    const rows = await db
+      .select({ userId: slotMembers.userId })
+      .from(slotMembers)
+      .where(eq(slotMembers.slotId, slot?.id ?? ""));
+
+    expect(rows.map((row) => row.userId)).toEqual([TEAMMATE]);
+
+    // ...and the slot reads back that way too.
+    const stored = await getSlot(slot?.id ?? "");
+
+    expect(stored?.members).toEqual([TEAMMATE]);
+  });
+});
+
+describe("the fake-tag check", () => {
+  it("finds a player who is already on another slot", async () => {
+    const slot = await claimSlot(scrimId, 1, {
+      teamName: "Team Alpha",
+      ownerUserId: OWNER,
+      members: [OWNER, TEAMMATE],
+    });
+
+    const matches = await findFakeTagMatches(scrimId, [TEAMMATE]);
+
+    expect(matches.map((match) => match.id)).toEqual([slot?.id]);
+    expect(matches[0]?.members).toEqual([OWNER, TEAMMATE]);
+  });
+
+  it("does not fire for a player who is on no slot", async () => {
+    await claimSlot(scrimId, 1, {
+      teamName: "Team Alpha",
+      ownerUserId: OWNER,
+      members: [OWNER, TEAMMATE],
+    });
+
+    expect(await findFakeTagMatches(scrimId, ["444444444444444444"])).toEqual(
+      [],
+    );
+  });
+
+  it("excludes the slot being checked", async () => {
+    const slot = await claimSlot(scrimId, 1, {
+      teamName: "Team Alpha",
+      ownerUserId: OWNER,
+      members: [OWNER, TEAMMATE],
+    });
+
+    // The slot is not a fake tag of itself.
+    const matches = await findFakeTagMatches(scrimId, [TEAMMATE], slot?.id);
+
+    expect(matches).toEqual([]);
+  });
+
+  it("does not fire for a free slot", async () => {
+    await claimSlot(scrimId, 1, {
+      teamName: "Team Alpha",
+      ownerUserId: OWNER,
+      members: [OWNER, TEAMMATE],
+    });
+
+    await releaseSlot((await getSlotByNum(scrimId, 1))?.id ?? "", OWNER);
+
+    expect(await findFakeTagMatches(scrimId, [TEAMMATE])).toEqual([]);
   });
 });
 

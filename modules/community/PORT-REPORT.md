@@ -254,11 +254,14 @@ enforced.
     description used the top-three rows for both the count and the sum; the
     totals are counted over every tag now.
 11. **The auto-role toggle was a read-modify-write** — the source read the
-    row, chose `ARRAY_APPEND` or `ARRAY_REMOVE` and wrote it back; it is one
-    `INSERT … ON CONFLICT DO UPDATE` statement now, so two moderators
-    clicking at once cannot lose a role.
+    row, chose `ARRAY_APPEND` or `ARRAY_REMOVE` and wrote it back. The
+    roles are a join table now (`autorole_roles`, one row per guild, kind
+    and role), and the toggle is an insert that conflicts with the unique
+    constraint or a delete that does not: the database answers "is it
+    there already?" instead of a read, so two moderators clicking at once
+    cannot lose a role.
 12. **The tag usage counter was a read-then-write** — it is an atomic
-    `UPDATE tags SET usage = usage + 1` (S6, query 6).
+    `usage = usage + 1` in one statement (S6, query 6).
 
 **Preserved deliberately:** the NSFW rule for a snipe (an NSFW-channel snipe
 is not shown in a non-NSFW channel); the reminder is delivered to the channel
@@ -312,18 +315,21 @@ is recorded here rather than silently changed.
 | `retention.test.ts` | the retention against the live database: an unused tag is pruned, a used or recently edited tag is kept, and a fired reminder leaves no row behind |
 | `stats.test.ts` | the usage-log statistics, against the live database: the per-member counts, the per-owner counts, the window-function totals, the atomic counter |
 | `tags.test.ts` | the tag storage rules against the live database: the canonical name, the case-insensitive lookup, the unique constraint refusing a name that differs only in case, the ownership rules |
-| `repo.test.ts` | the hand-written SQL against the live database: the atomic auto-role toggle, the snipe upsert, the job rows |
+| `repo.test.ts` | the statements that are not plain reads, against the live database: the atomic auto-role toggle and the races it survives, the case-insensitive tag search, the atomic usage counter, the snipe upsert, the job rows |
 | `jobs.test.ts` | the job payloads; that each event means one thing; that the daily row is **a row in the `jobs` table**, armed at startup and re-armed by itself, and never a timer |
 
 The database-backed areas use ids no real row can have and clean up after
 themselves. `repo.test.ts` **caught a real bug in my own SQL**: the
 `ON CONFLICT DO UPDATE` clause needed the column qualified with the table
 name, because an unqualified name is ambiguous between the row being updated
-and the row being inserted (`column reference "humans" is ambiguous`).
+and the row being inserted (`column reference "humans" is ambiguous`). It
+also **proved the two atomic statements by breaking them**: turning the
+usage counter into a read-modify-write loses nineteen of twenty counts, and
+turning the toggle into one loses the role it was adding.
 
 `mentions.test.ts` and `quota.test.ts` need no environment: the service and
 the repository are mocked, so the "does not notify" proof runs on a machine
-without Postgres.
+without a database at all.
 
 ---
 

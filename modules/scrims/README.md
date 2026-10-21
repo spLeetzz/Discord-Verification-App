@@ -199,6 +199,30 @@ The rules that follow from that:
 The import direction is one-way (scrims → slots), so there is no
 cycle.
 
+## Where the lists live
+
+Postgres has arrays and SQLite does not, so a column that holds a list
+cannot be written in a dialect both engines understand. Every list of
+ids is normalised into a join table, and `repo.ts` is the only place
+that knows it:
+
+| What | Table | Domain type |
+|---|---|---|
+| the team of a slot | `slot_members` | `SlotRecord.members: string[]` |
+| the team of a reservation | `reserved_slot_members` | `ReservedSlotRecord.members: string[]` |
+| the team of a ban | `banned_team_members` | `BannedTeamRecord.members: string[]` |
+| the days a scrim opens on | `scrim_open_days` | `ScrimRecord.openDays: Weekday[]` |
+| what the autoclean pass removes | `scrim_autoclean` | `ScrimRecord.autoclean: AutocleanKind[]` |
+
+**The domain types still hold arrays.** The array is the shape the
+application sees; the join table is only how it is stored. Nothing
+above `repo.ts` knows the difference.
+
+The containment checks are `CHECK` constraints on the join tables —
+`scrim_open_days.day in (the seven weekdays)` and
+`scrim_autoclean.kind in ('channel', 'role')` — so the database refuses
+a value the TypeScript type would not allow.
+
 ## Slots (D14)
 
 A slot is a **row** in the `slots` table with a `state` column. There
@@ -218,7 +242,7 @@ A free slot is a row, not an absence. "How many are free" is
 
 ```sql
 UPDATE slots
-   SET state = 'claimed', team_name = $3, owner_user_id = $4, members = $5
+   SET state = 'claimed', team_name = $3, owner_user_id = $4
  WHERE scrim_id = $1 AND num = $2 AND state = 'free'
  RETURNING id;
 ```
@@ -228,8 +252,20 @@ source protected this with a module-global `asyncio.Lock` that died
 with the process, so two users could own one slot. The database
 enforces the invariant here.
 
+The team is not a column of the slot: it is a row per member in
+`slot_members`, written in the **same transaction** as the claim and
+only after the claim won. There is no read-modify-write of the member
+list anywhere.
+
 When the claim loses, the service re-reads the slot and tries the next
 free number.
+
+**The in-process mutex.** SQLite has one writer, so two transactions
+that overlap cannot both hold the write lock — the second one fails
+with `SQLITE_BUSY` instead of waiting. The area's writes are therefore
+serialised by a mutex (`withLock`). The mutex is **not** what makes the
+claim exclusive: the conditional `UPDATE` is. Two claims of one slot
+still race inside the mutex, and the loser still updates zero rows.
 
 ### The numbering
 
@@ -259,7 +295,7 @@ the same eight checks, in the same order.
 | 5 | Required lines | `no_lines` | **Always.** |
 | 6 | One registration per person | `multiregister` | **Always.** |
 | 7 | Duplicate team name | `duplicate_name` | **Always.** The name compared is the one `core/team-name.ts` derives. |
-| 8 | Duplicate / fake tags | `fake_tag` | **Always.** The overlap of the mentioned ids with `slots.members`. |
+| 8 | Duplicate / fake tags | `fake_tag` | **Always.** The join of the mentioned ids with `slot_members`. |
 
 **Only the two mention checks depend on `required_mentions`.** Every
 other check runs whatever the scrim asks for.
@@ -310,14 +346,27 @@ guard cannot be wrapped in a condition again.
 
 ### The fake-tag check
 
-The source ran a raw SQL query with an array-overlap operator against a
-schema-qualified join table. Ours is a typed query over one table:
+The source ran a raw SQL query with an array-overlap operator
+(`$2 && SLOTS.MEMBERS`) against a schema-qualified join table. Ours is
+a **join** against `slot_members`:
 
 ```ts
-sql`${slots.members} && ARRAY[${sql.join(ids.map((id) => sql`${id}`), sql`, `)}]::text[]`
+db
+  .selectDistinct({ slot: slots })
+  .from(slots)
+  .innerJoin(slotMembers, eq(slotMembers.slotId, slots.id))
+  .where(and(
+    eq(slots.scrimId, scrimId),
+    eq(slots.state, "claimed"),
+    inArray(slotMembers.userId, ids),
+    exceptSlotId ? ne(slots.id, exceptSlotId) : undefined,
+  ));
 ```
 
-Every id is still a bind parameter.
+Every id is still a bind parameter, and the join is faster than the
+operator was — the index on `slot_members.user_id` does the work. A
+slot is never a fake tag of itself, so the slot being checked is
+excluded.
 
 ### The message is never mutated
 

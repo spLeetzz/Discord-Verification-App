@@ -6,8 +6,9 @@ been **deleted** — see §10. Everything lives in `modules/identity/` and
 `commands/esports/`.
 
 - `npm run typecheck` — **clean for this area** (zero errors in
-  `modules/identity/` and `commands/esports/`).
-- `npm test` — **216 tests in this area, all passing** (12 files).
+  `modules/identity/` and `commands/esports/`, apart from `repo.ts`,
+  which the SQLite port is in the middle of changing).
+- `npm test` — **226 tests in this area, all passing** (12 files).
 - `modules/identity/README.md` — the interface, the rules, the state
   machines, the premium gates, the bugs.
 - `modules/identity/ROUTING-REPORT.md` — the one-prefix routing of the
@@ -136,8 +137,8 @@ sleep.
 
 | Not ported | Why |
 |---|---|
-| The remote OCR service | It is not in the source repository and cannot be run (D20). The port ships the local Tesseract provider and keeps the HTTP adapter for a deployment that has the service. |
-| Python's `imagehash` | Not available here. `modules/ssverify/ocr/hash.ts` is a port of the two functions the feature used, bit-exact with `imagehash` 4.x, so the threshold of 7 still means what it meant. |
+| The remote OCR service | It is not in the source repository and cannot be run (D20). It is now the **only** engine: the port ships the HTTP adapter for it and **no local fallback**, so a deployment without `OCR_PROVIDER_URL` has no OCR at all — the feature is there, and it refuses every screenshot. See [the OCR switch](#9-the-ocr-switch). |
+| Python's `imagehash` | Not available here. The hashes come from the OCR service, and `modules/ssverify/ocr/hash.ts` holds the comparison (a Hamming distance over a 64-bit hash), so the threshold of 7 still means what it meant. |
 | `auto_now` | Replaced by a plain nullable timestamp written only by the refresh path (B16). |
 | `dict(self.record)` as an update payload | An explicit field list (B18). |
 | The `wait_for("message")` inputs | Modals and select menus (D17). |
@@ -166,14 +167,15 @@ One line each. The decision log's numbers are in brackets.
 ### Three more changes the OCR engine forced
 
 The source's rules were calibrated against a remote OCR service that is
-not in its repository. This port runs the local Tesseract provider, and
-the two read a screenshot differently. These are not in the decision log's
-bug list — they are consequences of D20 that had to be decided here.
+not in its repository. This port reads the screenshot with a remote service
+too, and the two read a screenshot differently enough that these three
+changes had to be decided here. They are not in the decision log's bug
+list — they are consequences of D20.
 
 | Change | Why |
 |---|---|
 | The page-name check accepts up to **two** stray characters inside the name. | An icon that the engine reads as a character *between* two words ("Team \| Phoenix" → `team\|phoenix`) broke a check a human would pass. The name is matched in three passes: as it is, with the punctuation stripped, and with a bounded-subsequence tolerance. A name shorter than four characters is never matched with noise. |
-| The literal button checks are **case-insensitive** word matches. | Tesseract does not guarantee the casing the screen shows. They still refuse `SUBSCRIBED` and `Following`, exactly as Quotient's trailing space did. |
+| The literal button checks are **case-insensitive** word matches. | An engine does not guarantee the casing the screen shows. They still refuse `SUBSCRIBED` and `Following`, exactly as Quotient's trailing space did. |
 | The raw text is used for the literals and the normalised text for the contains-checks. | `OcrResult.text` has its whitespace stripped, which destroys `"SUBSCRIBE "`. `OcrResult.rawText` keeps it, so both sides of a contains-check are normalised with the *same* function. |
 
 ---
@@ -189,18 +191,20 @@ bug list — they are consequences of D20 that had to be decided here.
 | The order of the tokens | The order they appear in the message. | The source's single `findall` preserved the order; the port's first cut did not, and the reply listed the ids before the names. |
 | The tag-check counts | Only **user** mentions. | The source counted every mention, and in discord.py that includes role mentions. A role is not a teammate. |
 | The duplicate check's order | The member's own submissions first, then "the same picture, whoever submitted it". | The source's order. |
-| The malformed hash | It raises `MalformedHashError` and names the hash that is malformed. | A stored hash that cannot be compared must not compare as "a different picture". The error names the *stored* hash, not the candidate's — the first cut named the wrong one, and the test caught it. |
+| The malformed hash | The check is **total**: it answers with a decision, never an exception. The member's own corrupt row **refuses** the submission; somebody else's corrupt row is **reported and passed over**. | A stored hash that cannot be compared must not compare as "a different picture". Refusing everywhere would let one bad row block every member of the setup, so the refusal is scoped to the member whose own history is broken — and every corrupt row is reported with the row id, so it can be cleaned up. |
 | The channel cache | `core/channel-cache.ts` (D21), with **three** instances. | The log puts the shared cache in `core/`, and the scrims area already uses it. The three sets stay apart, because a listener that finds no record for a cached channel removes that channel from the cache. |
 | The command adapters | One file per command, in `commands/esports/`. | The loader reads one command per file. See §1. |
 
 ### One thing the log asked for that is not done
 
 D20 says the duplicate threshold "is a config value, not a constant". It
-**is** a parameter of the check (`findDuplicate(candidate, stored,
+**is** a parameter of the check (`checkDuplicate(candidate, stored,
 threshold)`) and the default comes from the hashing module
-(`DEFAULT_DUPLICATE_THRESHOLD`), but it is not yet read from a
-per-guild configuration row. The `ss_configs` table has no column for it.
-That is the one item of D20 this area leaves open.
+(`DEFAULT_DUPLICATE_THRESHOLD`). The `ss_configs` table has a
+`duplicate_threshold` column now, but the repository does not read it yet,
+so the per-guild value is still unused. That is the one item of D20 this
+area leaves open — the column arrives with the database port, and the
+wiring belongs with it.
 
 ---
 
@@ -250,16 +254,16 @@ the repository uses.
 
 ## 8. The tests
 
-`npx vitest run modules/identity` — 216 tests in 12 files.
+`npx vitest run modules/identity` — 226 tests in 12 files.
 
 | File | Tests | What it covers |
 |---|---|---|
 | `easytag.test.ts` | 31 | The full tag the source could not read, the `\b` bug, the email address, the resolution of all three shapes, the order of the tokens. |
 | `tagcheck.test.ts` | 13 | The two guards, their order, the "no mentions required" channel, and the team name the reply shows. |
-| `duplicate.test.ts` | 15 | The threshold **at** and **around** the boundary, the two kinds of duplicate, the absent hash, the malformed hash. |
+| `duplicate.test.ts` | 15 | The threshold **at** and **around** the boundary, the two kinds of duplicate, the absent hash, and the hashes that cannot be compared. |
 | `verification.test.ts` | 36 | Every type's rules, against text this port's OCR provider actually produces, plus the tolerant name match and the button checks. |
 | `service.test.ts` | 20 | The four premium gates — nothing is written when a gate refuses — the two rate limits with an injected clock, and the guild scope of a setup. |
-| `ocr.test.ts` | 17 | The boot decision (forced on, forced off, automatic) and the refusal when the OCR is off — including that **nothing is stored**. |
+| `ocr.test.ts` | 27 | The boot decision (forced on, forced off, automatic) and the **effective** state of the provider; the refusal when the OCR is off, when the service is down and when the service sends rubbish — including that **nothing is stored**; the URL that reaches the service; and the stored hash that cannot be compared. |
 | `commands.test.ts` | 10 | The three commands serialise through `toJSON()`, the adapter files are found, each name registers exactly once, and `/ssverify` answers ephemerally. |
 | `ignore-role.test.ts` | 8 | The ignore role is compared by id, not by name. |
 | `cache.test.ts` | 8 | The three sets stay apart, and a database that is down does not empty a working cache. |
@@ -284,15 +288,25 @@ itself is the OCR area's (`modules/ssverify/ocr/`); this area owns the
 |---|---|---|
 | the decision | `ocr.ts` — `decideOcr()` | Made **once, at boot**: `OCR_ENABLED` when it is set, otherwise automatic (there is at least one `ss_configs` row). |
 | `hasSsConfig()` | `repo.ts` | The automatic half's one query: is there at least one setup? |
+| the effective state | `ocr.ts` — `isOcrAvailable()` | Asks the **provider** it got, not the flag it passed in. |
 | the refusal | `service.ts` — `processSubmission()` | Refuses the submission when the OCR is off, before the duplicate check and before the rules, and stores nothing. |
+| the refusal of a failed read | `ocr.ts` — `analyzeScreenshot()` | The service is down, it answers with rubbish, or it sends a hash nobody can compare: the screenshot is refused and nothing is stored. A decision, not a crash. |
 
-Three decisions that were not in the brief:
+**The provider is the only engine.** The local provider is gone, so a
+deployment that configures no `OCR_PROVIDER_URL` has no OCR at all: the
+feature is there, and it refuses every screenshot. That is the same
+fail-closed behaviour the area always had, with the default made
+explicit — but the feature **needs a remote service to be useful**, and
+that is worth saying out loud.
+
+Four decisions that were not in the brief:
 
 | Decision | What | Why |
 |---|---|---|
 | `getOcrProvider()` **throws** when the decision has not been made | The provider is not built on first use any more. | A provider built with the wrong setting would be the wrong provider for the whole run of the bot. The call sites need it synchronous, so the alternative — awaiting the decision — was not available. |
-| The decision is made **before** the channel cache is loaded | `warmIdentity()` does the decision, then the cache, then the warm-up. | The cache is what makes a screenshot-verification channel live, so the answer has to be there before the first screenshot can be processed. |
+| The decision is made **before** the channel cache is loaded | `warmIdentity()` does the decision, then the cache. | The cache is what makes a screenshot-verification channel live, so the answer has to be there before the first screenshot can be processed. |
 | A database that is down at boot switches the OCR **off** | The decision never throws; the failure is logged and the provider is the switched-off one. | A screenshot that cannot be checked has to be refused, and the bot has no way of knowing whether one was expected. |
+| The **provider** decides whether the OCR runs, not the flag | `decideOcr()` returns `!isOcrDisabled(provider)`, and the boot log says what is true. | `createOcrProvider({ enabled: true })` still hands back the switched-off provider when no service is configured. A log that said "the OCR is on" would send an operator hunting for a bug that is not there. |
 
 **The refusal is the important half.** "The rules reject an empty text" is
 not enough: `VERIFICATION_RULES.any_ss` is empty, and a `loco` or
@@ -304,6 +318,11 @@ nothing — never reach the database.
 The claim that "every text rule rejects an empty text" was in this area's
 `ocr.ts` and `README.md`. It is not true for every setup, and it has been
 corrected in both.
+
+**The image is a URL, not a buffer.** The service fetches the picture
+itself, so `SubmittedImage` carries the attachment's CDN URL and the bot
+never downloads it: no bandwidth, no memory, and no failed download that
+could leave a member without an answer.
 
 ---
 

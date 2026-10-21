@@ -79,8 +79,22 @@ export interface SsConfig {
   readonly channelName: string;
   /** The link to that page or channel. */
   readonly channelLink: string;
-  /** The words a custom filter matches on. The first one is the name. */
+  /**
+   * The words a custom filter matches on.
+   *
+   * They live in their own table (`ss_config_keywords`), so the setup row
+   * does not carry them any more, and they come back in the order the
+   * rows were created.
+   */
   readonly keywords: readonly string[];
+  /**
+   * The Hamming distance at which two screenshots count as duplicates.
+   *
+   * The setup's **own** threshold (D20): a guild whose screenshots
+   * rescale differently may need a different one. `null` when the setup
+   * has no threshold of its own, and the global default is used then.
+   */
+  readonly duplicateThreshold: number | null;
   /** Whether the same screenshot may be submitted twice. */
   readonly allowSame: boolean;
   readonly ssType: ScreenshotType;

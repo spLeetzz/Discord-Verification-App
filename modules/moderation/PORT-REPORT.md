@@ -115,7 +115,7 @@ nothing can fall out of sync with Discord.
 
 **The key** of a lockdown:
 
-| Type | Key | `channel_id` | `role_id` | `channel_ids` |
+| Type | Key | `channel_id` | `role_id` | channels it covers |
 |---|---|---|---|---|
 | `channel` | guild + channel | the channel | — | the channel |
 | `guild` | guild | the channel the command was run in | — | every locked channel |
@@ -248,7 +248,7 @@ source while porting it.
 | 1 | `mod/views/role.py:35` | `await _.remove_roles(...) if self.take_role else await _.add_roles(...)` — **recorded as a bug, and that was wrong.** `ast.parse` on Python 3.14 gives `IfExp(test=…, body=Await(remove_roles), orelse=Await(add_roles))`: the `await` binds to each branch, because a conditional expression binds looser than `await`. The source's revert worked. | The port writes the same thing as an `if` over the action it recorded: an "add" is undone with a remove, a "remove" with an add. The behaviour is unchanged and correct; only the comment was corrected, because it said something untrue about Python. |
 | 2 | `mod/__init__.py:609` | `await Lockdown.get_or_none(...).first()` — `.first()` on a coroutine. **`unlock server` always raised** `AttributeError`. | The lookup is a query. `findLockdown(guildId, "guild")` returns the row or `null`, and the command says "The server is not locked." |
 | 3 | `mod/__init__.py:568-578` | `Lockdown.create(expire_time=duration.dt)` ran **before** the `if duration is None` check, so `lock server` without a duration crashed on `None.dt`. | The row is written with a null expiry, which the column allows. (See §4 for why the row is written at all.) |
-| 4 | `mod/__init__.py:736` | `discord.utils.get(ctx.guild.channels, name="maintenance-chat")` asks a **list** for an attribute — every channel has a name, so it never matched and **the maintenance channels were never deleted**. | The channels are deleted by the **ids the bot recorded when it created them**, and by nothing else. The ids live on the lockdown row, in `maintenance_channel_ids`, because a maintenance lockdown has no duration and so no job row to carry them. A channel that merely shares the name `maintenance-chat` is a moderator's own and is left alone. |
+| 4 | `mod/__init__.py:736` | `discord.utils.get(ctx.guild.channels, name="maintenance-chat")` asks a **list** for an attribute — every channel has a name, so it never matched and **the maintenance channels were never deleted**. | The channels are deleted by the **ids the bot recorded when it created them**, and by nothing else. The ids live in the `lockdown_maintenance_channels` join table, because a maintenance lockdown has no duration and so no job row to carry them. A channel that merely shares the name `maintenance-chat` is a moderator's own and is left alone. |
 | 5 | `mod/__init__.py:598`, `:726` | The unlock set `send_messages = True` / `read_messages = True` **unconditionally**, so a channel that had been write-locked before the lockdown was silently opened by the unlock. | The previous state is **recorded** when the lockdown is applied and restored **exactly** when it is lifted. The record distinguishes "no overwrite at all" from "an explicit allow", "an explicit deny" and "inherit". |
 | 6 | `mod/__init__.py:54` | The `clear` group declared a required positional argument alongside its subcommands — ambiguous, and the `None` fallbacks were dead code. | The group is split: `/clear-amount`, `/clear-user`, and the filter subcommands of `/clear`. |
 | 7 | `mod/utils.py:38` | `ctx.channel.purge(..., filter_old=True)` **swallowed the messages Discord refused to delete** (anything older than fourteen days) and reported a smaller number than it had been asked for. | The old messages are filtered out *before* the delete, counted, and reported: "42 messages were removed. ⚠️ 13 matching messages are older than 14 days and could not be deleted." The same report counts the pinned messages and the ones that failed. |
@@ -345,10 +345,100 @@ None of these block the area; the code is written against them.
 | `purge.test.ts` | which messages each filter selects, the fourteen-day cutoff (including the exact boundary), the batching into hundreds, the three-character minimum |
 | `reason.test.ts` | the reason format, the 512-character cap, that the prefix counts against it, that a longer name means a shorter budget |
 | `lock-state.test.ts` | the transitions and the guards, including the refusal to double-lock, the refusal to unlock a channel of a server lockdown, and the "how long is left" message |
-| `lockdown.test.ts` | the lockdown against the live database: the prior state round-trips through `lockdowns.prior_state`, a lockdown with no duration writes no `jobs` row, one with a duration writes exactly one, that row's payload carries no permission state, the unlock puts an existing overwrite back to exactly what it was and removes one that did not exist, the double-lock guard refuses a second lock with and without a duration, the key of the subject is written with the row, two lockdowns of the same subject at once leave one row and one refusal, and the rows come back in a fixed order |
+| `lockdown.test.ts` | the lockdown against the live database: the prior state round-trips through `lockdowns.prior_state`, a lockdown with no duration writes no `jobs` row, one with a duration writes exactly one, that row's payload carries no permission state, the unlock puts an existing overwrite back to exactly what it was and removes one that did not exist, the double-lock guard refuses a second lock with and without a duration, the key of the subject is written with the row, two lockdowns of the same subject at once leave one row and one refusal, the channels a lockdown covers are rows of `lockdown_channels` and go with it, a server lockdown covers and releases exactly its own channels, and the rows come back in a fixed order |
 | `permissions.test.ts` | the restore-previous-state logic: no overwrite → remove, explicit allow → allow, explicit deny → deny, inherit → inherit |
 | `hierarchy.test.ts` | the actor's and the bot's checks, the guild-owner exemption, that the bot has none |
-| `blocklist.test.ts` | that a user and a guild with the same id do not collide, and that a failed refresh does not unblock anybody |
+| `blocklist.test.ts` | that a user and a guild with the same id do not collide — in the cache and in the database — and that a failed refresh does not unblock anybody |
 | `roles.test.ts` | the mention parsing for the role and member commands |
 
 118 tests in this area; all passing.
+
+---
+
+## 8. The SQLite port
+
+The database layer moved from Postgres to SQLite, and the schema changed
+underneath this area. What changed here, and why.
+
+### The channels a lockdown covers are rows
+
+`lockdowns.channel_ids` was a `text[]`. SQLite has no arrays, so the
+schema holds the list in a join table:
+
+| Table | One row per | Columns that matter |
+|---|---|---|
+| `lockdown_channels` | (lockdown, channel) | `lockdown_id`, `channel_id` |
+| `lockdown_maintenance_channels` | (lockdown, channel) | `lockdown_id`, `channel_id` |
+
+Both are `ON DELETE CASCADE` on the lockdown, and `repo.ts` deletes the
+rows itself in the same transaction as the lockdown, so the cleanup does
+not depend on the foreign-key pragma being on.
+
+**The write is still one transaction.** The lockdown row, the rows of the
+channels it covers, the rows of the maintenance channels it created and
+the job row are written together or not at all. A read-modify-write of a
+channel list in JavaScript would reintroduce the race the join table is
+there to remove: two moderators could both read "no channels" and both
+write.
+
+**The order of the channels is the channel id's.** The join table has no
+column for the order the channels were locked in, so the rows come back
+sorted by channel id — a fixed order, the same on every read. Nothing in
+the module depends on the order the channels were locked in.
+
+### The conflict target survived
+
+`lockdowns.lock_key` and the unique index on it are still there, and the
+insert is still `ON CONFLICT (lock_key) DO NOTHING`. The dialect change
+did not touch it: the conflict target is expressed as a drizzle column,
+not as SQL, so it is the same on both engines.
+
+The second lockdown of a subject still gets no row, and the loser is
+still told the subject is already locked.
+
+### One statement at a time
+
+SQLite has one writer, and the libsql driver gives a transaction a
+connection of its own: two transactions that overlap in one process do
+not queue, they collide — the second fails with `SQLITE_BUSY` instead of
+waiting. `repo.ts` puts a small in-process gate in front of the area's
+database work.
+
+The gate does **not** decide who wins a race. The loser is still refused
+by the unique constraint, and that refusal is what the moderator is told.
+Without the gate the loser would be refused by the *driver*, with an
+error instead of a message.
+
+### The rest of the shape change
+
+- `uuid` → `text` with the id generated in the app: the ids of the
+  lockdown, the channel rows and the job row are `crypto.randomUUID()`.
+- `timestamptz` → `integer` epoch ms: `expire_time` and `expires_at` are
+  still `Date`s on the way in and out. They are the **same instant** —
+  the same `Date` is written to both — because the scheduler fires the
+  job row when `expires_at` has passed.
+- `boolean` → `integer` 0/1: the area reads no boolean column, so
+  nothing changed.
+- `jsonb` → `text` holding JSON: `prior_state` and the job payload are
+  still parsed objects. `LockdownJobPayload` became a type alias rather
+  than an interface, because a JSON column takes a
+  `Record<string, unknown>` and an interface has no index signature.
+- `now()` in raw SQL → an app-computed parameter: the area's raw SQL has
+  no `now()` in it, and the expiry is the `Date` the command was given.
+
+### The block list
+
+The `blocklist` table and the key of the id **and** the kind are intact:
+the unique constraint is on `(block_id, block_id_type)`, and the delete
+filters on both. The insert now names its conflict target
+(`ON CONFLICT (block_id, block_id_type) DO NOTHING`) so the key is
+written down where the write is.
+
+### The tests
+
+The three files that talk to the database each get a **file of their
+own** in the system temporary directory. SQLite has one writer, so two
+test files that shared a database file fought over it and failed with
+`SQLITE_BUSY`. The variable is set with `vi.hoisted`, because the client
+reads `DB_FILE` when it is imported and applies the migrations to it as
+it goes.

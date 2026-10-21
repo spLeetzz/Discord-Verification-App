@@ -25,13 +25,19 @@ import type { EmbedTemplate } from "./template.js";
 export type { AutocleanKind, ScrimStatus, SlotState, Weekday };
 export type { RegDeny };
 
-/** The two emoji a scrim uses for its accept and reject reactions. */
-export interface ScrimEmojis {
+/**
+ * The two emoji a scrim uses for its accept and reject reactions.
+ *
+ * A **type alias**, not an interface: the column is a JSON document
+ * (`jsonCol<Record<string, unknown>>`), and only an object type — an
+ * interface has no implicit index signature — can be written to one.
+ */
+export type ScrimEmojis = {
   /** The tick a successful registration gets. Defaults to `✅`. */
   readonly tick: string;
   /** The cross a refused registration gets. Defaults to `❌`. */
   readonly cross: string;
-}
+};
 
 /** The registration countdown configuration (Quotient's `cdn` column). */
 export interface ScrimCountdown {

@@ -358,25 +358,16 @@ export async function pruneSnipes(days = 10): Promise<number> {
  * Adds a role to an auto-role list, or removes it when it is already
  * there.
  *
- * The whole change is one statement, so two moderators clicking at the
- * same moment cannot lose a role.
+ * The whole change is decided by the database — the insert conflicts or
+ * it does not — so two moderators clicking at the same moment cannot lose
+ * a role, and neither can they be told the wrong thing about it.
  */
 export async function toggleAutoroleRole(input: {
   guildId: string;
   kind: AutoroleKind;
   roleId: string;
 }): Promise<{ roles: string[]; added: boolean }> {
-  const before = await repo.findAutoroleConfig(input.guildId);
-
-  const wasThere = (before?.[input.kind] ?? []).includes(input.roleId);
-
-  const roles = await repo.toggleAutoroleRole(
-    input.guildId,
-    input.kind,
-    input.roleId,
-  );
-
-  return { roles, added: !wasThere };
+  return repo.toggleAutoroleRole(input.guildId, input.kind, input.roleId);
 }
 
 /** The auto-role config of a guild. */

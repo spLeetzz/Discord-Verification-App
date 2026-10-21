@@ -520,7 +520,7 @@ three are listed underneath them.
 | The daily sweep is the `community_daily` event, not a kind of `autopurge` | Quotient had no daily sweep — it pruned the snipes once at startup. A daily maintenance sweep is not an auto-purge, and a reader of the `jobs` table should not have to know that one event name can mean two unrelated things. |
 | An embed tag is created with `/tag create … embed:true` and a JSON body | the source could only make one by writing to the database by hand; the `make` command was commented out. The subcommand list did not grow — the option did. |
 | The auto-purge delay uses `core/time.ts`'s `parseDuration` | the source's `simple_convert` understood `s\|m\|h\|d`; the port understands the same units and weeks as well. The bounds are the source's: more than five seconds, at most seven days. |
-| The auto-role toggle is one statement | the source read the row, chose `ARRAY_APPEND` or `ARRAY_REMOVE` and wrote it back — a read-modify-write that races two moderators clicking at once. |
+| The auto-role toggle is decided by the database | the source read the row, chose `ARRAY_APPEND` or `ARRAY_REMOVE` and wrote it back — a read-modify-write that races two moderators clicking at once. The roles are a join table now, and the toggle is an insert that conflicts or a delete that does not: no read, so no window. |
 | The reminder is posted in the channel it was created in | as in the source. It is not a DM: a DM is a private inbox the user may not be looking at. When the channel is gone, the reminder is dropped and the drop is logged. |
 | The snipe names the author instead of mentioning them | the source used the author's name. A mention would ping somebody for a message they deleted. |
 | A reply in this area cannot notify anybody | a tag's body is member text posted as message content. Without the rule, a member could store `@everyone` in a tag and have the bot ping the whole server — a permission the member does not have and the bot does. |
@@ -546,8 +546,8 @@ npm test
 | `retention.test.ts` | the retention, against the live database: an unused tag is pruned, a used or recently edited tag is kept, and a fired reminder leaves no row behind |
 | `stats.test.ts` | the usage-log statistics, against the live database |
 | `tags.test.ts` | the tag storage rules against the live database: the canonical name, the case-insensitive lookup, the unique constraint, the usage counter, the ownership rules |
-| `repo.test.ts` | the hand-written SQL against the live database: the atomic auto-role toggle, the snipe upsert, the job rows |
+| `repo.test.ts` | the statements that are not plain reads, against the live database: the atomic auto-role toggle and the races it survives, the case-insensitive tag search, the atomic usage counter, the snipe upsert, the job rows |
 | `jobs.test.ts` | the job payloads, that each event means one thing, and that the daily row is **a row in the `jobs` table** — armed at startup, re-armed by itself, and never a timer |
 
-The two database tests are skipped when Postgres is not reachable, so the
-unit tests still run on a machine without it.
+The database-backed tests run against a SQLite database the test runner
+creates for them, so they need no server and no setup.

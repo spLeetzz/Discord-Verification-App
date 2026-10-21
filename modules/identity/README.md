@@ -68,9 +68,9 @@ import {
 - `registerIdentity(client, router?)` attaches the `MessageCreate`
   listener and, when a router is given, wires the panel's buttons, select
   menus and modals into it.
-- `warmIdentity()` decides whether the OCR runs, loads the channel cache
-  and warms the OCR provider up. The manager calls it on `ClientReady`.
-- `shutdownIdentity()` releases the OCR worker and the wizard's draft
+- `warmIdentity()` decides whether the OCR runs and loads the channel
+  cache. The manager calls it on `ClientReady`.
+- `shutdownIdentity()` releases the OCR provider and the wizard's draft
   store.
 
 ### The service
@@ -235,9 +235,10 @@ You must subscribe [`Team Phoenix`](https://…) to get verified.
 
 #### How the rules behave against **this** port's OCR engine
 
-The port runs the local Tesseract provider (`modules/ssverify/ocr/`),
-not the remote service the source was calibrated against. The provider
-answers with two texts, and the rules read them differently:
+The port reads the screenshot with a Quotient-compatible **remote service**
+(`modules/ssverify/ocr/`) — the same shape the source was calibrated
+against, and the only engine there is. The provider answers with two
+texts, and the rules read them differently:
 
 - `OcrResult.text` — lower-cased, whitespace stripped. This is the
   source's `lower_text`, and it is what the contains-rules read.
@@ -275,13 +276,26 @@ The two literal button checks are also changed: they are case-insensitive
 word matches now, and they still refuse `SUBSCRIBED` and `Following` —
 exactly as Quotient's trailing space did.
 
-**A broken OCR rejects a screenshot — for most setups.** A provider that
-fails answers with an empty text, and most rule sets reject an empty text.
-But **not every one does**: `any_ss` has no rules at all, and a `loco` or
-`rooter` setup whose channel name is empty has none that look at the text
-either — for those, an empty text would be *accepted*. That is why the
-submission is refused **outright** when the OCR is known to be **off**
-rather than being left to the rules. See [the OCR provider](#the-ocr-provider).
+**These three changes were made against a local engine**, which read
+pictures differently from the service the source used. The port talks to
+a remote service again, so the engine does not force them any more — but
+they stay, because each of them is safe against any engine: the tolerant
+name match accepts a picture the source would have refused (it can never
+refuse one the source accepted), the case-insensitive button check refuses
+a few pictures more than the source's exact `"SUBSCRIBE "` did, and the
+raw/normalised split is required by the normalisation itself.
+
+**A provider that fails refuses the screenshot outright.** The service is
+down, it answers with rubbish, or it sends a hash nobody can compare: the
+screenshot cannot be verified, so it is refused and **nothing is stored**.
+The rules are not asked at all. The switched-off provider is the same case
+for the same reason — it answers with an empty text, and most rule sets
+reject an empty text, but **not every one does**: `any_ss` has no rules
+at all, and a `loco` or `rooter` setup whose channel name is empty has
+none that look at the text either — for those, an empty text would be
+*accepted*. That is why the submission is refused **outright** when the
+OCR is known to be **off** rather than being left to the rules. See [the
+OCR provider](#the-ocr-provider).
 
 ### The duplicate check
 
@@ -296,10 +310,19 @@ The threshold is a parameter (D20), not a constant: it is only
 meaningful for a 64-bit hash, so it moves with the hash implementation
 rather than being baked into the comparison.
 
-A stored hash that is not a hash — a truncated row, a column that was
-written by an older version — raises `MalformedHashError` instead of
-comparing as "a different picture". A duplicate that hides itself is a
-duplicate that lets a member farm the role.
+**The check never throws.** A hash that is not sixteen hex characters
+cannot be compared, and a comparison that could not be made is not a
+comparison that clears the screenshot. The check answers with a decision
+instead of an exception:
+
+| What is broken | What happens |
+|---|---|
+| The **screenshot's own** hash (the service sent rubbish) | The screenshot is **refused**. A hash that cannot be compared verifies nothing. |
+| The **member's own** stored row | The submission is **refused** — the check cannot tell whether the member is repeating themselves. |
+| **Somebody else's** stored row | The row is **reported and passed over**. One bad row must not block every member of the setup. |
+
+Every corrupt row is reported with the setup, the row, the member and the
+broken value, so the operator can repair or delete it.
 
 ### The state machines
 
@@ -326,10 +349,20 @@ type rules → recorded → role granted`. The stored submissions are re-read
 after every accepted screenshot, so a second screenshot in the same
 message cannot be a duplicate of the first one.
 
+**One submission.** `attachments → rate limits → OCR → duplicate check →
+type rules → recorded → role granted`. The stored submissions are re-read
+after every accepted screenshot, so a second screenshot in the same
+message cannot be a duplicate of the first one.
+
 **One submission while the OCR is off.** `refused → nothing stored`. The
 refusal comes before the duplicate check and before the rules, because
 the rules cannot refuse it on their own — see [the OCR
 provider](#the-ocr-provider).
+
+**One submission the OCR could not read.** `refused → nothing stored`. The
+service is down, it answered with rubbish, or it sent a hash nobody can
+compare: the screenshot cannot be verified, so it is refused. The member
+gets an answer either way — a refusal is a decision, not a crash.
 
 ### The premium gates
 
@@ -384,23 +417,39 @@ The clock is injectable, so the tests do not have to sleep.
 `ocr.ts` owns the provider's **lifecycle**; the provider itself lives in
 `modules/ssverify/ocr/` and is not this area's to change.
 
-- One provider for the whole bot, so the Tesseract worker starts once.
+- One provider for the whole bot, so the calls stay serialised and only
+  one of them is ever shut down.
 - The **decision** whether the OCR runs at all, made **once at boot**.
-- `warmupOcr()` at boot, so the language model is downloaded at startup
-  rather than on the first screenshot of the day.
-- `shutdownOcr()` on exit, so the worker is terminated and the process
-  can go.
+- `shutdownOcr()` on exit, so the requests that are on the wire are
+  aborted and the process can go.
 
-`OCR_PROVIDER_URL` selects the Quotient-compatible remote service; when
-it is absent the local provider is used, which needs no key and no
-network.
+### There is no local engine
+
+The provider is a **remote service**. It does the text recognition *and*
+the hashing, and it **fetches the image itself** — so the image has to be
+a publicly reachable URL, and the bot never downloads the attachment.
+
+There is no Tesseract worker, no language model and no image library
+behind it, and **no local fallback**. A deployment that configures no
+service has no OCR at all.
+
+> **The feature needs a remote service to be useful.** Without
+> `OCR_PROVIDER_URL` the screenshot verification is **off**, and every
+> submission is refused. That is deliberate — it is the same fail-closed
+> behaviour the area has always had, made explicit — but it is not a
+> working feature: it needs a service.
+
+| Configuration | Provider | What happens |
+|---|---|---|
+| `OCR_PROVIDER_URL` set | the remote one | The screenshot's URL is sent to the service, and the answer is checked against the rules. |
+| `OCR_PROVIDER_URL` unset | the switched-off one | Every screenshot is refused. Nothing is stored. |
+| `OCR_ENABLED=false` | the switched-off one | Every screenshot is refused. Nothing is stored. |
 
 ### Switching the OCR off
 
 A deployment that does not use screenshot verification should not pay for
-OCR: the local provider starts a Tesseract worker, downloads a language
-model of about 15MB and costs two seconds per screenshot. The switch is
-made **here**, at boot, and it is made **once**:
+OCR, and a deployment that has no service configured has no engine to pay
+for at all. The switch is made **here**, at boot, and it is made **once**:
 
 | `OCR_ENABLED` | Decision |
 |---|---|
@@ -429,6 +478,22 @@ created *after* the boot does not switch the OCR on: the bot has to be
 restarted, or `OCR_ENABLED=true` has to be set. The area says so in the
 log when a setup is created while the OCR is off.
 
+### The provider is the last word
+
+`createOcrProvider({ enabled: true })` still hands back the switched-off
+provider when no service is configured, so the **flag that was passed in
+is not the state the bot runs in**. The area asks the provider it got:
+
+```ts
+const provider = createOcrProvider({ enabled });
+const running = !isOcrDisabled(provider);
+```
+
+`isOcrAvailable()` does exactly that, and `decideOcr()` returns the same
+thing. The log line at boot says what is **true** — "the OCR is on
+(http)" or "the OCR is off (disabled): no OCR service is configured" —
+and never the flag it was given.
+
 ### The refusal when the OCR is off
 
 The switched-off provider answers with an **empty text** and two hashes
@@ -446,11 +511,36 @@ duplicate check and before the rules run:
 It is a normal refusal, not a crash and not a silent pass. **Nothing is
 stored**: no `ss_submissions` row, and no hash — the hash of nothing
 never reaches the database. The message listener refuses before it even
-downloads the picture.
+asks the service to read the picture.
 
-A **broken** OCR is a different thing from a switched-off one: it answers
-with an empty text, which most rule sets reject. It is still not enough
-on its own, which is why the refusal above is about the OCR being *off*.
+### The refusal when the OCR fails
+
+A **broken** OCR is a different thing from a switched-off one: the
+service is down, it answers with rubbish, or it sends a hash nobody can
+compare. The screenshot cannot be verified, so it is **refused** — with
+the same message, because from the member's side the answer is the same:
+the bot cannot check this screenshot right now.
+
+The refusal is a **decision, not a crash**. `analyzeScreenshot()` never
+throws; it answers `{ ok: false, reason }` and the service turns that
+into a message and moves on to the next screenshot. **Nothing is stored.**
+
+### The image is a URL
+
+`SubmittedImage` carries the attachment's **URL**, not its bytes:
+
+```ts
+export interface SubmittedImage {
+  readonly url: string;      // the CDN link the service fetches
+  readonly channelId: string;
+  readonly messageId: string;
+}
+```
+
+The bot has no use for the bytes — the service fetches the picture
+itself — so it does not download it. A ten-megabyte attachment costs the
+bot nothing, and a failed download can no longer leave a member without
+an answer.
 
 ---
 
@@ -470,25 +560,27 @@ was found by a name substring), **B16** (the refresh cooldown read an
 `auto_now` column) and **B17** (a failed creation left the earlier
 groups behind).
 
-The three rules that changed because the **OCR engine** changed are
+The three rules that changed when the **OCR engine** changed are
 described under [the screenshot verification](#the-screenshot-verification)
 above: the tolerant page-name match, the case-insensitive literal button
-checks, and the split between the raw text and the normalised text.
+checks, and the split between the raw text and the normalised text. The
+port talks to a remote service again, so the engine does not force them
+any more — they stay because each of them is safe against any engine.
 
 ---
 
 ## The tests
 
-`npx vitest run modules/identity` — 216 tests in 12 files.
+`npx vitest run modules/identity` — 226 tests in 12 files.
 
 | File | What it covers |
 |---|---|
 | `easytag.test.ts` | The mention extraction, including the full tag the source could not read. |
 | `tagcheck.test.ts` | The two guards, their order, and the team name the reply shows. |
-| `duplicate.test.ts` | The threshold, the two kinds of duplicate, and the malformed hash. |
+| `duplicate.test.ts` | The threshold, the two kinds of duplicate, and the hashes that cannot be compared. |
 | `verification.test.ts` | Every type's rules, against text this port's OCR provider produces. |
 | `service.test.ts` | The premium gates (nothing is written when a gate refuses), the rate limits, and the guild scope of a setup. |
-| `ocr.test.ts` | The boot decision (forced on, forced off, automatic) and the refusal when the OCR is off — including that **nothing is stored**. |
+| `ocr.test.ts` | The boot decision (forced on, forced off, automatic) and the **effective** state of the provider; the refusal when the OCR is off, when the service is down, and when the service sends rubbish — including that **nothing is stored**; the URL that reaches the service; and the stored hash that cannot be compared. |
 | `commands.test.ts` | The three commands serialise, the adapter files register them, and `/ssverify` answers ephemerally. |
 | `ignore-role.test.ts` | The ignore role is compared by id. |
 | `cache.test.ts` | The three channel sets stay apart. |

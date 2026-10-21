@@ -21,9 +21,17 @@ import { eq, sql } from "drizzle-orm";
 import { ChannelType, Collection } from "discord.js";
 import type { Client, EmbedBuilder, Guild, TextChannel } from "discord.js";
 import { closeDatabase, db } from "../../db/client.js";
-import { banLogs, bannedTeams, jobs, scrims, slots } from "../../db/schema.js";
+import {
+  banLogs,
+  bannedTeams,
+  jobs,
+  scrims,
+  slotMembers,
+  slots,
+} from "../../db/schema.js";
 import { discordTimestamp } from "../../core/time.js";
 import { handleSlotsJob } from "./jobs.js";
+import { withBusyRetry } from "./test-db.js";
 import { BanMode } from "./types.js";
 import { punishSlots, unbanSlots } from "./views/slotlist.js";
 
@@ -107,54 +115,81 @@ function field(embed: EmbedBuilder | undefined, name: string): string | undefine
 
 /** Creates the fixture scrim, its slot and the ban log row. */
 async function seed(): Promise<void> {
-  const rows = await db
-    .insert(scrims)
-    .values({
-      guildId: GUILD_ID,
-      name: SCRIM_NAME,
-      status: "closed",
-      registrationChannelId: "900000000000000205",
-      slotlistChannelId: "900000000000000206",
-      roleId: "900000000000000207",
-      openTime: new Date(),
-      totalSlots: 1,
-      startFrom: 1,
-      hostId: "900000000000000208",
-      closedAt: new Date(),
-      matchTime: new Date(Date.now() + 3_600_000),
-    })
-    .returning({ id: scrims.id });
+  const rows = await withBusyRetry(() =>
+    db
+      .insert(scrims)
+      .values({
+        guildId: GUILD_ID,
+        name: SCRIM_NAME,
+        status: "closed",
+        registrationChannelId: "900000000000000205",
+        slotlistChannelId: "900000000000000206",
+        roleId: "900000000000000207",
+        openTime: new Date(),
+        totalSlots: 1,
+        startFrom: 1,
+        hostId: "900000000000000208",
+        closedAt: new Date(),
+        matchTime: new Date(Date.now() + 3_600_000),
+      })
+      .returning({ id: scrims.id }),
+  );
 
   scrimId = rows[0]?.id ?? "";
 
-  const slotRows = await db
-    .insert(slots)
-    .values({
-      scrimId,
-      num: 1,
-      state: "claimed",
-      teamName: "Team Alpha",
-      ownerUserId: CAPTAIN,
-      members: [CAPTAIN, SECOND],
-    })
-    .returning({ id: slots.id });
+  const slotRows = await withBusyRetry(() =>
+    db
+      .insert(slots)
+      .values({
+        scrimId,
+        num: 1,
+        state: "claimed",
+        teamName: "Team Alpha",
+        ownerUserId: CAPTAIN,
+      })
+      .returning({ id: slots.id }),
+  );
 
   slotId = slotRows[0]?.id ?? "";
 
-  await db.insert(banLogs).values({ guildId: GUILD_ID, channelId: CHANNEL_ID });
+  // The team is a join table: one row per member.
+  await withBusyRetry(() =>
+    db.insert(slotMembers).values([
+      { slotId, userId: CAPTAIN },
+      { slotId, userId: SECOND },
+    ]),
+  );
+
+  await withBusyRetry(() =>
+    db.insert(banLogs).values({ guildId: GUILD_ID, channelId: CHANNEL_ID }),
+  );
 }
 
 /** Removes every fixture. */
 async function clean(): Promise<void> {
   if (!scrimId) return;
 
-  await db.delete(slots).where(eq(slots.scrimId, scrimId));
-  await db.delete(bannedTeams).where(eq(bannedTeams.scrimId, scrimId));
-  await db
-    .delete(jobs)
-    .where(sql`${jobs.payload}::text like ${`%${scrimId}%`}`);
-  await db.delete(scrims).where(eq(scrims.id, scrimId));
-  await db.delete(banLogs).where(eq(banLogs.guildId, GUILD_ID));
+  await withBusyRetry(() =>
+    db.delete(slotMembers).where(eq(slotMembers.slotId, slotId)),
+  );
+
+  await withBusyRetry(() =>
+    db.delete(slots).where(eq(slots.scrimId, scrimId)),
+  );
+
+  await withBusyRetry(() =>
+    db.delete(bannedTeams).where(eq(bannedTeams.scrimId, scrimId)),
+  );
+
+  await withBusyRetry(() =>
+    db.delete(jobs).where(sql`${jobs.payload} like ${`%${scrimId}%`}`),
+  );
+
+  await withBusyRetry(() => db.delete(scrims).where(eq(scrims.id, scrimId)));
+
+  await withBusyRetry(() =>
+    db.delete(banLogs).where(eq(banLogs.guildId, GUILD_ID)),
+  );
 }
 
 /** The bans of the fixture scrim. */

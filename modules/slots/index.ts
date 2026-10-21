@@ -32,6 +32,28 @@ export {
 export type { SlotListSlot } from "./views/slotlist.js";
 
 /**
+ * The fake-tag check.
+ *
+ * "Does any other claimed slot in this scrim already hold one of these
+ * players?"
+ *
+ * The members of a slot live in `slot_members`, and this area owns that
+ * table, so this area owns the query that reads it. The source ran it
+ * as raw SQL with a Postgres array-overlap operator; as a join table it
+ * is a join and an `IN`, which is faster and correct on both engines.
+ *
+ * The slot being checked is excluded, so a slot is never a fake tag of
+ * itself.
+ *
+ * The scrims area's registration flow uses this to answer "has this
+ * player already registered in this scrim?". It is exported here
+ * because the import direction is one-way — the scrims area calls the
+ * slot area, never the other way round.
+ */
+export { findFakeTagMatches } from "./repo.js";
+export type { SlotRecord } from "./types.js";
+
+/**
  * The ban log.
  *
  * The slot area owns the published slot list, so it owns the Punish

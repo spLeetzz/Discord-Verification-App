@@ -1,1 +1,0 @@
-ALTER TABLE "lockdowns" ADD COLUMN "prior_state" jsonb;

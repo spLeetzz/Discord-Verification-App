@@ -3,25 +3,27 @@
  *
  * The lockdown row is the state: it says what is locked, and what every
  * channel's permission looked like before. The `jobs` row is the **timer**
- * and nothing else.
+ * and nothing else. The channels the lockdown covers are rows of the
+ * `lockdown_channels` join table.
  *
- * These tests connect to the Postgres the bot talks to, because the things
- * they are about — how many rows a lockdown writes, and what the recorded
- * permission state looks like after a re-read — are only true of the
- * database and not of a stand-in for one.
+ * These tests connect to the SQLite database the bot talks to, because
+ * the things they are about — how many rows a lockdown writes, and what
+ * the recorded permission state looks like after a re-read — are only
+ * true of the database and not of a stand-in for one.
  *
  * The fixtures use ids no real row can have, and they are deleted
  * afterwards.
  */
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { rmSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { ChannelType, Collection, PermissionFlagsBits } from "discord.js";
 import type { Channel, Guild, GuildMember, Role } from "discord.js";
 import { closeDatabase, db } from "../../db/client.js";
-import { lockdowns } from "../../db/schema.js";
+import { lockdownChannels, lockdowns } from "../../db/schema.js";
 import { evaluateLock, evaluateUnlock } from "./lock-state.js";
-import { lockChannel, releaseLock } from "./lockdown.js";
+import { lockChannel, lockServer, releaseLock, unlockServer } from "./lockdown.js";
 import type { LockContext, LockableChannel } from "./lockdown.js";
 import {
   createLockdown,
@@ -32,6 +34,27 @@ import {
   removeLockdown,
 } from "./repo.js";
 import type { LockRecord } from "./types.js";
+
+/**
+ * The database this file runs against.
+ *
+ * **A file of its own.** SQLite has one writer, so two test files that
+ * shared a database file would fight over it and fail with
+ * `SQLITE_BUSY`. The file is in the system temporary directory, and it is
+ * dropped when the run ends.
+ *
+ * The client reads `DB_FILE` when it is imported and applies the
+ * migrations to it as it goes, so the variable has to be set *before*
+ * the import of `db/client.js` — which is what `vi.hoisted` is for.
+ */
+const { databaseFile } = vi.hoisted(() => {
+  const directory = process.env.TMPDIR || process.env.TEMP || "/tmp";
+  const file = `${directory}/quotient-moderation-lockdown-${process.pid}-${Math.random().toString(36).slice(2)}.db`;
+
+  process.env.DB_FILE = file;
+
+  return { databaseFile: file };
+});
 
 /** A run id, so two runs never fight over the same rows. */
 const RUN = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -74,7 +97,14 @@ interface OverwriteCall {
   readonly value: boolean | null | undefined;
 }
 
-/** A channel whose overwrites the test can read afterwards. */
+/**
+ * A channel whose overwrites the test can read afterwards.
+ *
+ * @param writable whether @everyone may write in it. A server lockdown
+ *                 only covers the channels @everyone can write in, so the
+ *                 fake has to say yes to `send_messages` — and to
+ *                 `manage_channels`, or the bot may not edit it.
+ */
 function fakeChannel(
   id: string,
   calls: OverwriteCall[],
@@ -85,6 +115,7 @@ function fakeChannel(
    * permission is taken away first, and the row is written afterwards.
    */
   onEdit?: () => Promise<void>,
+  writable = false,
 ): LockableChannel {
   return {
     id,
@@ -117,13 +148,17 @@ function fakeChannel(
       },
     },
     permissionsFor: () => ({
-      has: (flag: bigint) => flag === PermissionFlagsBits.ManageChannels,
+      has: (flag: bigint) =>
+        writable || flag === PermissionFlagsBits.ManageChannels,
     }),
   } as unknown as LockableChannel;
 }
 
 /** A guild that holds the given channels and nothing else. */
-function fakeGuild(channels: readonly LockableChannel[]): Guild {
+function fakeGuild(
+  channels: readonly LockableChannel[],
+  guildId: string = GUILD_ID,
+): Guild {
   const cache = new Collection<string, Channel>();
 
   for (const channel of channels) {
@@ -131,7 +166,7 @@ function fakeGuild(channels: readonly LockableChannel[]): Guild {
   }
 
   return {
-    id: GUILD_ID,
+    id: guildId,
     channels: { cache },
     roles: { everyone: { id: EVERYONE_ID } },
     members: { me: { id: `lockdown-test-bot-${RUN}` } },
@@ -198,6 +233,8 @@ afterAll(async () => {
   }
 
   await closeDatabase();
+
+  rmSync(databaseFile, { force: true });
 });
 
 describe("the lockdown row", () => {
@@ -229,6 +266,10 @@ describe("the lockdown row", () => {
     });
 
     expect(await listLockdownJobs(record.id)).toEqual([]);
+
+    // The row is still there, with a null expiry: the lock is the state,
+    // and only the timer is missing.
+    expect(record.expireTime).toBeNull();
   });
 
   it("writes exactly one job row when the lockdown has a duration", async () => {
@@ -244,6 +285,62 @@ describe("the lockdown row", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]?.expiresAt).toEqual(expireTime);
+
+    // The expiry of the lock and the moment the timer comes due are the
+    // same instant, down to the millisecond: the scheduler fires the row
+    // when `expires_at` has passed.
+    expect(record.expireTime).toEqual(expireTime);
+    expect(rows[0]?.expiresAt.getTime()).toBe(record.expireTime?.getTime());
+  });
+
+  it("writes the channels it covers as rows of the join table", async () => {
+    const channel = channelId("covered");
+
+    const record = await makeLockdown({
+      channel,
+      expireTime: null,
+      priorState: {},
+    });
+
+    const rows = await db
+      .select()
+      .from(lockdownChannels)
+      .where(eq(lockdownChannels.lockdownId, record.id));
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.channelId).toBe(channel);
+
+    // And the record reads them back the same way.
+    expect(record.channelIds).toEqual([channel]);
+    expect((await findLockdown(GUILD_ID, "channel", channel))?.channelIds).toEqual(
+      [channel],
+    );
+  });
+
+  it("takes the channel rows with it when the lockdown is lifted", async () => {
+    const channel = channelId("rows-lifted");
+
+    const record = await makeLockdown({
+      channel,
+      expireTime: null,
+      priorState: {},
+    });
+
+    const before = await db
+      .select()
+      .from(lockdownChannels)
+      .where(eq(lockdownChannels.lockdownId, record.id));
+
+    expect(before).toHaveLength(1);
+
+    await removeLockdown(record.id);
+
+    const after = await db
+      .select()
+      .from(lockdownChannels)
+      .where(eq(lockdownChannels.lockdownId, record.id));
+
+    expect(after).toHaveLength(0);
   });
 
   it("keeps the permission state out of the job payload", async () => {
@@ -616,6 +713,105 @@ describe("two lockdowns of the same subject at once", () => {
   });
 });
 
+describe("the constraint that refuses a second lockdown", () => {
+  it("refuses a second row for the same subject in the database itself", async () => {
+    const channel = channelId("constraint");
+
+    await makeLockdown({ channel, expireTime: null, priorState: {} });
+
+    // The insert does not go through the repository: it is a plain
+    // insert, so the only thing that can refuse it is the unique
+    // constraint on `lockdowns.lock_key`. This is what makes the refusal
+    // a fact of the database and not a fact of a read-then-write check.
+    let failure: unknown = null;
+
+    try {
+      await db.insert(lockdowns).values({
+        guildId: GUILD_ID,
+        type: "channel",
+        roleId: null,
+        channelId: channel,
+        expireTime: null,
+        priorState: {},
+        authorId: `lockdown-test-moderator-${RUN}`,
+        lockKey: `channel:${channel}`,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).not.toBeNull();
+
+    // The driver wraps the error; the constraint is in the cause.
+    const cause = (failure as { cause?: unknown }).cause ?? failure;
+
+    expect(String(cause)).toMatch(/UNIQUE constraint failed/i);
+    expect(String(cause)).toContain("lockdowns.lock_key");
+
+    // And there is still one row for the subject.
+    const rows = await db
+      .select()
+      .from(lockdowns)
+      .where(eq(lockdowns.lockKey, `channel:${channel}`));
+
+    expect(rows).toHaveLength(1);
+  });
+});
+
+describe("a server lockdown", () => {
+  it("covers the channels it locked, and releases exactly them", async () => {
+    const first = channelId("server-first");
+    const second = channelId("server-second");
+    const calls: OverwriteCall[] = [];
+
+    const guild = fakeGuild(
+      [
+        fakeChannel(first, calls, undefined, true),
+        fakeChannel(second, calls, undefined, true),
+      ],
+      OTHER_GUILD_ID,
+    );
+
+    const locked = await lockServer({
+      context: fakeContext(guild),
+      duration: null,
+    });
+
+    expect(locked.locked).toBe(2);
+
+    const record = await findLockdown(OTHER_GUILD_ID, "guild");
+    if (!record) throw new Error("The lockdown row was not found.");
+
+    // The join table holds the two channels the server lockdown covered,
+    // and nothing else.
+    expect(record.channelIds).toEqual([first, second]);
+
+    const rows = await db
+      .select()
+      .from(lockdownChannels)
+      .where(eq(lockdownChannels.lockdownId, record.id));
+
+    expect(rows.map((row) => row.channelId).sort()).toEqual([first, second]);
+
+    // And the unlock puts exactly those two back.
+    const released = await unlockServer(fakeContext(guild));
+
+    expect(released.restored).toBe(2);
+    expect(released.failed).toBe(0);
+
+    expect(calls.filter((call) => call.kind === "edit")).toHaveLength(2);
+    expect(calls.filter((call) => call.kind === "delete")).toHaveLength(2);
+
+    // The rows of the channels it covered go with it.
+    const after = await db
+      .select()
+      .from(lockdownChannels)
+      .where(eq(lockdownChannels.lockdownId, record.id));
+
+    expect(after).toHaveLength(0);
+  });
+});
+
 describe("the order of the lockdowns", () => {
   it("lists the lockdowns of a guild in the order they were made", async () => {
     const older = channelId("order-older");
@@ -625,18 +821,30 @@ describe("the order of the lockdowns", () => {
     // order comes from the row, not from the order of the writes.
     await makeLockdown({ channel: newer, expireTime: null, priorState: {} });
 
-    await db.insert(lockdowns).values({
-      guildId: GUILD_ID,
-      type: "channel",
-      roleId: null,
+    const written = await db
+      .insert(lockdowns)
+      .values({
+        guildId: GUILD_ID,
+        type: "channel",
+        roleId: null,
+        channelId: older,
+        expireTime: null,
+        priorState: {},
+        authorId: `lockdown-test-moderator-${RUN}`,
+        lockKey: `channel:${older}`,
+        createdAt: new Date("2020-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2020-01-01T00:00:00.000Z"),
+      })
+      .returning({ id: lockdowns.id });
+
+    const row = written[0];
+    if (!row) throw new Error("The lockdown row was not written.");
+
+    // The channel it covers is a row of the join table, not a column of
+    // the lockdown.
+    await db.insert(lockdownChannels).values({
+      lockdownId: row.id,
       channelId: older,
-      channelIds: [older],
-      expireTime: null,
-      priorState: {},
-      authorId: `lockdown-test-moderator-${RUN}`,
-      lockKey: `channel:${older}`,
-      createdAt: new Date("2020-01-01T00:00:00.000Z"),
-      updatedAt: new Date("2020-01-01T00:00:00.000Z"),
     });
 
     const order = (await listLockdowns(GUILD_ID)).map((record) => record.channelId);

@@ -150,7 +150,7 @@ describe("modules/tourneys/slots — the swap", () => {
     // swap succeeded at all is the proof. This is the assertion that
     // would have failed with the source's two independent updates.
     const duplicates = await db.execute<{ count: number }>(sql`
-      select count(*)::int as count
+      select count(*) as count
       from (
         select num from tourney_slots
         where tourney_id = ${tourneyId}

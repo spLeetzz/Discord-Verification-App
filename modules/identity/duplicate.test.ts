@@ -2,17 +2,16 @@
  * The duplicate-screenshot check.
  *
  * The threshold is the interesting part: the check has to fire **at** the
- * threshold and not one bit later, and a stored hash that is not a hash has
- * to fail loudly rather than compare as "a different picture".
+ * threshold and not one bit later.
+ *
+ * The second part is the check's **totality**. A hash that cannot be
+ * compared — the member's own stored one, or the screenshot's own — is not
+ * an exception any more: the check answers with a decision, and the
+ * decision is either a refusal or a report.
  */
 
 import { describe, expect, it } from "vitest";
-import {
-  findDuplicate,
-  MalformedHashError,
-  safeHammingDistance,
-  submissionJumpUrl,
-} from "./duplicate.js";
+import { checkDuplicate, submissionJumpUrl } from "./duplicate.js";
 import type { StoredSubmission } from "./duplicate.js";
 
 /** The threshold the port runs with. */
@@ -53,29 +52,7 @@ function bitsAway(base: string, bits: number): string {
   return value.toString(16).padStart(16, "0");
 }
 
-describe("safeHammingDistance", () => {
-  it("counts the bits that differ", () => {
-    expect(safeHammingDistance("0000000000000000", "0000000000000001")).toBe(1);
-  });
-
-  it("is zero for the same hash", () => {
-    expect(safeHammingDistance("abcdef0123456789", "abcdef0123456789")).toBe(0);
-  });
-
-  it("refuses a hash that is too short", () => {
-    expect(() => safeHammingDistance("abc", "0000000000000000")).toThrow(
-      MalformedHashError,
-    );
-  });
-
-  it("refuses a hash that is not hex", () => {
-    expect(() =>
-      safeHammingDistance("zzzzzzzzzzzzzzzz", "0000000000000000"),
-    ).toThrow(MalformedHashError);
-  });
-});
-
-describe("findDuplicate", () => {
+describe("checkDuplicate", () => {
   it("finds the member's own picture", () => {
     const candidate = {
       authorId: "author-1",
@@ -83,10 +60,14 @@ describe("findDuplicate", () => {
       phash: "2222222222222222",
     };
 
-    const duplicate = findDuplicate(candidate, [stored()], THRESHOLD);
+    const outcome = checkDuplicate(candidate, [stored()], THRESHOLD);
 
-    expect(duplicate?.kind).toBe("own");
-    expect(duplicate?.submission.id).toBe("row-1");
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.duplicate?.kind).toBe("own");
+    expect(outcome.duplicate?.submission.id).toBe("row-1");
   });
 
   it("fires exactly at the threshold", () => {
@@ -96,7 +77,13 @@ describe("findDuplicate", () => {
       phash: "2222222222222222",
     };
 
-    expect(findDuplicate(candidate, [stored()], THRESHOLD)?.kind).toBe("own");
+    const outcome = checkDuplicate(candidate, [stored()], THRESHOLD);
+
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.duplicate?.kind).toBe("own");
   });
 
   it("does not fire one bit past the threshold", () => {
@@ -106,7 +93,13 @@ describe("findDuplicate", () => {
       phash: "2222222222222222",
     };
 
-    expect(findDuplicate(candidate, [stored()], THRESHOLD)).toBeNull();
+    const outcome = checkDuplicate(candidate, [stored()], THRESHOLD);
+
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.duplicate).toBeNull();
   });
 
   it("finds somebody else's identical picture", () => {
@@ -116,10 +109,14 @@ describe("findDuplicate", () => {
       phash: "1111111111111111",
     };
 
-    const duplicate = findDuplicate(candidate, [stored()], THRESHOLD);
+    const outcome = checkDuplicate(candidate, [stored()], THRESHOLD);
 
-    expect(duplicate?.kind).toBe("same");
-    expect(duplicate?.submission.authorId).toBe("author-1");
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.duplicate?.kind).toBe("same");
+    expect(outcome.duplicate?.submission.authorId).toBe("author-1");
   });
 
   it("ignores another member's near-identical picture", () => {
@@ -131,7 +128,13 @@ describe("findDuplicate", () => {
       phash: "2222222222222222",
     };
 
-    expect(findDuplicate(candidate, [stored()], THRESHOLD)).toBeNull();
+    const outcome = checkDuplicate(candidate, [stored()], THRESHOLD);
+
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.duplicate).toBeNull();
   });
 
   it("finds the member's own picture among other people's", () => {
@@ -146,10 +149,14 @@ describe("findDuplicate", () => {
       stored({ id: "row-2", authorId: "author-2", dhash: "ffffffffffffffff" }),
     ];
 
-    const duplicate = findDuplicate(candidate, rows, THRESHOLD);
+    const outcome = checkDuplicate(candidate, rows, THRESHOLD);
 
-    expect(duplicate?.kind).toBe("own");
-    expect(duplicate?.submission.id).toBe("row-2");
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.duplicate?.kind).toBe("own");
+    expect(outcome.duplicate?.submission.id).toBe("row-2");
   });
 
   it("skips a submission that has no hash at all", () => {
@@ -163,48 +170,156 @@ describe("findDuplicate", () => {
 
     const rows = [stored({ dhash: null, phash: null })];
 
-    expect(findDuplicate(candidate, rows, THRESHOLD)).toBeNull();
+    const outcome = checkDuplicate(candidate, rows, THRESHOLD);
+
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.duplicate).toBeNull();
+    expect(outcome.corrupt).toHaveLength(0);
   });
 
-  it("refuses a stored hash that is malformed", () => {
+  it("answers that there is no duplicate when there is nothing stored", () => {
+    const candidate = {
+      authorId: "author-1",
+      dhash: "0000000000000000",
+      phash: "1111111111111111",
+    };
+
+    const outcome = checkDuplicate(candidate, [], THRESHOLD);
+
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.duplicate).toBeNull();
+  });
+});
+
+describe("a hash that cannot be compared", () => {
+  it("refuses the screenshot when the member's own stored hash is broken", () => {
     // A truncated row must not compare as "a different picture" — a
-    // duplicate that hides itself lets a member farm the role.
+    // duplicate that hides itself lets a member farm the role. The
+    // member's own history cannot be compared, so the screenshot is
+    // refused.
     const candidate = {
       authorId: "author-1",
       dhash: "0000000000000000",
       phash: "1111111111111111",
     };
 
-    expect(() =>
-      findDuplicate(candidate, [stored({ dhash: "abc" })], THRESHOLD),
-    ).toThrow(MalformedHashError);
+    const outcome = checkDuplicate(candidate, [stored({ dhash: "abc" })], THRESHOLD);
+
+    expect(outcome.ok).toBe(false);
+
+    if (outcome.ok) return;
+
+    expect(outcome.kind).toBe("corrupt-history");
+    expect(outcome.corrupt).toHaveLength(1);
+    expect(outcome.corrupt[0]?.value).toBe("abc");
+    expect(outcome.corrupt[0]?.field).toBe("dhash");
+    expect(outcome.corrupt[0]?.submission.id).toBe("row-1");
   });
 
-  it("names the stored hash that was malformed", () => {
+  it("refuses the screenshot when the member's own stored hash is not hex", () => {
     const candidate = {
       authorId: "author-1",
       dhash: "0000000000000000",
       phash: "1111111111111111",
     };
 
-    try {
-      findDuplicate(candidate, [stored({ dhash: "abc" })], THRESHOLD);
-      expect.unreachable("the malformed hash should have thrown");
-    } catch (error) {
-      expect(error).toBeInstanceOf(MalformedHashError);
-      // The malformed hash is the **stored** one, not the candidate's.
-      expect((error as MalformedHashError).hash).toBe("abc");
-    }
+    const outcome = checkDuplicate(
+      candidate,
+      [stored({ dhash: "zzzzzzzzzzzzzzzz" })],
+      THRESHOLD,
+    );
+
+    expect(outcome.ok).toBe(false);
+
+    if (outcome.ok) return;
+
+    expect(outcome.kind).toBe("corrupt-history");
   });
 
-  it("answers null when there is nothing stored", () => {
+  it("passes over another member's broken row and reports it", () => {
+    // One corrupt row must not block every member of the setup, so the
+    // row is reported and the screenshot goes through.
+    const candidate = {
+      authorId: "author-2",
+      dhash: "0000000000000000",
+      phash: "1111111111111111",
+    };
+
+    const outcome = checkDuplicate(
+      candidate,
+      [stored({ authorId: "author-1", dhash: "abc" })],
+      THRESHOLD,
+    );
+
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.duplicate).toBeNull();
+    expect(outcome.corrupt).toHaveLength(1);
+    expect(outcome.corrupt[0]?.value).toBe("abc");
+    expect(outcome.corrupt[0]?.submission.authorId).toBe("author-1");
+  });
+
+  it("reports another member's broken hash even when it cannot match", () => {
+    // The broken dhash can never be "the same picture", but the row is
+    // still broken and the operator has to know about it.
+    const candidate = {
+      authorId: "author-2",
+      dhash: "9c63949032868431",
+      phash: "c0c0bf3f3bf0f090",
+    };
+
+    const outcome = checkDuplicate(
+      candidate,
+      [stored({ authorId: "author-1", dhash: "abc" })],
+      THRESHOLD,
+    );
+
+    expect(outcome.ok).toBe(true);
+
+    if (!outcome.ok) return;
+
+    expect(outcome.corrupt).toHaveLength(1);
+  });
+
+  it("refuses the screenshot when its own hash is not a hash", () => {
+    // A hash the service sent that cannot be compared verifies nothing.
+    const candidate = {
+      authorId: "author-1",
+      dhash: "not-a-hash",
+      phash: "1111111111111111",
+    };
+
+    const outcome = checkDuplicate(candidate, [stored()], THRESHOLD);
+
+    expect(outcome.ok).toBe(false);
+
+    if (outcome.ok) return;
+
+    expect(outcome.kind).toBe("unusable-hash");
+  });
+
+  it("never throws, whatever the table holds", () => {
     const candidate = {
       authorId: "author-1",
       dhash: "0000000000000000",
       phash: "1111111111111111",
     };
 
-    expect(findDuplicate(candidate, [], THRESHOLD)).toBeNull();
+    const rows = [
+      stored({ id: "row-1", authorId: "author-1", dhash: "abc" }),
+      stored({ id: "row-2", authorId: "author-1", phash: "nope" }),
+      stored({ id: "row-3", authorId: "author-2", dhash: "", phash: "" }),
+    ];
+
+    expect(() => checkDuplicate(candidate, rows, THRESHOLD)).not.toThrow();
   });
 });
 

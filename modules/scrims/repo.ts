@@ -4,22 +4,42 @@
  * The rule that matters: **no SQL outside this file.** The service layer
  * talks to these functions; the views talk to the service.
  *
- * The schema is in `db/schema/esports.ts` and it is already migrated and
- * verified, so the column names here are the real ones — `slots.state`,
- * `scrims.status`, `scrims.start_from`, `scrims.total_slots` and so on.
+ * **Every list of ids is a join table.** Postgres had arrays and SQLite
+ * does not, so a column that holds a list cannot be written in a dialect
+ * both engines understand. The lists are normalised:
+ *
+ * | What | Where it lives |
+ * |---|---|
+ * | the team of a slot | `slot_members` |
+ * | the team of a reservation | `reserved_slot_members` |
+ * | the team of a ban | `banned_team_members` |
+ * | the days a scrim opens on | `scrim_open_days` |
+ * | what the autoclean pass removes | `scrim_autoclean` |
+ *
+ * The **domain types still hold arrays** — `SlotRecord.members` is
+ * `string[]`, `ScrimRecord.openDays` is `Weekday[]` — because the array
+ * is the shape the application sees. The join table is only how it is
+ * stored. This file is the seam between the two.
  *
  * The one statement that matters most is {@link claimSlot}: the
  * conditional `UPDATE` from S7. It is the whole reason D14 exists.
  */
 
-import { and, asc, count, eq, inArray, sql } from "drizzle-orm";
-import { db } from "../../db/client.js";
+import { and, asc, count, eq, inArray, lte, ne, sql } from "drizzle-orm";
+import { db, withTransaction } from "../../db/client.js";
+import type { DbExecutor, Transaction } from "../../db/client.js";
+import { withLock } from "../../utils/lock.js";
 import {
   banLogs,
+  bannedTeamMembers,
   bannedTeams,
   jobs,
+  reservedSlotMembers,
   reservedSlots,
+  scrimAutoclean,
+  scrimOpenDays,
   scrims,
+  slotMembers,
   slots,
 } from "../../db/schema.js";
 import type {
@@ -39,6 +59,55 @@ import type {
   ScrimRecord,
   SlotRecord,
 } from "./types.js";
+
+/* ------------------------------------------------------------------ *
+ * The executor
+ * ------------------------------------------------------------------ */
+
+/**
+ * Anything that can run a query.
+ *
+ * The database itself and a transaction handle both qualify. Every write
+ * that has to be atomic runs inside `withTransaction`, and the helpers
+ * below take whichever executor they are handed — so a helper used from
+ * both paths does the same thing in both.
+ */
+type Executor = Pick<DbExecutor, "select" | "insert" | "update" | "delete">;
+
+/* ------------------------------------------------------------------ *
+ * Writes
+ * ------------------------------------------------------------------ */
+
+/** The key this area's writes are serialised under. */
+const WRITE_LOCK = "scrims:write";
+
+/**
+ * Runs a write of this area.
+ *
+ * **SQLite has one writer.** Two transactions that overlap cannot both
+ * hold the write lock, and the second one fails with `SQLITE_BUSY`
+ * rather than waiting — a claim and a job firing at the same moment
+ * would make one of them fail. The mutex makes the second one wait.
+ *
+ * **The mutex is not what makes the claim exclusive.** The conditional
+ * `UPDATE` is: two claims of one slot still race inside the mutex, and
+ * the loser still updates zero rows. Take the mutex away and the claim
+ * is still correct — it just loses with a busy error instead of losing
+ * cleanly.
+ */
+function writeLock<T>(fn: () => Promise<T>): Promise<T> {
+  return withLock(WRITE_LOCK, fn);
+}
+
+/**
+ * Runs a write of this area that is more than one statement.
+ *
+ * The statements share a transaction, so they commit together or not at
+ * all, and the mutex keeps them from overlapping another write.
+ */
+function writeTransaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
+  return writeLock(() => withTransaction(fn));
+}
 
 /* ------------------------------------------------------------------ *
  * Row mapping
@@ -75,8 +144,25 @@ function readCountdown(value: unknown): ScrimCountdown {
   };
 }
 
+/**
+ * The two lists a scrim row no longer carries.
+ *
+ * They live in `scrim_open_days` and `scrim_autoclean`, so a scrim row
+ * on its own is not a scrim.
+ */
+interface ScrimExtras {
+  openDays: Weekday[];
+  autoclean: AutocleanKind[];
+}
+
+/** The extras of a scrim that has neither. */
+const NO_EXTRAS: ScrimExtras = { openDays: [], autoclean: [] };
+
 /** Turns a database row into the domain type. */
-function toScrim(row: typeof scrims.$inferSelect): ScrimRecord {
+function toScrim(
+  row: typeof scrims.$inferSelect,
+  extras: ScrimExtras,
+): ScrimRecord {
   return {
     id: row.id,
     guildId: row.guildId,
@@ -97,7 +183,7 @@ function toScrim(row: typeof scrims.$inferSelect): ScrimRecord {
     openedAt: row.openedAt,
     closedAt: row.closedAt,
     matchTime: row.matchTime,
-    autoclean: row.autoclean as AutocleanKind[],
+    autoclean: [...extras.autoclean],
     autocleanTime: row.autocleanTime,
     autoslotlist: row.autoslotlist,
     multiregister: row.multiregister,
@@ -108,7 +194,7 @@ function toScrim(row: typeof scrims.$inferSelect): ScrimRecord {
     noDuplicateName: row.noDuplicateName,
     allowDuplicateTags: row.allowDuplicateTags,
     timeElapsedSeconds: row.timeElapsedSeconds,
-    openDays: row.openDays as Weekday[],
+    openDays: [...extras.openDays],
     slotlistFormat: parseTemplate(row.slotlistFormat),
     openMessage: parseTemplate(row.openMessage),
     closeMessage: parseTemplate(row.closeMessage),
@@ -119,8 +205,39 @@ function toScrim(row: typeof scrims.$inferSelect): ScrimRecord {
   };
 }
 
+/**
+ * The captain first.
+ *
+ * The member rows have no order column, so the order they come back in
+ * is the order they were written in — except when two of them share a
+ * timestamp, which they do when they are written in one statement. The
+ * captain is put first explicitly, because that is the order the
+ * source's array had and the order the slot list shows.
+ */
+function orderMembers(
+  ownerUserId: string | null,
+  members: readonly string[],
+): string[] {
+  const ordered = [...members];
+
+  if (!ownerUserId) return ordered;
+
+  const index = ordered.indexOf(ownerUserId);
+
+  if (index <= 0) return ordered;
+
+  const [captain] = ordered.splice(index, 1);
+
+  ordered.unshift(captain ?? ownerUserId);
+
+  return ordered;
+}
+
 /** Turns a database row into the domain type. */
-function toSlot(row: typeof slots.$inferSelect): SlotRecord {
+function toSlot(
+  row: typeof slots.$inferSelect,
+  members: readonly string[],
+): SlotRecord {
   return {
     id: row.id,
     scrimId: row.scrimId,
@@ -128,7 +245,7 @@ function toSlot(row: typeof slots.$inferSelect): SlotRecord {
     state: row.state as SlotState,
     teamName: row.teamName,
     ownerUserId: row.ownerUserId,
-    members: row.members,
+    members: orderMembers(row.ownerUserId, members),
     messageId: row.messageId,
     jumpUrl: row.jumpUrl,
     createdAt: row.createdAt,
@@ -139,6 +256,7 @@ function toSlot(row: typeof slots.$inferSelect): SlotRecord {
 /** Turns a database row into the domain type. */
 function toReservedSlot(
   row: typeof reservedSlots.$inferSelect,
+  members: readonly string[],
 ): ReservedSlotRecord {
   return {
     id: row.id,
@@ -146,7 +264,7 @@ function toReservedSlot(
     num: row.num,
     userId: row.userId,
     teamName: row.teamName,
-    members: row.members,
+    members: [...members],
     expires: row.expires,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -154,19 +272,249 @@ function toReservedSlot(
 }
 
 /** Turns a database row into the domain type. */
-function toBannedTeam(row: typeof bannedTeams.$inferSelect): BannedTeamRecord {
+function toBannedTeam(
+  row: typeof bannedTeams.$inferSelect,
+  members: readonly string[],
+): BannedTeamRecord {
   return {
     id: row.id,
     scrimId: row.scrimId,
     num: row.num,
     userId: row.userId,
     teamName: row.teamName,
-    members: row.members,
+    members: [...members],
     reason: row.reason,
     expires: row.expires,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * The join tables
+ * ------------------------------------------------------------------ */
+
+/**
+ * The open days and the autoclean kinds of a set of scrims.
+ *
+ * One query per list, for every scrim at once — the panel that lists a
+ * guild's scrims reads them all, and a query per scrim would be a
+ * query per scrim.
+ */
+async function loadScrimExtras(
+  executor: Executor,
+  scrimIds: readonly string[],
+): Promise<Map<string, ScrimExtras>> {
+  const byScrim = new Map<string, ScrimExtras>();
+
+  if (scrimIds.length === 0) return byScrim;
+
+  for (const id of scrimIds) byScrim.set(id, { openDays: [], autoclean: [] });
+
+  const days = await executor
+    .select({ scrimId: scrimOpenDays.scrimId, day: scrimOpenDays.day })
+    .from(scrimOpenDays)
+    .where(inArray(scrimOpenDays.scrimId, [...scrimIds]));
+
+  for (const row of days) {
+    byScrim.get(row.scrimId)?.openDays.push(row.day as Weekday);
+  }
+
+  const kinds = await executor
+    .select({ scrimId: scrimAutoclean.scrimId, kind: scrimAutoclean.kind })
+    .from(scrimAutoclean)
+    .where(inArray(scrimAutoclean.scrimId, [...scrimIds]));
+
+  for (const row of kinds) {
+    byScrim.get(row.scrimId)?.autoclean.push(row.kind as AutocleanKind);
+  }
+
+  return byScrim;
+}
+
+/** The members of a set of slots, keyed by slot id. */
+async function loadSlotMembers(
+  executor: Executor,
+  slotIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  return loadMembers(
+    executor,
+    slotMembers,
+    slotMembers.slotId,
+    slotMembers.userId,
+    slotIds,
+  );
+}
+
+/** The members of a set of reservations, keyed by reservation id. */
+async function loadReservedMembers(
+  executor: Executor,
+  reservedSlotIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  return loadMembers(
+    executor,
+    reservedSlotMembers,
+    reservedSlotMembers.reservedSlotId,
+    reservedSlotMembers.userId,
+    reservedSlotIds,
+  );
+}
+
+/** The members of a set of bans, keyed by ban id. */
+async function loadBannedMembers(
+  executor: Executor,
+  bannedTeamIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  return loadMembers(
+    executor,
+    bannedTeamMembers,
+    bannedTeamMembers.bannedTeamId,
+    bannedTeamMembers.userId,
+    bannedTeamIds,
+  );
+}
+
+/**
+ * Reads a member list out of a join table.
+ *
+ * The three member tables have the same shape, so they share one
+ * reader. `parentId` is the column the child points at and `userId` the
+ * column the member id is in.
+ */
+async function loadMembers(
+  executor: Executor,
+  table: typeof slotMembers | typeof reservedSlotMembers | typeof bannedTeamMembers,
+  parentId: typeof slotMembers.slotId | typeof reservedSlotMembers.reservedSlotId | typeof bannedTeamMembers.bannedTeamId,
+  userId:
+    | typeof slotMembers.userId
+    | typeof reservedSlotMembers.userId
+    | typeof bannedTeamMembers.userId,
+  parentIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const byParent = new Map<string, string[]>();
+
+  if (parentIds.length === 0) return byParent;
+
+  const rows = await executor
+    .select({ parent: parentId, user: userId })
+    .from(table)
+    .where(inArray(parentId, [...parentIds]));
+
+  for (const row of rows) {
+    const list = byParent.get(row.parent);
+
+    if (list) list.push(row.user);
+    else byParent.set(row.parent, [row.user]);
+  }
+
+  return byParent;
+}
+
+/**
+ * Replaces the open days of a scrim.
+ *
+ * The containment check — "every day is a real weekday" — is a `CHECK`
+ * constraint on `scrim_open_days.day`, so the database refuses a day
+ * that is not one. The write path does not have to police it.
+ */
+async function replaceOpenDays(
+  executor: Executor,
+  scrimId: string,
+  days: readonly Weekday[],
+): Promise<void> {
+  await executor.delete(scrimOpenDays).where(eq(scrimOpenDays.scrimId, scrimId));
+
+  const unique = [...new Set(days)];
+
+  if (unique.length === 0) return;
+
+  await executor
+    .insert(scrimOpenDays)
+    .values(unique.map((day) => ({ scrimId, day })));
+}
+
+/**
+ * Replaces the autoclean kinds of a scrim.
+ *
+ * The kinds are `channel` and `role` — a `CHECK` constraint on
+ * `scrim_autoclean.kind` says so, and the unique constraint on
+ * `(scrim_id, kind)` makes a duplicate a no-op instead of an error.
+ */
+async function replaceAutoclean(
+  executor: Executor,
+  scrimId: string,
+  kinds: readonly AutocleanKind[],
+): Promise<void> {
+  await executor.delete(scrimAutoclean).where(eq(scrimAutoclean.scrimId, scrimId));
+
+  const unique = [...new Set(kinds)];
+
+  if (unique.length === 0) return;
+
+  await executor
+    .insert(scrimAutoclean)
+    .values(unique.map((kind) => ({ scrimId, kind })));
+}
+
+/** Replaces the members of a slot. */
+async function replaceSlotMembers(
+  executor: Executor,
+  slotId: string,
+  memberIds: readonly string[],
+): Promise<string[]> {
+  await executor.delete(slotMembers).where(eq(slotMembers.slotId, slotId));
+
+  const unique = [...new Set(memberIds)];
+
+  if (unique.length === 0) return [];
+
+  await executor
+    .insert(slotMembers)
+    .values(unique.map((userId) => ({ slotId, userId })));
+
+  return unique;
+}
+
+/** Replaces the members of a reservation. */
+async function replaceReservedMembers(
+  executor: Executor,
+  reservedSlotId: string,
+  memberIds: readonly string[],
+): Promise<string[]> {
+  await executor
+    .delete(reservedSlotMembers)
+    .where(eq(reservedSlotMembers.reservedSlotId, reservedSlotId));
+
+  const unique = [...new Set(memberIds)];
+
+  if (unique.length === 0) return [];
+
+  await executor
+    .insert(reservedSlotMembers)
+    .values(unique.map((userId) => ({ reservedSlotId, userId })));
+
+  return unique;
+}
+
+/** Replaces the members of a ban. */
+async function replaceBannedMembers(
+  executor: Executor,
+  bannedTeamId: string,
+  memberIds: readonly string[],
+): Promise<string[]> {
+  await executor
+    .delete(bannedTeamMembers)
+    .where(eq(bannedTeamMembers.bannedTeamId, bannedTeamId));
+
+  const unique = [...new Set(memberIds)];
+
+  if (unique.length === 0) return [];
+
+  await executor
+    .insert(bannedTeamMembers)
+    .values(unique.map((userId) => ({ bannedTeamId, userId })));
+
+  return unique;
 }
 
 /* ------------------------------------------------------------------ *
@@ -179,7 +527,11 @@ export async function getScrim(id: string): Promise<ScrimRecord | null> {
 
   const row = rows[0];
 
-  return row ? toScrim(row) : null;
+  if (!row) return null;
+
+  const extras = await loadScrimExtras(db, [id]);
+
+  return toScrim(row, extras.get(id) ?? NO_EXTRAS);
 }
 
 /** Every scrim in a guild, oldest open time first. */
@@ -190,7 +542,12 @@ export async function listScrims(guildId: string): Promise<ScrimRecord[]> {
     .where(eq(scrims.guildId, guildId))
     .orderBy(asc(scrims.openTime));
 
-  return rows.map(toScrim);
+  const extras = await loadScrimExtras(
+    db,
+    rows.map((row) => row.id),
+  );
+
+  return rows.map((row) => toScrim(row, extras.get(row.id) ?? NO_EXTRAS));
 }
 
 /** The scrim that lives in a registration channel. */
@@ -205,7 +562,11 @@ export async function getScrimByRegistrationChannel(
 
   const row = rows[0];
 
-  return row ? toScrim(row) : null;
+  if (!row) return null;
+
+  const extras = await loadScrimExtras(db, [row.id]);
+
+  return toScrim(row, extras.get(row.id) ?? NO_EXTRAS);
 }
 
 /** Every scrim whose registration is open, across every guild. */
@@ -216,7 +577,12 @@ export async function listOpenScrims(): Promise<ScrimRecord[]> {
     .where(eq(scrims.status, "open"))
     .orderBy(asc(scrims.openTime));
 
-  return rows.map(toScrim);
+  const extras = await loadScrimExtras(
+    db,
+    rows.map((row) => row.id),
+  );
+
+  return rows.map((row) => toScrim(row, extras.get(row.id) ?? NO_EXTRAS));
 }
 
 /** How many scrims a guild has. */
@@ -241,8 +607,8 @@ export interface CreateScrimValues {
   readonly totalSlots: number;
   readonly openTime: Date;
   readonly startFrom: number;
-  readonly openDays: Weekday[];
-  readonly autoclean: AutocleanKind[];
+  readonly openDays: readonly Weekday[];
+  readonly autoclean: readonly AutocleanKind[];
   readonly autocleanTime: Date | null;
   readonly emojis: ScrimEmojis;
   readonly openMessage: EmbedTemplate;
@@ -250,37 +616,46 @@ export interface CreateScrimValues {
   readonly slotlistFormat: EmbedTemplate;
 }
 
-/** Creates a scrim. It starts as a `draft` (D26). */
+/**
+ * Creates a scrim. It starts as a `draft` (D26).
+ *
+ * The scrim row and its two lists are one transaction: a scrim with no
+ * open days and no autoclean kinds is a different scrim from one with
+ * them, and a half-written scrim is neither.
+ */
 export async function createScrim(values: CreateScrimValues): Promise<string> {
-  const rows = await db
-    .insert(scrims)
-    .values({
-      guildId: values.guildId,
-      hostId: values.hostId,
-      name: values.name,
-      status: "draft",
-      registrationChannelId: values.registrationChannelId,
-      slotlistChannelId: values.slotlistChannelId,
-      roleId: values.roleId,
-      requiredMentions: values.requiredMentions,
-      totalSlots: values.totalSlots,
-      openTime: values.openTime,
-      startFrom: values.startFrom,
-      openDays: values.openDays,
-      autoclean: values.autoclean,
-      autocleanTime: values.autocleanTime,
-      emojis: values.emojis,
-      openMessage: values.openMessage,
-      closeMessage: values.closeMessage,
-      slotlistFormat: values.slotlistFormat,
-    })
-    .returning({ id: scrims.id });
+  return writeTransaction(async (tx) => {
+    const rows = await tx
+      .insert(scrims)
+      .values({
+        guildId: values.guildId,
+        hostId: values.hostId,
+        name: values.name,
+        status: "draft",
+        registrationChannelId: values.registrationChannelId,
+        slotlistChannelId: values.slotlistChannelId,
+        roleId: values.roleId,
+        requiredMentions: values.requiredMentions,
+        totalSlots: values.totalSlots,
+        openTime: values.openTime,
+        startFrom: values.startFrom,
+        autocleanTime: values.autocleanTime,
+        emojis: values.emojis,
+        openMessage: values.openMessage,
+        closeMessage: values.closeMessage,
+        slotlistFormat: values.slotlistFormat,
+      })
+      .returning({ id: scrims.id });
 
-  const id = rows[0]?.id;
+    const id = rows[0]?.id;
 
-  if (!id) throw new Error("the scrim insert returned no id");
+    if (!id) throw new Error("the scrim insert returned no id");
 
-  return id;
+    await replaceOpenDays(tx, id, values.openDays);
+    await replaceAutoclean(tx, id, values.autoclean);
+
+    return id;
+  });
 }
 
 /**
@@ -291,7 +666,7 @@ export async function createScrim(values: CreateScrimValues): Promise<string> {
  * remembers the message. Two writers means whichever re-renders last
  * wins.
  */
-export type ScrimUpdate = Partial<
+export type ScrimColumnUpdate = Partial<
   Pick<
     typeof scrims.$inferInsert,
     | "name"
@@ -309,7 +684,6 @@ export type ScrimUpdate = Partial<
     | "closedAt"
     | "matchTime"
     | "status"
-    | "autoclean"
     | "autocleanTime"
     | "autoslotlist"
     | "multiregister"
@@ -320,7 +694,6 @@ export type ScrimUpdate = Partial<
     | "noDuplicateName"
     | "allowDuplicateTags"
     | "timeElapsedSeconds"
-    | "openDays"
     | "slotlistFormat"
     | "openMessage"
     | "closeMessage"
@@ -328,6 +701,21 @@ export type ScrimUpdate = Partial<
     | "cdn"
   >
 >;
+
+/**
+ * One edit to a scrim.
+ *
+ * The columns and the two lists are edited together, so a caller never
+ * has to remember that `openDays` and `autoclean` are not columns any
+ * more: they are written to their join tables in the same transaction
+ * as the columns.
+ */
+export interface ScrimUpdate extends ScrimColumnUpdate {
+  /** The days registration may open on. Written to `scrim_open_days`. */
+  readonly openDays?: readonly Weekday[];
+  /** What the autoclean pass removes. Written to `scrim_autoclean`. */
+  readonly autoclean?: readonly AutocleanKind[];
+}
 
 /**
  * Writes **one** field of a scrim.
@@ -340,15 +728,26 @@ export async function updateScrim(
   id: string,
   values: ScrimUpdate,
 ): Promise<ScrimRecord | null> {
-  const rows = await db
-    .update(scrims)
-    .set({ ...values, updatedAt: new Date() })
-    .where(eq(scrims.id, id))
-    .returning();
+  const { openDays, autoclean, ...columns } = values;
 
-  const row = rows[0];
+  return writeTransaction(async (tx) => {
+    const rows = await tx
+      .update(scrims)
+      .set({ ...columns, updatedAt: new Date() })
+      .where(eq(scrims.id, id))
+      .returning();
 
-  return row ? toScrim(row) : null;
+    const row = rows[0];
+
+    if (!row) return null;
+
+    if (openDays) await replaceOpenDays(tx, id, openDays);
+    if (autoclean) await replaceAutoclean(tx, id, autoclean);
+
+    const extras = await loadScrimExtras(tx, [id]);
+
+    return toScrim(row, extras.get(id) ?? NO_EXTRAS);
+  });
 }
 
 /**
@@ -363,18 +762,33 @@ export async function updateAllScrims(
   guildId: string,
   values: ScrimUpdate,
 ): Promise<number> {
-  const rows = await db
-    .update(scrims)
-    .set({ ...values, updatedAt: new Date() })
-    .where(eq(scrims.guildId, guildId))
-    .returning({ id: scrims.id });
+  const { openDays, autoclean, ...columns } = values;
 
-  return rows.length;
+  return writeTransaction(async (tx) => {
+    const rows = await tx
+      .update(scrims)
+      .set({ ...columns, updatedAt: new Date() })
+      .where(eq(scrims.guildId, guildId))
+      .returning({ id: scrims.id });
+
+    if (openDays) {
+      for (const row of rows) await replaceOpenDays(tx, row.id, openDays);
+    }
+
+    if (autoclean) {
+      for (const row of rows) await replaceAutoclean(tx, row.id, autoclean);
+    }
+
+    return rows.length;
+  });
 }
 
-/** Deletes a scrim. The slots cascade. */
+/**
+ * Deletes a scrim. The slots, their members, the reservations and the
+ * two lists cascade with it.
+ */
 export async function deleteScrim(id: string): Promise<void> {
-  await db.delete(scrims).where(eq(scrims.id, id));
+  await writeLock(() => db.delete(scrims).where(eq(scrims.id, id)));
 }
 
 /* ------------------------------------------------------------------ *
@@ -389,7 +803,12 @@ export async function listSlots(scrimId: string): Promise<SlotRecord[]> {
     .where(eq(slots.scrimId, scrimId))
     .orderBy(asc(slots.num));
 
-  return rows.map(toSlot);
+  const members = await loadSlotMembers(
+    db,
+    rows.map((row) => row.id),
+  );
+
+  return rows.map((row) => toSlot(row, members.get(row.id) ?? []));
 }
 
 /** One slot of a scrim, by its number. */
@@ -405,7 +824,11 @@ export async function getSlotByNum(
 
   const row = rows[0];
 
-  return row ? toSlot(row) : null;
+  if (!row) return null;
+
+  const members = await loadSlotMembers(db, [row.id]);
+
+  return toSlot(row, members.get(row.id) ?? []);
 }
 
 /** One slot, by its row id. */
@@ -414,7 +837,11 @@ export async function getSlot(slotId: string): Promise<SlotRecord | null> {
 
   const row = rows[0];
 
-  return row ? toSlot(row) : null;
+  if (!row) return null;
+
+  const members = await loadSlotMembers(db, [row.id]);
+
+  return toSlot(row, members.get(row.id) ?? []);
 }
 
 /** How many slots are free. A count, not a read-modify-write (D14). */
@@ -441,14 +868,23 @@ export interface ClaimValues {
  *
  * ```sql
  * UPDATE slots
- *    SET state = 'claimed', team_name = $3, owner_user_id = $4, members = $5
+ *    SET state = 'claimed', team_name = $3, owner_user_id = $4
  *  WHERE scrim_id = $1 AND num = $2 AND state = 'free'
  * RETURNING id;
  * ```
  *
- * Zero rows returned means somebody else got it. **There is no lock** —
- * the source protected this with a module-global `asyncio.Lock` that
- * died with the process, so two users could own one slot.
+ * Zero rows returned means somebody else got it. **The claim is not
+ * protected by a lock** — the source protected it with a module-global
+ * `asyncio.Lock` that died with the process, so two users could own one
+ * slot. The database enforces the invariant here. (There *is* an
+ * in-process mutex around the transaction, because SQLite has one
+ * writer; it is not what makes the claim exclusive.)
+ *
+ * The team goes into `slot_members`, in the **same transaction** as the
+ * claim: the claim wins the slot, and only then are the members
+ * written. There is no read-modify-write of the member list anywhere —
+ * a claim that read the slot, appended a member and wrote it back is a
+ * race two moderators can lose.
  *
  * @returns the claimed slot, or `null` when somebody else won.
  */
@@ -457,29 +893,34 @@ export async function claimSlot(
   num: number,
   values: ClaimValues,
 ): Promise<SlotRecord | null> {
-  const rows = await db
-    .update(slots)
-    .set({
-      state: "claimed",
-      teamName: values.teamName,
-      ownerUserId: values.ownerUserId,
-      members: [...values.members],
-      messageId: values.messageId,
-      jumpUrl: values.jumpUrl,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(slots.scrimId, scrimId),
-        eq(slots.num, num),
-        eq(slots.state, "free"),
-      ),
-    )
-    .returning();
+  return writeTransaction(async (tx) => {
+    const rows = await tx
+      .update(slots)
+      .set({
+        state: "claimed",
+        teamName: values.teamName,
+        ownerUserId: values.ownerUserId,
+        messageId: values.messageId,
+        jumpUrl: values.jumpUrl,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(slots.scrimId, scrimId),
+          eq(slots.num, num),
+          eq(slots.state, "free"),
+        ),
+      )
+      .returning();
 
-  const row = rows[0];
+    const row = rows[0];
 
-  return row ? toSlot(row) : null;
+    if (!row) return null;
+
+    const members = await replaceSlotMembers(tx, row.id, values.members);
+
+    return toSlot(row, members);
+  });
 }
 
 /**
@@ -492,23 +933,28 @@ export async function releaseSlot(
   slotId: string,
   ownerUserId: string,
 ): Promise<SlotRecord | null> {
-  const rows = await db
-    .update(slots)
-    .set({
-      state: "free",
-      teamName: null,
-      ownerUserId: null,
-      members: [],
-      messageId: null,
-      jumpUrl: null,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(slots.id, slotId), eq(slots.ownerUserId, ownerUserId)))
-    .returning();
+  return writeTransaction(async (tx) => {
+    const rows = await tx
+      .update(slots)
+      .set({
+        state: "free",
+        teamName: null,
+        ownerUserId: null,
+        messageId: null,
+        jumpUrl: null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(slots.id, slotId), eq(slots.ownerUserId, ownerUserId)))
+      .returning();
 
-  const row = rows[0];
+    const row = rows[0];
 
-  return row ? toSlot(row) : null;
+    if (!row) return null;
+
+    await tx.delete(slotMembers).where(eq(slotMembers.slotId, slotId));
+
+    return toSlot(row, []);
+  });
 }
 
 /**
@@ -527,24 +973,35 @@ export async function setSlotState(
     readonly members?: readonly string[];
   } = {},
 ): Promise<SlotRecord | null> {
-  const patch: Partial<typeof slots.$inferInsert> = {
-    state,
-    updatedAt: new Date(),
-  };
+  return writeTransaction(async (tx) => {
+    const patch: Partial<typeof slots.$inferInsert> = {
+      state,
+      updatedAt: new Date(),
+    };
 
-  if (values.teamName !== undefined) patch.teamName = values.teamName;
-  if (values.ownerUserId !== undefined) patch.ownerUserId = values.ownerUserId;
-  if (values.members !== undefined) patch.members = [...values.members];
+    if (values.teamName !== undefined) patch.teamName = values.teamName;
+    if (values.ownerUserId !== undefined) patch.ownerUserId = values.ownerUserId;
 
-  const rows = await db
-    .update(slots)
-    .set(patch)
-    .where(eq(slots.id, slotId))
-    .returning();
+    const rows = await tx
+      .update(slots)
+      .set(patch)
+      .where(eq(slots.id, slotId))
+      .returning();
 
-  const row = rows[0];
+    const row = rows[0];
 
-  return row ? toSlot(row) : null;
+    if (!row) return null;
+
+    if (values.members !== undefined) {
+      const members = await replaceSlotMembers(tx, slotId, values.members);
+
+      return toSlot(row, members);
+    }
+
+    const members = await loadSlotMembers(tx, [slotId]);
+
+    return toSlot(row, members.get(slotId) ?? []);
+  });
 }
 
 /**
@@ -553,6 +1010,9 @@ export async function setSlotState(
  * The "Change Team" button. The source wrote the team name and the
  * owner in two separate statements, which could leave a half-changed
  * slot behind.
+ *
+ * The member list is replaced, not merged: the team that was on the
+ * slot is the team that is off it.
  */
 export async function changeSlotTeam(
   slotId: string,
@@ -562,21 +1022,26 @@ export async function changeSlotTeam(
     readonly members: readonly string[];
   },
 ): Promise<SlotRecord | null> {
-  const rows = await db
-    .update(slots)
-    .set({
-      state: "claimed",
-      teamName: values.teamName,
-      ownerUserId: values.ownerUserId,
-      members: [...values.members],
-      updatedAt: new Date(),
-    })
-    .where(eq(slots.id, slotId))
-    .returning();
+  return writeTransaction(async (tx) => {
+    const rows = await tx
+      .update(slots)
+      .set({
+        state: "claimed",
+        teamName: values.teamName,
+        ownerUserId: values.ownerUserId,
+        updatedAt: new Date(),
+      })
+      .where(eq(slots.id, slotId))
+      .returning();
 
-  const row = rows[0];
+    const row = rows[0];
 
-  return row ? toSlot(row) : null;
+    if (!row) return null;
+
+    const members = await replaceSlotMembers(tx, slotId, values.members);
+
+    return toSlot(row, members);
+  });
 }
 
 /**
@@ -592,25 +1057,28 @@ export async function createFreeSlots(
 ): Promise<void> {
   if (numbers.length === 0) return;
 
-  await db
-    .insert(slots)
-    .values(
-      numbers.map((num) => ({
-        scrimId,
-        num,
-        state: "free" as const,
-      })),
-    )
-    .onConflictDoNothing();
+  await writeLock(() =>
+    db
+      .insert(slots)
+      .values(
+        numbers.map((num) => ({
+          scrimId,
+          num,
+          state: "free" as const,
+        })),
+      )
+      .onConflictDoNothing(),
+  );
 }
 
 /**
  * Deletes every slot of a scrim.
  *
- * Opening a scrim resets its slots, so this runs first.
+ * Opening a scrim resets its slots, so this runs first. The members of
+ * the slots go with them.
  */
 export async function deleteSlots(scrimId: string): Promise<void> {
-  await db.delete(slots).where(eq(slots.scrimId, scrimId));
+  await writeLock(() => db.delete(slots).where(eq(slots.scrimId, scrimId)));
 }
 
 /** The owners of the claimed slots of a scrim. */
@@ -642,38 +1110,46 @@ export async function listClaimedTeamNames(
 /**
  * The claimed slots of a scrim that already hold one of these members.
  *
- * The source ran this as raw SQL with an array-overlap operator
- * (`$2 && SLOTS.MEMBERS`) against a schema-qualified join table. Ours is
- * a typed query over one table (S6, row 12).
+ * The source asked this as raw SQL with an array-overlap operator
+ * (`$2 && SLOTS.MEMBERS`) against a schema-qualified join table. Ours
+ * is a **join** against `slot_members`: the same question, asked of a
+ * table that exists on both engines.
  *
- * The overlap is written as `members && ARRAY[$1, $2]::text[]` rather
- * than `members && $1::text[]`: the latter makes Postgres read the
- * parameter as text and then cast it, and the array literal it receives
- * is not one it can parse. Every id is still a bind parameter.
+ * The join is also faster than the operator was — the index on
+ * `slot_members.user_id` does the work — and it says what it means: a
+ * slot matches when one of its member rows names one of these users.
+ *
+ * @param excludeSlotId the slot being checked, when there is one. A
+ *        slot never counts as a duplicate of itself.
  */
 export async function findFakeTagMatches(
   scrimId: string,
   memberIds: readonly string[],
+  excludeSlotId: string | null = null,
 ): Promise<SlotRecord[]> {
   if (memberIds.length === 0) return [];
 
-  const array = sql.join(
-    memberIds.map((id) => sql`${id}`),
-    sql`, `,
-  );
-
   const rows = await db
-    .select()
+    .selectDistinct({ slot: slots })
     .from(slots)
+    .innerJoin(slotMembers, eq(slotMembers.slotId, slots.id))
     .where(
       and(
         eq(slots.scrimId, scrimId),
         eq(slots.state, "claimed"),
-        sql`${slots.members} && ARRAY[${array}]::text[]`,
+        inArray(slotMembers.userId, [...memberIds]),
+        excludeSlotId ? ne(slots.id, excludeSlotId) : undefined,
       ),
     );
 
-  return rows.map(toSlot);
+  const matched = rows.map((row) => row.slot);
+
+  const members = await loadSlotMembers(
+    db,
+    matched.map((slot) => slot.id),
+  );
+
+  return matched.map((slot) => toSlot(slot, members.get(slot.id) ?? []));
 }
 
 /* ------------------------------------------------------------------ *
@@ -690,7 +1166,12 @@ export async function listReservedSlots(
     .where(eq(reservedSlots.scrimId, scrimId))
     .orderBy(asc(reservedSlots.num));
 
-  return rows.map(toReservedSlot);
+  const members = await loadReservedMembers(
+    db,
+    rows.map((row) => row.id),
+  );
+
+  return rows.map((row) => toReservedSlot(row, members.get(row.id) ?? []));
 }
 
 /**
@@ -709,40 +1190,49 @@ export async function reserveSlot(
     readonly expires: Date | null;
   },
 ): Promise<ReservedSlotRecord | null> {
-  await db
-    .delete(reservedSlots)
-    .where(
-      and(
-        eq(reservedSlots.scrimId, values.scrimId),
-        eq(reservedSlots.num, values.num),
-      ),
-    );
+  return writeTransaction(async (tx) => {
+    await tx
+      .delete(reservedSlots)
+      .where(
+        and(
+          eq(reservedSlots.scrimId, values.scrimId),
+          eq(reservedSlots.num, values.num),
+        ),
+      );
 
-  const rows = await db
-    .insert(reservedSlots)
-    .values({
-      scrimId: values.scrimId,
-      num: values.num,
-      userId: values.userId,
-      teamName: values.teamName,
-      members: [...values.members],
-      expires: values.expires,
-    })
-    .returning();
+    const rows = await tx
+      .insert(reservedSlots)
+      .values({
+        scrimId: values.scrimId,
+        num: values.num,
+        userId: values.userId,
+        teamName: values.teamName,
+        expires: values.expires,
+      })
+      .returning();
 
-  const row = rows[0];
+    const row = rows[0];
 
-  return row ? toReservedSlot(row) : null;
+    if (!row) return null;
+
+    const members = await replaceReservedMembers(tx, row.id, values.members);
+
+    return toReservedSlot(row, members);
+  });
 }
 
 /** Removes a reservation. */
 export async function deleteReservedSlot(slotId: string): Promise<void> {
-  await db.delete(reservedSlots).where(eq(reservedSlots.id, slotId));
+  await writeLock(() =>
+    db.delete(reservedSlots).where(eq(reservedSlots.id, slotId)),
+  );
 }
 
 /** Removes every reservation of a scrim. */
 export async function deleteReservedSlots(scrimId: string): Promise<void> {
-  await db.delete(reservedSlots).where(eq(reservedSlots.scrimId, scrimId));
+  await writeLock(() =>
+    db.delete(reservedSlots).where(eq(reservedSlots.scrimId, scrimId)),
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -757,7 +1247,12 @@ export async function listBans(scrimId: string): Promise<BannedTeamRecord[]> {
     .where(eq(bannedTeams.scrimId, scrimId))
     .orderBy(asc(bannedTeams.createdAt));
 
-  return rows.map(toBannedTeam);
+  const members = await loadBannedMembers(
+    db,
+    rows.map((row) => row.id),
+  );
+
+  return rows.map((row) => toBannedTeam(row, members.get(row.id) ?? []));
 }
 
 /** The users banned from a scrim. */
@@ -800,38 +1295,46 @@ export async function banUser(
     readonly expires: Date | null;
   },
 ): Promise<BannedTeamRecord | null> {
-  const rows = await db
-    .insert(bannedTeams)
-    .values({
-      scrimId: values.scrimId,
-      userId: values.userId,
-      teamName: values.teamName,
-      members: [...values.members],
-      reason: values.reason,
-      expires: values.expires,
-    })
-    .onConflictDoUpdate({
-      target: [bannedTeams.scrimId, bannedTeams.userId],
-      set: {
+  return writeTransaction(async (tx) => {
+    const rows = await tx
+      .insert(bannedTeams)
+      .values({
+        scrimId: values.scrimId,
+        userId: values.userId,
         teamName: values.teamName,
-        members: [...values.members],
         reason: values.reason,
         expires: values.expires,
-        updatedAt: new Date(),
-      },
-    })
-    .returning();
+      })
+      .onConflictDoUpdate({
+        target: [bannedTeams.scrimId, bannedTeams.userId],
+        set: {
+          teamName: values.teamName,
+          reason: values.reason,
+          expires: values.expires,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
 
-  const row = rows[0];
+    const row = rows[0];
 
-  return row ? toBannedTeam(row) : null;
+    if (!row) return null;
+
+    const members = await replaceBannedMembers(tx, row.id, values.members);
+
+    return toBannedTeam(row, members);
+  });
 }
 
 /** Lifts a ban. */
 export async function unbanUser(scrimId: string, userId: string): Promise<void> {
-  await db
-    .delete(bannedTeams)
-    .where(and(eq(bannedTeams.scrimId, scrimId), eq(bannedTeams.userId, userId)));
+  await writeLock(() =>
+    db
+      .delete(bannedTeams)
+      .where(
+        and(eq(bannedTeams.scrimId, scrimId), eq(bannedTeams.userId, userId)),
+      ),
+  );
 }
 
 /** The scrims a user is banned from, in one guild. */
@@ -866,13 +1369,15 @@ export async function setBanLogChannel(
   guildId: string,
   channelId: string,
 ): Promise<void> {
-  await db
-    .insert(banLogs)
-    .values({ guildId, channelId })
-    .onConflictDoUpdate({
-      target: banLogs.guildId,
-      set: { channelId, updatedAt: new Date() },
-    });
+  await writeLock(() =>
+    db
+      .insert(banLogs)
+      .values({ guildId, channelId })
+      .onConflictDoUpdate({
+        target: banLogs.guildId,
+        set: { channelId, updatedAt: new Date() },
+      }),
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -892,6 +1397,16 @@ export interface ScrimJobPayload {
  * timer that dies with the process means the scrim never opens again.
  */
 export async function scheduleJob(
+  event: JobEvent,
+  expiresAt: Date,
+  payload: ScrimJobPayload,
+  userId: string | null = null,
+): Promise<string> {
+  return writeLock(() => scheduleJobUnlocked(event, expiresAt, payload, userId));
+}
+
+/** The write behind {@link scheduleJob}, without the lock. */
+async function scheduleJobUnlocked(
   event: JobEvent,
   expiresAt: Date,
   payload: ScrimJobPayload,
@@ -923,24 +1438,41 @@ export async function replaceScrimJob(
   payload: ScrimJobPayload = { scrimId },
   userId: string | null = null,
 ): Promise<string> {
-  await deleteScrimJobs(event, scrimId);
+  return writeLock(async () => {
+    await db
+      .delete(jobs)
+      .where(
+        and(
+          eq(jobs.event, event),
+          sql`${jobs.payload} ->> 'scrimId' = ${scrimId}`,
+        ),
+      );
 
-  return scheduleJob(event, expiresAt, payload, userId);
+    return scheduleJobUnlocked(event, expiresAt, payload, userId);
+  });
 }
 
-/** Deletes every job of one kind for one scrim. */
+/**
+ * Deletes every job of one kind for one scrim.
+ *
+ * The payload is JSON, and `->>` reads one key out of it on both
+ * engines — Postgres on a `jsonb`, SQLite (3.38 and later) on the JSON
+ * text the column holds. Every id is still a bind parameter.
+ */
 export async function deleteScrimJobs(
   event: JobEvent,
   scrimId: string,
 ): Promise<void> {
-  await db
-    .delete(jobs)
-    .where(
-      and(
-        eq(jobs.event, event),
-        sql`${jobs.payload} ->> 'scrimId' = ${scrimId}`,
+  await writeLock(() =>
+    db
+      .delete(jobs)
+      .where(
+        and(
+          eq(jobs.event, event),
+          sql`${jobs.payload} ->> 'scrimId' = ${scrimId}`,
+        ),
       ),
-    );
+  );
 }
 
 /** The jobs of one kind for one scrim. */
@@ -969,14 +1501,14 @@ export async function listDueJobs(
   const rows = await db
     .select({ id: jobs.id, payload: jobs.payload, expiresAt: jobs.expiresAt })
     .from(jobs)
-    .where(and(eq(jobs.event, event), sql`${jobs.expiresAt} <= ${now}`));
+    .where(and(eq(jobs.event, event), lte(jobs.expiresAt, now)));
 
   return rows;
 }
 
 /** Deletes a job by id. The dispatcher deletes before it dispatches. */
 export async function deleteJob(id: string): Promise<void> {
-  await db.delete(jobs).where(eq(jobs.id, id));
+  await writeLock(() => db.delete(jobs).where(eq(jobs.id, id)));
 }
 
 /** The scrim ids a job is about. */

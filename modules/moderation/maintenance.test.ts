@@ -4,22 +4,24 @@
  * The bug this prevents: `maintenance off` deleted the maintenance
  * channels by *name*, so a moderator's own channel called
  * `maintenance-chat` went with them. The channels the bot created are now
- * recorded on the lockdown row, and only those are deleted.
+ * recorded in the `lockdown_maintenance_channels` join table, and only
+ * those are deleted.
  *
- * These tests connect to the Postgres the bot talks to, because the thing
- * they are about — where the ids of the channels are recorded, and what
- * comes back when they are read — is only true of the database.
+ * These tests connect to the SQLite database the bot talks to, because
+ * the thing they are about — where the ids of the channels are recorded,
+ * and what comes back when they are read — is only true of the database.
  *
  * The fixtures use ids no real row can have, and they are deleted
  * afterwards.
  */
 
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { rmSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { ChannelType, Collection, PermissionFlagsBits } from "discord.js";
 import type { Channel, Guild, GuildMember, Role } from "discord.js";
 import { closeDatabase, db } from "../../db/client.js";
-import { lockdowns } from "../../db/schema.js";
+import { lockdownMaintenanceChannels } from "../../db/schema.js";
 import { maintenanceOff, maintenanceOn } from "./lockdown.js";
 import type { LockContext, LockableChannel } from "./lockdown.js";
 import { describeMaintenanceChannels } from "./maintenance.js";
@@ -31,6 +33,27 @@ import {
   removeLockdown,
 } from "./repo.js";
 import type { LockRecord } from "./types.js";
+
+/**
+ * The database this file runs against.
+ *
+ * **A file of its own.** SQLite has one writer, so two test files that
+ * shared a database file would fight over it and fail with
+ * `SQLITE_BUSY`. The file is in the system temporary directory, and it is
+ * dropped when the run ends.
+ *
+ * The client reads `DB_FILE` when it is imported and applies the
+ * migrations to it as it goes, so the variable has to be set *before*
+ * the import of `db/client.js` — which is what `vi.hoisted` is for.
+ */
+const { databaseFile } = vi.hoisted(() => {
+  const directory = process.env.TMPDIR || process.env.TEMP || "/tmp";
+  const file = `${directory}/quotient-moderation-maintenance-${process.pid}-${Math.random().toString(36).slice(2)}.db`;
+
+  process.env.DB_FILE = file;
+
+  return { databaseFile: file };
+});
 
 /** A run id, so two runs never fight over the same rows. */
 const RUN = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -208,6 +231,8 @@ afterEach(async () => {
 
 afterAll(async () => {
   await closeDatabase();
+
+  rmSync(databaseFile, { force: true });
 });
 
 describe("the maintenance lockdown row", () => {
@@ -265,14 +290,14 @@ describe("the maintenance lockdown row", () => {
 
     expect(read?.maintenanceChannelIds).toEqual([]);
 
-    // And the row itself holds nothing, so no other path can read them
+    // And the join table holds nothing, so no other path can read them
     // out of it either.
     const rows = await db
       .select()
-      .from(lockdowns)
-      .where(eq(lockdowns.id, record.id));
+      .from(lockdownMaintenanceChannels)
+      .where(eq(lockdownMaintenanceChannels.lockdownId, record.id));
 
-    expect(rows[0]?.maintenanceChannelIds).toEqual([]);
+    expect(rows).toHaveLength(0);
   });
 });
 

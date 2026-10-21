@@ -192,7 +192,12 @@ export interface LockRecord {
   readonly roleId: string | null;
   /** The single channel a channel lockdown applies to, or the category. */
   readonly channelId: string | null;
-  /** Every channel the lockdown touched. */
+  /**
+   * Every channel the lockdown touched.
+   *
+   * This is what the `lockdown_channels` join table holds: one row per
+   * (lockdown, channel). It used to be a `text[]` column on the row.
+   */
   readonly channelIds: readonly string[];
   /** When the lockdown lifts by itself, or `null` when it does not. */
   readonly expireTime: Date | null;
@@ -212,11 +217,11 @@ export interface LockRecord {
   /**
    * The ids of the maintenance channels the bot created for this lockdown.
    *
-   * This is what `lockdowns.maintenance_channel_ids` holds, and it is the
-   * **only** thing that says which channels `maintenance off` may delete:
-   * the ids of the channels the bot itself created. A channel that merely
-   * happens to be called `maintenance-chat` is not in this list and is
-   * never deleted.
+   * This is what the `lockdown_maintenance_channels` join table holds, and
+   * it is the **only** thing that says which channels `maintenance off` may
+   * delete: the ids of the channels the bot itself created. A channel that
+   * merely happens to be called `maintenance-chat` is not in this list and
+   * is never deleted.
    *
    * It is empty for every lockdown that is not of type `maintenance`. A
    * maintenance lockdown has no duration, so it has no job row either, and
@@ -238,12 +243,16 @@ export interface LockRecord {
  * all, and its state still survives a restart.
  *
  * The ids of the maintenance channels are **not** here either: they live on
- * the `lockdowns` row, in `maintenance_channel_ids`, for the same reason.
- * A copy of them in the payload would be a second copy to keep in step,
+ * the `lockdown_maintenance_channels` join table, for the same reason. A
+ * copy of them in the payload would be a second copy to keep in step,
  * and the payload does not even exist for a maintenance lockdown — it has
  * no duration.
+ *
+ * It is a type alias rather than an interface so that it can be written
+ * into a JSON column without a cast: the column takes a
+ * `Record<string, unknown>`, and an interface has no index signature.
  */
-export interface LockdownJobPayload {
+export type LockdownJobPayload = {
   /** The lockdown row this job belongs to. */
   readonly lockdownId: string;
   readonly type: LockdownType;
@@ -254,4 +263,4 @@ export interface LockdownJobPayload {
   readonly roleId: string | null;
   /** The channel the lockdown was started from, for the closing message. */
   readonly sourceChannelId: string | null;
-}
+};

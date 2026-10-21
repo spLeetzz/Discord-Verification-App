@@ -19,8 +19,8 @@
 
 import { sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
-import type { PgColumn } from "drizzle-orm/pg-core";
 import { db } from "./client.js";
+import type { PortableColumn } from "./dialect.js";
 import { premiumPlans } from "./schema.js";
 
 /**
@@ -30,7 +30,7 @@ import { premiumPlans } from "./schema.js";
  * the column has to be named in the expression. The name comes from our own
  * schema object, never from user input.
  */
-function excluded(column: PgColumn): SQL {
+function excluded(column: PortableColumn): SQL {
   return sql.raw(`excluded."${column.name}"`);
 }
 

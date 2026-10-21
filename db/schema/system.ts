@@ -10,30 +10,29 @@
 
 import { sql } from "drizzle-orm";
 import {
-  boolean,
-  check,
-  index,
-  integer,
-  jsonb,
-  pgTable,
-  text,
-  timestamp,
-  unique,
-  uniqueIndex,
-} from "drizzle-orm/pg-core";
-import {
+  AUTOROLE_KINDS,
   BLOCK_ID_TYPES,
   JOB_EVENTS,
   LOCKDOWN_TYPES,
-  createdAt,
-  discordId,
-  discordIdArray,
-  foreignId,
   oneOfCheck,
-  primaryId,
-  serialId,
-  updatedAt,
 } from "./common.js";
+import {
+  boolCol,
+  check,
+  createdAtCol,
+  defineTable,
+  foreignIdCol,
+  idCol,
+  index,
+  intCol,
+  jsonCol,
+  serialIdCol,
+  textCol,
+  tsCol,
+  unique,
+  uniqueIndex,
+  updatedAtCol,
+} from "../dialect.js";
 
 /**
  * Per-guild settings.
@@ -43,54 +42,54 @@ import {
  * premium subscription runs. It is deliberately *not* `config/events.ts` —
  * that file is deploy-time configuration for the frozen verification flow.
  */
-export const guildSettings = pgTable(
+export const guildSettings = defineTable(
   "guild_settings",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
     /**
      * S12: the prefix keeps a length check. The source's `max_length` was a
      * Tortoise-side validator, but the prefix length *is* a domain rule —
      * the source checked it explicitly — so it becomes a real constraint.
      */
-    prefix: text("prefix").notNull().default("q"),
+    prefix: textCol("prefix").notNull().default("q"),
     /** Embed accent colour, as a decimal integer. Null means "use the default". */
-    embedColor: integer("embed_color").default(2267063),
-    embedFooter: text("embed_footer").notNull().default(""),
+    embedColor: intCol("embed_color").default(2267063),
+    embedFooter: textCol("embed_footer").notNull().default(""),
     /** A private channel the bot may use to talk to the owner. */
-    privateChannelId: discordId("private_channel_id"),
+    privateChannelId: textCol("private_channel_id"),
     /** Which dashboard surfaces the guild may open. */
-    dashboardAccess: jsonb("dashboard_access")
-      .notNull()
-      .default(
-        sql`'{"embed": [], "scrims": [], "tourney": [], "slotm": []}'::jsonb`,
-      ),
+    dashboardAccess: jsonCol<Record<string, unknown>>("dashboard_access", {
+      embed: [],
+      scrims: [],
+      tourney: [],
+      slotm: [],
+    }),
     /**
      * When the guild's premium subscription runs out.
      *
      * This is the *tier* level gate (how many scrims, how many tourneys it
      * may have). The per-feature gates live in `guild_entitlements`.
      */
-    premiumExpiresAt: timestamp("premium_expires_at", {
-      withTimezone: true,
-      mode: "date",
-    }),
+    premiumExpiresAt: tsCol("premium_expires_at"),
     /** The user who paid for the subscription. */
-    madePremiumBy: discordId("made_premium_by"),
+    madePremiumBy: textCol("made_premium_by"),
     /**
      * The global kill switch (D39). While it is on, the dispatcher refuses
      * every command. Per-channel and per-guild lockdowns live in
      * `lockdowns`.
      */
-    lockdown: boolean("lockdown").notNull().default(false),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    lockdown: boolCol("lockdown").notNull().default(false),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("guild_settings_guild_id_unique").on(t.guildId),
+    // `length()`, not `char_length()`: SQLite has no `char_length`, and
+    // `length()` counts characters on both engines.
     check(
       "guild_settings_prefix_length_check",
-      sql`char_length(${t.prefix}) <= 5`,
+      sql`length(${t.prefix}) <= 5`,
     ),
   ],
 );
@@ -103,25 +102,22 @@ export const guildSettings = pgTable(
  * would populate it does not ship (D40). `premium_notified` and
  * `public_profile` are dropped as never-read columns.
  */
-export const userSettings = pgTable(
+export const userSettings = defineTable(
   "user_settings",
   {
-    id: primaryId(),
-    userId: discordId("user_id").notNull(),
-    isPremium: boolean("is_premium").notNull().default(false),
-    premiumExpireTime: timestamp("premium_expire_time", {
-      withTimezone: true,
-      mode: "date",
-    }),
+    id: idCol(),
+    userId: textCol("user_id").notNull(),
+    isPremium: boolCol("is_premium").notNull().default(false),
+    premiumExpireTime: tsCol("premium_expire_time"),
     /** How many subscriptions the user currently holds. */
-    premiums: integer("premiums").notNull().default(0),
+    premiums: intCol("premiums").notNull().default(0),
     /**
      * D40: the Quo Coin balance. Nothing may spend it to grant entitlement
      * — the economy does not ship — but the column may exist.
      */
-    money: integer("money").notNull().default(0),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    money: intCol("money").notNull().default(0),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [unique("user_settings_user_id_unique").on(t.userId)],
 );
@@ -137,18 +133,18 @@ export const userSettings = pgTable(
  * reminders with `extra #>> '{args,0}'`, which is a full scan of the table
  * for every "remind me" button press.
  */
-export const jobs = pgTable(
+export const jobs = defineTable(
   "jobs",
   {
-    id: primaryId(),
-    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+    id: idCol(),
+    expiresAt: tsCol("expires_at").notNull(),
     /** The scheduler event name, e.g. `scrim_match` or `guild_premium`. */
-    event: text("event").notNull(),
-    payload: jsonb("payload").notNull().default(sql`'{}'::jsonb`),
+    event: textCol("event").notNull(),
+    payload: jsonCol<Record<string, unknown>>("payload", {}),
     /** The user the job is about, when it is about one. */
-    userId: discordId("user_id"),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    userId: textCol("user_id"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     index("jobs_expires_at_idx").on(t.expiresAt),
@@ -167,17 +163,17 @@ export const jobs = pgTable(
  * looked records up by `block_id` alone, so a user and a guild that share
  * an id collided.
  */
-export const blocklist = pgTable(
+export const blocklist = defineTable(
   "blocklist",
   {
-    id: primaryId(),
-    blockId: discordId("block_id").notNull(),
-    blockIdType: text("block_id_type").notNull(),
+    id: idCol(),
+    blockId: textCol("block_id").notNull(),
+    blockIdType: textCol("block_id_type").notNull(),
     /** The moderator who issued the block. */
-    blockedBy: discordId("blocked_by"),
-    reason: text("reason"),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    blockedBy: textCol("blocked_by"),
+    reason: textCol("reason"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("blocklist_block_id_block_id_type_unique").on(
@@ -217,18 +213,15 @@ export type LockdownPriorState = Record<string, LockdownChannelState>;
  * A lockdown record: channels or a whole guild that are locked until a
  * moderator lifts them or the timer expires.
  */
-export const lockdowns = pgTable(
+export const lockdowns = defineTable(
   "lockdowns",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    type: text("type").notNull(),
-    roleId: discordId("role_id"),
-    channelId: discordId("channel_id"),
-    channelIds: discordIdArray("channel_ids")
-      .notNull()
-      .default(sql`'{}'::text[]`),
-    expireTime: timestamp("expire_time", { withTimezone: true, mode: "date" }),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    type: textCol("type").notNull(),
+    roleId: textCol("role_id"),
+    channelId: textCol("channel_id"),
+    expireTime: tsCol("expire_time"),
     /**
      * What each channel's permission looked like before the lock.
      *
@@ -237,21 +230,8 @@ export const lockdowns = pgTable(
      * with no duration has no job at all, and its prior state still has to
      * survive a restart.
      */
-    priorState: jsonb("prior_state").$type<LockdownPriorState | null>(),
-    /**
-     * The maintenance channels the bot created for this lockdown.
-     *
-     * A maintenance lockdown has no duration, so it has no job row, and the
-     * ids of the channels the bot created used to travel in the job
-     * payload. Recording them here means `maintenance off` deletes exactly
-     * the channels it created, rather than every channel named
-     * `maintenance-chat` — which would take a moderator's own channel with
-     * it.
-     */
-    maintenanceChannelIds: discordIdArray("maintenance_channel_ids")
-      .notNull()
-      .default(sql`'{}'::text[]`),
-    authorId: discordId("author_id").notNull(),
+    priorState: jsonCol<LockdownPriorState | null>("prior_state"),
+    authorId: textCol("author_id").notNull(),
     /**
      * The logical key of the lockdown: what it locks, in one string.
      *
@@ -264,9 +244,9 @@ export const lockdowns = pgTable(
      * The repository writes it in the same statement as the row, and the
      * unique index is what actually enforces it.
      */
-    lockKey: text("lock_key").notNull(),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    lockKey: textCol("lock_key").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     index("lockdowns_guild_id_type_idx").on(t.guildId, t.type),
@@ -276,52 +256,132 @@ export const lockdowns = pgTable(
   ],
 );
 
+/**
+ * The channels a lockdown covers.
+ *
+ * One row per (lockdown, channel). The source kept them in a `text[]`
+ * column and rewrote the whole array on every lock and unlock.
+ */
+export const lockdownChannels = defineTable(
+  "lockdown_channels",
+  {
+    id: idCol(),
+    lockdownId: foreignIdCol("lockdown_id")
+      .notNull()
+      .references(() => lockdowns.id, { onDelete: "cascade" }),
+    channelId: textCol("channel_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("lockdown_channels_lockdown_id_channel_id_unique").on(
+      t.lockdownId,
+      t.channelId,
+    ),
+    index("lockdown_channels_channel_id_idx").on(t.channelId),
+  ],
+);
+
+/**
+ * The maintenance channels the bot created for a lockdown.
+ *
+ * A maintenance lockdown has no duration, so it has no job row, and the
+ * ids of the channels the bot created used to travel in the job payload.
+ * Recording them here means `maintenance off` deletes exactly the channels
+ * it created, rather than every channel named `maintenance-chat` — which
+ * would take a moderator's own channel with it.
+ */
+export const lockdownMaintenanceChannels = defineTable(
+  "lockdown_maintenance_channels",
+  {
+    id: idCol(),
+    lockdownId: foreignIdCol("lockdown_id")
+      .notNull()
+      .references(() => lockdowns.id, { onDelete: "cascade" }),
+    channelId: textCol("channel_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("lockdown_maintenance_channels_lockdown_id_channel_id_unique").on(
+      t.lockdownId,
+      t.channelId,
+    ),
+  ],
+);
+
 /** A channel whose messages are deleted automatically. */
-export const autopurgeConfigs = pgTable(
+export const autopurgeConfigs = defineTable(
   "autopurge_configs",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    channelId: discordId("channel_id").notNull(),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    channelId: textCol("channel_id").notNull(),
     /** Minutes after which a message is purged. */
-    deleteAfter: integer("delete_after").notNull().default(10),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    deleteAfter: intCol("delete_after").notNull().default(10),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [unique("autopurge_configs_channel_id_unique").on(t.channelId)],
 );
 
 /** The roles automatically given to new members. */
-export const autoroleConfigs = pgTable(
+export const autoroleConfigs = defineTable(
   "autorole_configs",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    humans: discordIdArray("humans")
-      .notNull()
-      .default(sql`'{}'::text[]`),
-    bots: discordIdArray("bots").notNull().default(sql`'{}'::text[]`),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [unique("autorole_configs_guild_id_unique").on(t.guildId)],
 );
 
+/**
+ * The roles an auto-role config gives out.
+ *
+ * One row per (guild, kind, role). `kind` is `human` or `bot` — the source
+ * kept two arrays, `humans` and `bots`, and rewrote the whole array on
+ * every toggle.
+ */
+export const autoroleRoles = defineTable(
+  "autorole_roles",
+  {
+    id: idCol(),
+    guildId: textCol("guild_id")
+      .notNull()
+      .references(() => autoroleConfigs.guildId, { onDelete: "cascade" }),
+    kind: textCol("kind").notNull(),
+    roleId: textCol("role_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("autorole_roles_guild_id_kind_role_id_unique").on(
+      t.guildId,
+      t.kind,
+      t.roleId,
+    ),
+    index("autorole_roles_guild_id_idx").on(t.guildId),
+    oneOfCheck("autorole_roles_kind_check", t.kind, AUTOROLE_KINDS),
+  ],
+);
+
 /** A canned message a guild can post with a short command. */
-export const tags = pgTable(
+export const tags = defineTable(
   "tags",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    name: text("name").notNull(),
-    content: text("content").notNull(),
-    isEmbed: boolean("is_embed").notNull().default(false),
-    isNsfw: boolean("is_nsfw").notNull().default(false),
-    ownerId: discordId("owner_id").notNull(),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    name: textCol("name").notNull(),
+    content: textCol("content").notNull(),
+    isEmbed: boolCol("is_embed").notNull().default(false),
+    isNsfw: boolCol("is_nsfw").notNull().default(false),
+    ownerId: textCol("owner_id").notNull(),
     /** How many times the tag was used. */
-    usage: integer("usage").notNull().default(0),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    usage: intCol("usage").notNull().default(0),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("tags_guild_id_name_unique").on(t.guildId, t.name),
@@ -336,16 +396,16 @@ export const tags = pgTable(
  *
  * S11: `conditions` is dropped — the source never read or wrote it.
  */
-export const alerts = pgTable(
+export const alerts = defineTable(
   "alerts",
   {
-    id: primaryId(),
-    authorId: discordId("author_id").notNull(),
-    active: boolean("active").notNull().default(true),
+    id: idCol(),
+    authorId: textCol("author_id").notNull(),
+    active: boolCol("active").notNull().default(true),
     /** D32: the embed is JSON, not a Python literal string. */
-    message: jsonb("message").notNull().default(sql`'{}'::jsonb`),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    message: jsonCol<Record<string, unknown>>("message", {}),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     // Only one alert is live at a time.
@@ -356,31 +416,31 @@ export const alerts = pgTable(
 );
 
 /** A time a user was prompted to read an alert. */
-export const alertPrompts = pgTable(
+export const alertPrompts = defineTable(
   "alert_prompts",
   {
-    id: primaryId(),
-    alertId: foreignId("alert_id")
+    id: idCol(),
+    alertId: foreignIdCol("alert_id")
       .notNull()
       .references(() => alerts.id, { onDelete: "cascade" }),
-    userId: discordId("user_id").notNull(),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    userId: textCol("user_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [index("alert_prompts_alert_id_user_id_idx").on(t.alertId, t.userId)],
 );
 
 /** A record that a user read an alert. */
-export const alertReads = pgTable(
+export const alertReads = defineTable(
   "alert_reads",
   {
-    id: primaryId(),
-    alertId: foreignId("alert_id")
+    id: idCol(),
+    alertId: foreignIdCol("alert_id")
       .notNull()
       .references(() => alerts.id, { onDelete: "cascade" }),
-    userId: discordId("user_id").notNull(),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    userId: textCol("user_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("alert_reads_alert_id_user_id_unique").on(t.alertId, t.userId),
@@ -391,26 +451,26 @@ export const alertReads = pgTable(
 /**
  * One row per command invocation, for the usage statistics.
  *
- * S1: the one table in the schema with a `bigserial` primary key. It is the
+ * S1: the one table in the schema with a serial primary key. It is the
  * only high-write table and nothing references its id.
  *
  * S4: the source's `used_at` becomes `created_at`.
  *
  * S10: rows older than 30 days are pruned daily — see `db/retention.ts`.
  */
-export const commandUsage = pgTable(
+export const commandUsage = defineTable(
   "command_usage",
   {
-    id: serialId(),
-    guildId: discordId("guild_id").notNull(),
-    channelId: discordId("channel_id").notNull(),
-    userId: discordId("user_id").notNull(),
-    cmd: text("cmd").notNull(),
+    id: serialIdCol(),
+    guildId: textCol("guild_id").notNull(),
+    channelId: textCol("channel_id").notNull(),
+    userId: textCol("user_id").notNull(),
+    cmd: textCol("cmd").notNull(),
     /** The prefix that was used, for the prefix-command statistics. */
-    prefix: text("prefix").notNull().default(""),
-    failed: boolean("failed").notNull().default(false),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    prefix: textCol("prefix").notNull().default(""),
+    failed: boolCol("failed").notNull().default(false),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     // The two tag-stats queries that ship filter on exactly these.
@@ -420,33 +480,33 @@ export const commandUsage = pgTable(
 );
 
 /** The last deleted message of a channel, for the `snipe` command. */
-export const snipes = pgTable(
+export const snipes = defineTable(
   "snipes",
   {
-    id: primaryId(),
-    channelId: discordId("channel_id").notNull(),
-    authorId: discordId("author_id").notNull(),
-    content: text("content").notNull(),
-    nsfw: boolean("nsfw").notNull().default(false),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    id: idCol(),
+    channelId: textCol("channel_id").notNull(),
+    authorId: textCol("author_id").notNull(),
+    content: textCol("content").notNull(),
+    nsfw: boolCol("nsfw").notNull().default(false),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [unique("snipes_channel_id_unique").on(t.channelId)],
 );
 
 /** A user's vote profile. */
-export const votes = pgTable(
+export const votes = defineTable(
   "votes",
   {
-    id: primaryId(),
-    userId: discordId("user_id").notNull(),
-    isVoter: boolean("is_voter").notNull().default(false),
-    expireTime: timestamp("expire_time", { withTimezone: true, mode: "date" }),
-    reminder: boolean("reminder").notNull().default(false),
-    notified: boolean("notified").notNull().default(false),
-    totalVotes: integer("total_votes").notNull().default(0),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    id: idCol(),
+    userId: textCol("user_id").notNull(),
+    isVoter: boolCol("is_voter").notNull().default(false),
+    expireTime: tsCol("expire_time"),
+    reminder: boolCol("reminder").notNull().default(false),
+    notified: boolCol("notified").notNull().default(false),
+    totalVotes: intCol("total_votes").notNull().default(0),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [unique("votes_user_id_unique").on(t.userId)],
 );

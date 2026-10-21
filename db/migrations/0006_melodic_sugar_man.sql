@@ -1,1 +1,0 @@
-CREATE INDEX "tags_guild_id_owner_id_idx" ON "tags" USING btree ("guild_id","owner_id");

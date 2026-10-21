@@ -1,45 +1,61 @@
 /**
- * The schema, proved against the live database.
+ * The schema, proved against a real SQLite database.
  *
- * These are not unit tests with a mocked database. They connect to the
- * Postgres the bot talks to and assert the things the port actually
- * promises:
+ * These are not unit tests with a mocked database. They open a temporary
+ * file database, apply the migration to it, and assert the things the port
+ * actually promises:
  *
- *  - the table names are the ratified ones, and there are no leftovers from
- *    an earlier migration;
- *  - every primary key is a uuid, except `command_usage`, which is a
- *    `bigserial`;
- *  - the unique constraints and the enum CHECKs are real constraints in
- *    the database and not just TypeScript types;
+ *  - every ratified table is created, and there are no leftovers from an
+ *    earlier migration;
+ *  - the primary keys, the unique constraints and the enum CHECKs are
+ *    real constraints in the database and not just TypeScript types;
  *  - **the conditional claim UPDATE works** — the single highest-value
  *    behaviour in the port, because it replaces Quotient's process-global
  *    lock and removes the double-claim corruption class;
- *  - a plan can be reseeded without destroying the transactions that
- *    reference it.
+ *  - `ON DELETE CASCADE` really cascades, and the partial unique index on
+ *    `alerts` really is partial;
+ *  - applying the migration twice is safe.
  *
- * The fixtures are created with ids that no real row can have, and they are
- * deleted afterwards.
+ * **No server is involved.** The database is a file in the system
+ * temporary directory, created and dropped with the test run.
+ *
+ * The client reads `DB_FILE` when it is imported and applies the
+ * migrations as it goes, so the variable is set before the import — which
+ * is why the imports below are dynamic.
  */
 
 import { afterAll, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { inArray, sql } from "drizzle-orm";
-import { closeDatabase, db } from "./client.js";
-import { PREMIUM_PLAN_CATALOGUE, seedPremiumPlans } from "./seed.js";
-import {
+
+/** The database this run uses. Dropped when the run ends. */
+const directory = mkdtempSync(join(tmpdir(), "quotient-db-test-"));
+
+process.env.DB_FILE = join(directory, "schema-test.db");
+
+const { closeDatabase, db, withTransaction } = await import("./client.js");
+const { applyMigrations } = await import("./migrate.js");
+const {
+  alerts,
   commandUsage,
   premiumPlans,
   premiumTransactions,
   scrims,
+  slotMembers,
   slots,
   tags,
-} from "./schema.js";
+} = await import("./schema.js");
+const { PREMIUM_PLAN_CATALOGUE, seedPremiumPlans } = await import("./seed.js");
 
 /**
- * The ratified table list (`docs/porting/schema.md` §S3), plus the join and
- * utility tables it implies.
+ * The ratified table list (`docs/porting/schema.md` §S3), plus the join
+ * tables the SQLite port adds in place of Postgres arrays.
  *
  * It is written out by hand on purpose: a test that compares the database
- * against the schema would happily pass if both were wrong in the same way.
+ * against the schema would happily pass if both were wrong in the same
+ * way.
  */
 const EXPECTED_TABLES = [
   "alert_prompts",
@@ -47,7 +63,9 @@ const EXPECTED_TABLES = [
   "alerts",
   "autopurge_configs",
   "autorole_configs",
+  "autorole_roles",
   "ban_logs",
+  "banned_team_members",
   "banned_teams",
   "blocklist",
   "command_usage",
@@ -55,24 +73,33 @@ const EXPECTED_TABLES = [
   "guild_entitlements",
   "guild_settings",
   "jobs",
+  "lockdown_channels",
+  "lockdown_maintenance_channels",
   "lockdowns",
+  "media_partner_slot_members",
   "media_partner_slots",
   "media_partners",
   "premium_plans",
   "premium_transactions",
+  "reserved_slot_members",
   "reserved_slots",
+  "scrim_autoclean",
+  "scrim_open_days",
   "scrims",
   "slot_manager_scrims",
   "slot_managers",
+  "slot_members",
   "slot_reminders",
   "slots",
   "snipes",
+  "ss_config_keywords",
   "ss_configs",
   "ss_submissions",
   "tagcheck_channels",
   "tags",
   "tourney_banned_users",
   "tourney_group_lists",
+  "tourney_slot_members",
   "tourney_slots",
   "tourneys",
   "user_settings",
@@ -82,13 +109,24 @@ const EXPECTED_TABLES = [
 /** A guild id no real row can have, unique to this test run. */
 const GUILD_ID = `db-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-/** The Postgres SQLSTATE of the error a constraint violation produced. */
-function pgErrorCode(error: unknown): string | undefined {
+/**
+ * The extended SQLite error code of a constraint violation.
+ *
+ * `SQLITE_CONSTRAINT_UNIQUE` for a unique index, `..._PRIMARYKEY` for a
+ * primary key and `..._CHECK` for a CHECK constraint. The Postgres test
+ * asserted the SQLSTATE; this is the same idea, one engine down.
+ *
+ * Drizzle wraps the driver's error, so the code is on the `cause`.
+ */
+function sqliteErrorCode(error: unknown): string | undefined {
   const candidate = error as
-    | { code?: string; cause?: { code?: string } }
+    | { extendedCode?: string; code?: string; cause?: unknown }
     | undefined;
 
-  return candidate?.cause?.code ?? candidate?.code;
+  if (candidate?.extendedCode) return candidate.extendedCode;
+  if (candidate?.code) return candidate.code;
+
+  return sqliteErrorCode(candidate?.cause);
 }
 
 /** The scrims this test file created, so they can be cleaned up. */
@@ -106,80 +144,103 @@ afterAll(async () => {
   await db.delete(premiumPlans).where(sql`${premiumPlans.code} like 'db-test-%'`);
 
   await closeDatabase();
+  rmSync(directory, { recursive: true, force: true });
 });
 
 describe("db/schema", () => {
   it("creates exactly the ratified tables", async () => {
-    const result = await db.execute<{ table_name: string }>(sql`
-      select table_name
-      from information_schema.tables
-      where table_schema = 'public' and table_type = 'BASE TABLE'
-      order by table_name
+    const result = await db.execute<{ name: string }>(sql`
+      select name
+      from sqlite_master
+      where type = 'table' and name not like 'sqlite_%'
+        and name not like '__drizzle_%'
+      order by name
     `);
 
-    const actual = result.rows.map((row) => row.table_name);
+    const actual = result.rows.map((row) => row.name);
 
     expect(actual).toEqual([...EXPECTED_TABLES].sort());
   });
 
-  it("uses a uuid primary key everywhere except command_usage", async () => {
+  it("gives every table a text primary key, except command_usage", async () => {
     const result = await db.execute<{
-      table_name: string;
-      data_type: string;
-      column_default: string;
+      name: string;
+      type: string;
+      pk: number;
+      dflt_value: string | null;
     }>(sql`
-      select table_name, data_type, column_default
-      from information_schema.columns
-      where table_schema = 'public'
-        and column_name = 'id'
-        and table_name in (select table_name from information_schema.tables
-                          where table_schema = 'public' and table_type = 'BASE TABLE')
-      order by table_name
+      select m.name as name, p.type as type, p.pk as pk, p.dflt_value as dflt_value
+      from sqlite_master m
+      join pragma_table_info(m.name) p
+      where m.type = 'table' and m.name not like 'sqlite_%'
+        and m.name not like '__drizzle_%'
+        and p.pk > 0
+      order by m.name, p.pk
     `);
 
-    const byTable = new Map(
-      result.rows.map((row) => [row.table_name, row] as const),
-    );
+    const byTable = new Map<string, typeof result.rows>();
+
+    for (const row of result.rows) {
+      const list = byTable.get(row.name) ?? [];
+
+      list.push(row);
+      byTable.set(row.name, list);
+    }
 
     // The one exception: command_usage is the high-write table.
     const usage = byTable.get("command_usage");
-    expect(usage?.data_type).toBe("bigint");
+    expect(usage?.[0]?.type.toLowerCase()).toBe("integer");
 
-    for (const [table, row] of byTable) {
+    for (const [table, columns] of byTable) {
       if (table === "command_usage") continue;
 
-      expect(row.data_type, `${table}.id must be a uuid`).toBe("uuid");
-      expect(row.column_default, `${table}.id must default to a uuid`).toContain(
-        "gen_random_uuid()",
-      );
+      for (const column of columns) {
+        expect(column.type.toLowerCase(), `${table}.${column.name}`).toBe(
+          "text",
+        );
+      }
     }
   });
 
-  it("stores Discord ids as text, never as bigint", async () => {
+  it("stores Discord ids as text, never as a number", async () => {
     const result = await db.execute<{ count: number }>(sql`
-      select count(*)::int as count
-      from information_schema.columns
-      where table_schema = 'public'
-        and (column_name like '%\_user\_id'
-             or column_name like '%\_guild\_id'
-             or column_name like '%\_channel\_id'
-             or column_name = 'block_id')
-        and data_type <> 'text'
+      select count(*) as count
+      from sqlite_master m
+      join pragma_table_info(m.name) p
+      where m.type = 'table' and m.name not like 'sqlite_%'
+        and m.name not like '__drizzle_%'
+        and (p.name glob '*_user_id'
+             or p.name glob '*_guild_id'
+             or p.name glob '*_channel_id'
+             or p.name = 'block_id')
+        and lower(p.type) <> 'text'
+    `);
+
+    expect(result.rows[0]?.count).toBe(0);
+  });
+
+  it("stores timestamps as epoch milliseconds", async () => {
+    const result = await db.execute<{ count: number }>(sql`
+      select count(*) as count
+      from sqlite_master m
+      join pragma_table_info(m.name) p
+      where m.type = 'table' and m.name not like 'sqlite_%'
+        and m.name not like '__drizzle_%'
+        and p.name in ('created_at', 'updated_at')
+        and lower(p.type) <> 'integer'
     `);
 
     expect(result.rows[0]?.count).toBe(0);
   });
 
   it("stores the premium plan duration as whole days", async () => {
-    const result = await db.execute<{ data_type: string }>(sql`
-      select data_type
-      from information_schema.columns
-      where table_schema = 'public'
-        and table_name = 'premium_plans'
-        and column_name = 'duration_days'
+    const result = await db.execute<{ type: string }>(sql`
+      select type
+      from pragma_table_info('premium_plans')
+      where name = 'duration_days'
     `);
 
-    expect(result.rows[0]?.data_type).toBe("integer");
+    expect(result.rows[0]?.type.toLowerCase()).toBe("integer");
   });
 
   it("rejects a duplicate slot number in the same scrim", async () => {
@@ -199,7 +260,7 @@ describe("db/schema", () => {
         (caught: unknown) => caught,
       );
 
-    expect(pgErrorCode(error)).toBe("23505");
+    expect(sqliteErrorCode(error)).toBe("SQLITE_CONSTRAINT_UNIQUE");
   });
 
   it("rejects a slot state outside the closed union", async () => {
@@ -213,7 +274,7 @@ describe("db/schema", () => {
         (caught: unknown) => caught,
       );
 
-    expect(pgErrorCode(error)).toBe("23514");
+    expect(sqliteErrorCode(error)).toBe("SQLITE_CONSTRAINT_CHECK");
   });
 
   it("rejects a scrim status that a tourney would accept", async () => {
@@ -234,7 +295,7 @@ describe("db/schema", () => {
         (caught: unknown) => caught,
       );
 
-    expect(pgErrorCode(error)).toBe("23514");
+    expect(sqliteErrorCode(error)).toBe("SQLITE_CONSTRAINT_CHECK");
   });
 
   it("rejects a duplicate tag name in the same guild", async () => {
@@ -260,7 +321,7 @@ describe("db/schema", () => {
         (caught: unknown) => caught,
       );
 
-    expect(pgErrorCode(error)).toBe("23505");
+    expect(sqliteErrorCode(error)).toBe("SQLITE_CONSTRAINT_UNIQUE");
   });
 
   it("claims a slot exactly once", async () => {
@@ -277,7 +338,6 @@ describe("db/schema", () => {
         state: "claimed",
         teamName: "Team A",
         ownerUserId: "42",
-        members: ["42", "43"],
       })
       .where(
         sql`${slots.scrimId} = ${scrimId} and ${slots.num} = 1 and ${slots.state} = 'free'`,
@@ -295,7 +355,6 @@ describe("db/schema", () => {
         state: "claimed",
         teamName: "Team B",
         ownerUserId: "44",
-        members: ["44"],
       })
       .where(
         sql`${slots.scrimId} = ${scrimId} and ${slots.num} = 1 and ${slots.state} = 'free'`,
@@ -309,7 +368,6 @@ describe("db/schema", () => {
         state: slots.state,
         teamName: slots.teamName,
         ownerUserId: slots.ownerUserId,
-        members: slots.members,
       })
       .from(slots)
       .where(sql`${slots.id} = ${first[0]?.id}`);
@@ -317,11 +375,23 @@ describe("db/schema", () => {
     expect(row?.state).toBe("claimed");
     expect(row?.teamName).toBe("Team A");
     expect(row?.ownerUserId).toBe("42");
-    expect(row?.members).toEqual(["42", "43"]);
+
+    // The team members live in the join table now.
+    await db.insert(slotMembers).values([
+      { slotId: first[0]?.id ?? "", userId: "42" },
+      { slotId: first[0]?.id ?? "", userId: "43" },
+    ]);
+
+    const members = await db
+      .select({ userId: slotMembers.userId })
+      .from(slotMembers)
+      .where(sql`${slotMembers.slotId} = ${first[0]?.id}`);
+
+    expect(members.map((member) => member.userId).sort()).toEqual(["42", "43"]);
 
     // "How many are free" is a count, not a read-modify-write.
     const free = await db
-      .select({ n: sql<number>`count(*)::int` })
+      .select({ n: sql<number>`count(*)` })
       .from(slots)
       .where(sql`${slots.scrimId} = ${scrimId} and ${slots.state} = 'free'`);
 
@@ -330,11 +400,58 @@ describe("db/schema", () => {
     // The cancel, also from §S7.
     const cancelled = await db
       .update(slots)
-      .set({ state: "free", teamName: null, ownerUserId: null, members: [] })
+      .set({ state: "free", teamName: null, ownerUserId: null })
       .where(sql`${slots.id} = ${first[0]?.id} and ${slots.ownerUserId} = ${"42"}`)
       .returning({ id: slots.id });
 
     expect(cancelled).toHaveLength(1);
+  });
+
+  it("cascades a delete to the children a row owns", async () => {
+    const scrimId = await makeScrim("cascade");
+
+    const [slot] = await db
+      .insert(slots)
+      .values({ scrimId, num: 1 })
+      .returning({ id: slots.id });
+
+    await db
+      .insert(slotMembers)
+      .values({ slotId: slot?.id ?? "", userId: "99" });
+
+    await db.delete(scrims).where(sql`${scrims.id} = ${scrimId}`);
+
+    const slotsLeft = await db
+      .select({ n: sql<number>`count(*)` })
+      .from(slots)
+      .where(sql`${slots.scrimId} = ${scrimId}`);
+
+    const membersLeft = await db
+      .select({ n: sql<number>`count(*)` })
+      .from(slotMembers)
+      .where(sql`${slotMembers.slotId} = ${slot?.id}`);
+
+    expect(slotsLeft[0]?.n).toBe(0);
+    expect(membersLeft[0]?.n).toBe(0);
+  });
+
+  it("keeps only one alert live at a time", async () => {
+    await db.insert(alerts).values({ authorId: "1", active: true });
+
+    const error = await db
+      .insert(alerts)
+      .values({ authorId: "2", active: true })
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+
+    expect(sqliteErrorCode(error)).toBe("SQLITE_CONSTRAINT_UNIQUE");
+
+    // The index is *partial*: an inactive alert does not collide.
+    await db.insert(alerts).values({ authorId: "3", active: false });
+
+    await db.delete(alerts).where(sql`${alerts.authorId} != ${"1"}`);
   });
 
   it("keeps a paid transaction when the plan catalogue is reseeded", async () => {
@@ -393,7 +510,7 @@ describe("db/schema", () => {
     await seedPremiumPlans();
 
     const result = await db.execute<{ count: number }>(sql`
-      select count(*)::int as count
+      select count(*) as count
       from premium_plans
       where code in (${sql.join(
         PREMIUM_PLAN_CATALOGUE.map(
@@ -420,6 +537,77 @@ describe("db/schema", () => {
     expect(typeof row?.id).toBe("number");
 
     await db.delete(commandUsage).where(sql`${commandUsage.guildId} = ${GUILD_ID}`);
+  });
+
+  it("applies the migration twice without changing anything", async () => {
+    const before = await db.execute<{ count: number }>(sql`
+      select count(*) as count from sqlite_master where type = 'table'
+    `);
+
+    await applyMigrations(db);
+
+    const after = await db.execute<{ count: number }>(sql`
+      select count(*) as count from sqlite_master where type = 'table'
+    `);
+
+    expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
+  });
+
+  it("runs a raw statement and hands back the rows", async () => {
+    // The feature modules were written against the Postgres driver, whose
+    // `execute` returns `{ rows }`. The SQLite driver returns the rows
+    // directly, so `db/client.ts` gives it the same shape.
+    const result = await db.execute<{ count: number }>(sql`
+      select count(*) as count from slots
+    `);
+
+    expect(result.rows[0]?.count).toBeGreaterThanOrEqual(0);
+  });
+
+  it("rolls a transaction back when the body throws", async () => {
+    const scrimId = await makeScrim("rollback");
+
+    await expect(
+      (async () => {
+        await withTransaction(async (tx) => {
+          await tx.insert(slots).values({ scrimId, num: 7 });
+
+          throw new Error("the body failed");
+        });
+      })(),
+    ).rejects.toThrow("the body failed");
+
+    const left = await db
+      .select({ n: sql<number>`count(*)` })
+      .from(slots)
+      .where(sql`${slots.scrimId} = ${scrimId}`);
+
+    expect(left[0]?.n).toBe(0);
+  });
+
+  it("bumps updated_at on every write", async () => {
+    const scrimId = await makeScrim("updated-at");
+
+    const [before] = await db
+      .select({ updatedAt: scrims.updatedAt })
+      .from(scrims)
+      .where(sql`${scrims.id} = ${scrimId}`);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    await db
+      .update(scrims)
+      .set({ name: "renamed" })
+      .where(sql`${scrims.id} = ${scrimId}`);
+
+    const [after] = await db
+      .select({ updatedAt: scrims.updatedAt })
+      .from(scrims)
+      .where(sql`${scrims.id} = ${scrimId}`);
+
+    expect(after?.updatedAt.getTime()).toBeGreaterThan(
+      before?.updatedAt.getTime() ?? 0,
+    );
   });
 });
 

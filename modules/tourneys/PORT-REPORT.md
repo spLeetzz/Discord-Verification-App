@@ -283,10 +283,10 @@ than copied. One line each on what it does now.
 
 | # | Where | What it did | What it does now |
 |---|---|---|---|
-| 1 | `models/esports/tourney.py:437-444` | The fake-tag check was raw SQL quoting schema-qualified identifiers as single names, so it raised `relation does not exist` at runtime — the check had never worked. | A typed query over one table: `tourney_slots.members && ARRAY[$1, $2]::text[]` (`repo.findFakeTagMatches`), proved against the live database. |
+| 1 | `models/esports/tourney.py:437-444` | The fake-tag check was raw SQL quoting schema-qualified identifiers as single names, so it raised `relation does not exist` at runtime — the check had never worked. | A **join** against the member table (`tourney_slot_members`), proved against the live database. |
 | 2 | `events/tourneys.py:180-181` | The cross-reaction cancel was a literal `await ...` on the `Ellipsis` object, which raises `TypeError` — **the feature had never worked**. | The reacting user's slot for that message is deleted, the confirmation message is struck through, and the success role is removed when it was their only slot. |
 | 3 | `events/tourneys.py:170-175` | The reaction path **skipped the requirements matrix entirely** and never checked whether the tournament was open, so a tournament that had never opened accepted registrations. | The same eight guards run, and only a tournament whose status is `open` accepts registrations. |
-| 4 | `events/tourneys.py:75-77` | The slot number was `max(num) + 1` under a process-global `asyncio.Lock` that died with the process, so two registrations could be handed the same number. | The number comes from a **per-tourney sequence**: the tournament row is locked `FOR UPDATE` inside the transaction that inserts the slot, so the database serialises the allocation and the lock survives a restart. |
+| 4 | `events/tourneys.py:75-77` | The slot number was `max(num) + 1` under a process-global `asyncio.Lock` that died with the process, so two registrations could be handed the same number. | The number comes from a **per-tourney sequence**: the allocation happens in the transaction that inserts the slot, behind a per-tourney mutex, and the transaction takes the write lock with a conditional `UPDATE` on the tournament row — SQLite has no `SELECT … FOR UPDATE`. |
 | 5 | `views/tourney/slotm.py:302-303` | "Swap Groups" was two independent `UPDATE`s, so the intermediate state had **both** rows on the same number — a violation of `UNIQUE (tourney_id, num)`. | One transaction, three statements, through a temporary number: the second slot takes the first one's number, then the first takes the second's. The order matters and the test proves it. |
 | 6 | `views/groupm/_paginator.py:47` | The channel of a published group list was rediscovered by a **substring match** on the channel name, so "Group 1" also matched "Group 10". | The channel is **stored on the `tourney_group_lists` row**, and the publish flow asks for it explicitly. |
 | 7 | `views/groupm/main.py:135-147` | The group roles and channels were created in a loop with **no rollback**, so a partial failure left orphans behind. | Everything created is collected and undone — channels, then roles, then the category. |
@@ -459,12 +459,16 @@ comparison.
   `views/pick.ts`, and the tournaments area now does it for the
   "Change Team Name" menu (`tourneys:slotm_pick:<tourneyId>:<userId>`,
   handled in `views/select-handlers.ts`).
-- **`sql`${[...]}::text[]` is not an array in drizzle.** A drizzle
-  template treats a plain array as a *list* of parameters, so the
-  expression becomes `($1, $2)::text[]` — a record cast, which
-  Postgres refuses. The working form is `ARRAY[$1, $2]::text[]` with
-  `sql.join`. The scrims area hit the same thing and fixed it the
-  same way.
+- **A list of ids is a join table, not an array.** SQLite has no
+  arrays, so `tourney_slots.members` is `tourney_slot_members` and the
+  overlap check the source wrote as `members && ARRAY[$1, $2]::text[]`
+  is a join between the two tables. The answer is the same set of slots
+  — `DISTINCT`, because a slot that holds two of the mentioned users
+  matches twice — and the query is the same on both engines.
+- **`SELECT … FOR UPDATE` has no SQLite equivalent.** The slot-number
+  allocation takes the write lock with a conditional `UPDATE` on the
+  tournament row instead, and the transaction is behind a per-tourney
+  mutex so two registrations in one process cannot race for the number.
 - **`core/channel-cache.ts` has landed**, so the tournaments area uses
   it (two instances) rather than its own copy.
 
@@ -481,9 +485,9 @@ comparison.
 | `jobs.test.ts` | The daily open, end to end: the database accepts the row, the dispatcher claims it, the handler opens the tournament, and the schedule is re-armed (live database) |
 | `views/select-handlers.test.ts` | The two select menus: the manager panel's is routed, and the slot manager's opens the rename modal |
 | `slots.test.ts` | The per-tourney sequence and the swap in one transaction (live database) |
-| `repo.test.ts` | The registration-channel uniqueness guard, the group-list row, the typed fake-tag query (live database) |
+| `repo.test.ts` | The registration-channel uniqueness guard, the group-list row, the join that answers the fake-tag check, and the member list a registration records (live database) |
 | `idp.test.ts` | The room-credential post: the three values, the `msg_delete` row, the payload that carries no password, the ephemeral replies, the dispatcher that claims the row and deletes the message, and the refusal of a member who is not staff (live database) |
 
 No test in this area talks to Discord. The four database tests talk to
-the local Postgres on `:5433`, like every other database test in the
+the local SQLite file, like every other database test in the
 repository, and they clean up after themselves.

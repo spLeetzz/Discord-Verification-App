@@ -1,3 +1,0 @@
-ALTER TABLE "jobs" DROP CONSTRAINT "jobs_event_check";--> statement-breakpoint
-ALTER TABLE "ss_configs" ADD COLUMN "duplicate_threshold" integer DEFAULT 7 NOT NULL;--> statement-breakpoint
-ALTER TABLE "jobs" ADD CONSTRAINT "jobs_event_check" CHECK ("jobs"."event" in ('reminder', 'msg_delete', 'scrim_open', 'autoclean', 'scrim_match', 'scrim_ban', 'scrim_reserve', 'lockdown', 'user_premium', 'guild_premium', 'vote', 'alert', 'autopurge', 'community_daily'));

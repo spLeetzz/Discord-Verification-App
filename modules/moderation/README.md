@@ -106,7 +106,7 @@ there is nothing that can fall out of sync with Discord.
 `lockdowns.lock_key` column, and the unique constraint on it is what says
 "one lockdown per subject":
 
-| Type | Key | `channel_id` | `role_id` | `channel_ids` |
+| Type | Key | `channel_id` | `role_id` | channels it covers |
 |---|---|---|---|---|
 | `channel` | `channel:<channelId>` | the channel | — | the channel |
 | `guild` | `guild:<guildId>` | the channel the command was run in | — | every locked channel |
@@ -153,6 +153,22 @@ moderators who lock the same subject at the same time cannot both get
 their way: one of them gets no row, is told the subject is already locked,
 and leaves nothing behind.
 
+**The write is one transaction.** The lockdown row, the rows of the
+channels it covers (`lockdown_channels`), the rows of the maintenance
+channels it created (`lockdown_maintenance_channels`) and the job row are
+written together or not at all. A lockdown whose channel rows were lost
+would unlock the wrong channels; one whose job row was lost would stay
+locked forever.
+
+**One statement at a time.** SQLite has one writer, and the driver gives a
+transaction a connection of its own: two transactions that overlap in one
+process do not queue, they collide — the second one fails with
+`SQLITE_BUSY` instead of waiting. `repo.ts` puts a small in-process gate
+in front of the area's database work, so the statements reach the database
+one after the other. The gate does **not** decide who wins a race: the
+loser is still refused by the unique constraint, and that refusal is what
+the moderator is told.
+
 **The rows come back in a fixed order** — oldest first, with the id as the
 tiebreaker — so that the row an unlock lifts is always the same row.
 
@@ -174,9 +190,9 @@ channels from a role — `@everyone` unless a role is named — by taking
 may create a `maintenance-chat` text channel and a `maintenance-vc`
 voice channel that the role keeps access to.
 
-The ids of the channels it created are recorded on the lockdown row, in
-`maintenance_channel_ids`. `maintenance off` deletes exactly those, and
-nothing else.
+The ids of the channels it created are recorded in the
+`lockdown_maintenance_channels` join table, one row per (lockdown, channel).
+`maintenance off` deletes exactly those, and nothing else.
 
 ```
      ┌──────────────────────────────┐
@@ -392,9 +408,9 @@ tc = discord.utils.get(ctx.guild.channels, name="maintenance-chat")
 channel has a name, so the lookup never matched and the channels stayed.
 
 **Now:** the bot deletes the channels it created, and it knows which ones
-those are — the ids it recorded when it made them. The ids live on the
-lockdown row, in the `maintenance_channel_ids` column, and they are written
-with the row in the same statement, so a maintenance lockdown that has no
+those are — the ids it recorded when it made them. The ids live in the
+`lockdown_maintenance_channels` join table, and they are written with the
+row in the same transaction, so a maintenance lockdown that has no
 duration — and so no job row — still knows what to delete after a restart.
 
 **Nothing is deleted by name.** A name predicate would delete every channel
@@ -513,8 +529,8 @@ npm test
 | `purge.test.ts` | which messages each filter selects, the fourteen-day cutoff, the batching, the three-character minimum |
 | `reason.test.ts` | the reason format and the 512-character cap |
 | `lock-state.test.ts` | the transitions and the guards, including the refusal to double-lock |
-| `lockdown.test.ts` | the lockdown against the live database: the prior state round-trips, the job row, the key of the subject, the refusal of a second lockdown of the same subject by the database, and the fixed order of the rows |
+| `lockdown.test.ts` | the lockdown against the live database: the prior state round-trips, the job row, the key of the subject, the channel rows of the join table, the refusal of a second lockdown of the same subject by the database, a server lockdown covering and releasing exactly its channels, and the fixed order of the rows |
 | `permissions.test.ts` | the restore-previous-state logic |
 | `hierarchy.test.ts` | the actor's and the bot's hierarchy checks |
-| `blocklist.test.ts` | the cache, and that a user and a guild with the same id do not collide |
+| `blocklist.test.ts` | the cache, and that a user and a guild with the same id do not collide — in the cache and in the database |
 | `roles.test.ts` | the mention parsing, for the role and the member commands |

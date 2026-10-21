@@ -28,13 +28,42 @@ const GUILD_ID = `tourney-repo-test-${Date.now()}-${Math.random().toString(36).s
 /** The tournaments this test file created. */
 const createdTourneyIds: string[] = [];
 
-/** The PostgreSQL SQLSTATE of the error a constraint violation produced. */
-function pgErrorCode(error: unknown): string | undefined {
+/**
+ * The kind of constraint a violation was.
+ *
+ * Postgres names it with a SQLSTATE (`23505` for a unique violation,
+ * `23514` for a check violation); SQLite names it with an extended
+ * result code. This reads whichever the running engine produced, so the
+ * assertion says what was violated rather than which engine said it.
+ */
+function constraintKind(error: unknown): "unique" | "check" | "other" {
   const candidate = error as
-    | { code?: string; cause?: { code?: string } }
+    | {
+        code?: string;
+        extendedCode?: string;
+        cause?: { code?: string; extendedCode?: string };
+      }
     | undefined;
 
-  return candidate?.cause?.code ?? candidate?.code;
+  const code =
+    candidate?.cause?.extendedCode ??
+    candidate?.cause?.code ??
+    candidate?.extendedCode ??
+    candidate?.code;
+
+  if (
+    code === "23505" ||
+    code === "SQLITE_CONSTRAINT_UNIQUE" ||
+    code === "SQLITE_CONSTRAINT_PRIMARYKEY"
+  ) {
+    return "unique";
+  }
+
+  if (code === "23514" || code === "SQLITE_CONSTRAINT_CHECK") {
+    return "check";
+  }
+
+  return "other";
 }
 
 afterAll(async () => {
@@ -97,7 +126,7 @@ describe("modules/tourneys/repo — the registration channel", () => {
         (caught: unknown) => caught,
       );
 
-    expect(pgErrorCode(error)).toBe("23505");
+    expect(constraintKind(error)).toBe("unique");
   });
 
   it("says so before the write", async () => {
@@ -217,6 +246,52 @@ describe("modules/tourneys/repo — the fake-tag check", () => {
     expect(none).toHaveLength(0);
   });
 
+  it("reports a slot once, even when it holds two of the mentioned users", async () => {
+    const tourneyId = await makeTourney("fake-tag-twice");
+
+    await repo.insertSlot({
+      tourneyId,
+      teamName: "Team A",
+      leaderId: "leader-a",
+      members: ["leader-a", "member-a", "member-b"],
+      messageId: null,
+      jumpUrl: null,
+      confirmJumpUrl: null,
+    });
+
+    const matches = await repo.findFakeTagMatches(tourneyId, [
+      "member-a",
+      "member-b",
+    ]);
+
+    // The answer is a set of slots, not a set of matches: the join finds
+    // the slot twice, once per mentioned user.
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.teamName).toBe("Team A");
+  });
+
+  it("leaves the slot being checked out of the answer", async () => {
+    const tourneyId = await makeTourney("fake-tag-except");
+
+    const slot = await repo.insertSlot({
+      tourneyId,
+      teamName: "Team A",
+      leaderId: "leader-a",
+      members: ["leader-a", "member-a"],
+      messageId: null,
+      jumpUrl: null,
+      confirmJumpUrl: null,
+    });
+
+    const matches = await repo.findFakeTagMatches(
+      tourneyId,
+      ["member-a"],
+      slot.id,
+    );
+
+    expect(matches).toHaveLength(0);
+  });
+
   it("does not reach across tournaments", async () => {
     const first = await makeTourney("fake-tag-a");
     const second = await makeTourney("fake-tag-b");
@@ -238,6 +313,40 @@ describe("modules/tourneys/repo — the fake-tag check", () => {
 });
 
 describe("modules/tourneys/repo — the slots", () => {
+  it("records the leader and the mentioned teammates", async () => {
+    const tourneyId = await makeTourney("slot-members");
+
+    const slot = await repo.insertSlot({
+      tourneyId,
+      teamName: "Team A",
+      leaderId: "leader-a",
+      members: ["leader-a", "member-a", "member-b"],
+      messageId: null,
+      jumpUrl: null,
+      confirmJumpUrl: null,
+    });
+
+    expect(slot.members).toHaveLength(3);
+    expect(slot.members).toEqual(
+      expect.arrayContaining(["leader-a", "member-a", "member-b"]),
+    );
+
+    // The list is not only on the record that came back: it is in the
+    // database, and it is there when the slot is read again.
+    const found = await repo.getSlot(slot.id);
+
+    expect(found?.members).toHaveLength(3);
+    expect(found?.members).toEqual(
+      expect.arrayContaining(["leader-a", "member-a", "member-b"]),
+    );
+
+    const listed = await repo.listSlots(tourneyId);
+
+    expect(listed[0]?.members).toEqual(
+      expect.arrayContaining(["leader-a", "member-a", "member-b"]),
+    );
+  });
+
   it("finds a slot by the message that produced it", async () => {
     const tourneyId = await makeTourney("slot-by-message");
 
@@ -369,7 +478,7 @@ describe("modules/tourneys/repo — the tourney lifecycle", () => {
         (caught: unknown) => caught,
       );
 
-    expect(pgErrorCode(error)).toBe("23514");
+    expect(constraintKind(error)).toBe("check");
   });
 });
 
@@ -389,7 +498,7 @@ describe("modules/tourneys/repo — the slots table", () => {
         (caught: unknown) => caught,
       );
 
-    expect(pgErrorCode(error)).toBe("23505");
+    expect(constraintKind(error)).toBe("unique");
   });
 
   it("allows the same number in two tournaments", async () => {

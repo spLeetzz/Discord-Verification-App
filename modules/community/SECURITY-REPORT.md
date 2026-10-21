@@ -258,11 +258,11 @@ want one anyway, the honest place is the **component router**
 | `modules/community/retention.test.ts` (new, 4 tests) | an unused tag that has not been touched is pruned; a tag that has been used is kept; a tag that has been edited lately is kept; a fired reminder leaves no row behind. |
 | `modules/community/rules.test.ts` (grown) | `checkMemberQuota`: under the allowance is allowed, at it is refused, the refusal says how to make room, and the two numbers are pinned at 25. |
 
-The two database-backed files are skipped when Postgres is not reachable, so
-the unit tests still run on a machine without it.
+The database-backed files run against a SQLite database the test runner
+creates for them, so they need no server and no setup.
 
 **Status of my files:** `npm run typecheck` is clean for `modules/community/`
-and `commands/community/`; `npm test` is green for the area — **9 files, 113
+and `commands/community/`; `npm test` is green for the area — **9 files, 119
 tests** (it was 6 files and 88 tests). The whole repository typechecks and
 the whole test suite is green at the time of writing (82 files, 1199 tests).
 

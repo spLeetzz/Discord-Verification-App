@@ -88,6 +88,10 @@ export interface SlotRecord {
    *
    * The source wrote only the claimer, so the ID-Pass transfer could never
    * find a teammate and the feature had never worked (B3).
+   *
+   * The list is a join table now — `slot_members`, one row per (slot,
+   * member) — and the repository reads it back into this array, so
+   * nothing above the repository knows the difference.
    */
   readonly members: readonly string[];
   readonly messageId: string | null;

@@ -10,7 +10,7 @@
  * the table in a valid state.
  */
 
-import { sql } from "drizzle-orm";
+import { lt } from "drizzle-orm";
 import { db } from "./client.js";
 import { commandUsage } from "./schema.js";
 
@@ -31,9 +31,12 @@ export async function pruneCommandUsage(
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - COMMAND_USAGE_RETENTION_DAYS * DAY_IN_MS);
 
+  // `lt()` rather than a hand-written fragment: the comparison goes through
+  // the column, so the `Date` is encoded the way the column stores it —
+  // epoch milliseconds on SQLite, a timestamp on Postgres.
   const deleted = await db
     .delete(commandUsage)
-    .where(sql`${commandUsage.createdAt} < ${cutoff}`)
+    .where(lt(commandUsage.createdAt, cutoff))
     .returning({ id: commandUsage.id });
 
   return deleted.length;

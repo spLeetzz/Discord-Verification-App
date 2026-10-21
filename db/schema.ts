@@ -9,7 +9,11 @@
  * here and use drizzle's query builder; they never spell out SQL that
  * changes the shape of a table.
  *
- * `db/` is the Postgres layer. `repo/` is the Google Sheets layer. Two
+ * The columns themselves come from `db/dialect.ts`, which is the only file
+ * that knows whether the bot is talking to SQLite or Postgres. The schema
+ * files never import a dialect's own module.
+ *
+ * `db/` is the SQL layer. `repo/` is the Google Sheets layer. Two
  * directories, two meanings, no confusion.
  */
 

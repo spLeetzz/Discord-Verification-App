@@ -36,13 +36,12 @@
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.7",
     "googleapis": "^171.4.0",
-    "pg": "^8.23.1",
     "socket.io": "^4.8.4",
-    "zod": "^4.6.7"
+    "zod": "^4.6.7",
+    "@libsql/client": "^0.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "@types/pg": "^8.23.1",
     "drizzle-kit": "^0.31.11",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

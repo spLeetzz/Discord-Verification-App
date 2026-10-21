@@ -60,17 +60,18 @@ import {
 } from "drizzle-orm/sqlite-core";
 import type {
   AnySQLiteColumn,
+  CheckBuilder,
+  IndexBuilderOn,
+  PrimaryKeyBuilder,
   SQLiteBooleanBuilder,
-  SQLiteCheckBuilder,
   SQLiteColumnBuilderBase,
-  SQLiteIndexBuilder,
-  SQLitePrimaryKeyBuilder,
+  SQLiteIntegerBuilder,
   SQLiteTableExtraConfigValue,
   SQLiteTableWithColumns,
   SQLiteTextBuilder,
   SQLiteTextJsonBuilder,
   SQLiteTimestampBuilder,
-  SQLiteUniqueConstraintBuilder,
+  UniqueOnConstraintBuilder,
 } from "drizzle-orm/sqlite-core";
 import {
   bigserial as pgBigserial,
@@ -125,6 +126,17 @@ export type PortableColumn = AnySQLiteColumn;
 
 /** A column builder, as the schema sees it. */
 export type PortableColumnBuilder = SQLiteColumnBuilderBase;
+
+/**
+ * The constraint builders, re-exported so that the schema files never
+ * have to reach into a dialect's own module for a type.
+ */
+export type {
+  CheckBuilder,
+  IndexBuilderOn,
+  PrimaryKeyBuilder,
+  UniqueOnConstraintBuilder,
+};
 
 /** `text`. */
 export type TextColumnBuilder = SQLiteTextBuilder<{
@@ -188,6 +200,11 @@ export type SerialColumnBuilder = IsPrimaryKey<
   HasDefault<NotNull<NumberColumnBuilder>>
 >;
 
+/** A timestamp the application fills in. */
+export type TimestampDefaultColumnBuilder = HasRuntimeDefault<
+  HasDefault<NotNull<TimestampColumnBuilder>>
+>;
+
 /** A table, as the schema and the modules see it. */
 export type PortableTable<
   TName extends string,
@@ -210,7 +227,18 @@ export type PortableTable<
  * a numeric column would silently round them.
  */
 export function textCol(name: string): TextColumnBuilder {
-  return (isPostgres ? pgText(name) : sqliteText(name)) as unknown as TextColumnBuilder;
+  return (isPostgres
+    ? pgText(name)
+    : sqliteText(name)) as unknown as TextColumnBuilder;
+}
+
+/**
+ * A foreign key to an {@link idCol} primary key.
+ *
+ * A `text` column, like every other id in the schema.
+ */
+export function foreignIdCol(name: string): TextColumnBuilder {
+  return textCol(name);
 }
 
 /**
@@ -221,7 +249,9 @@ export function textCol(name: string): TextColumnBuilder {
  * the value range is the same either way.
  */
 export function intCol(name: string): NumberColumnBuilder {
-  return (isPostgres ? pgInteger(name) : sqliteInteger(name)) as unknown as NumberColumnBuilder;
+  return (isPostgres
+    ? pgInteger(name)
+    : sqliteInteger(name)) as unknown as NumberColumnBuilder;
 }
 
 /**
@@ -231,7 +261,9 @@ export function intCol(name: string): NumberColumnBuilder {
  * declared type says, so the two are the same column.
  */
 export function smallIntCol(name: string): NumberColumnBuilder {
-  return (isPostgres ? pgSmallint(name) : sqliteInteger(name)) as unknown as NumberColumnBuilder;
+  return (isPostgres
+    ? pgSmallint(name)
+    : sqliteInteger(name)) as unknown as NumberColumnBuilder;
 }
 
 /**
@@ -307,7 +339,33 @@ export function idCol(name = "id"): IdColumnBuilder {
 export function serialIdCol(name = "id"): SerialColumnBuilder {
   return (isPostgres
     ? pgBigserial(name, { mode: "number" })
-    : sqliteInteger(name)) as unknown as SerialColumnBuilder;
+    : sqliteInteger(name).primaryKey({ autoIncrement: true })) as unknown as SerialColumnBuilder;
+}
+
+/**
+ * The row's creation time.
+ *
+ * Filled in by the application, not by the database: `now()` means
+ * something different on the two engines, and a default that is computed
+ * in the app is the same default everywhere.
+ */
+export function createdAtCol(name = "created_at"): TimestampDefaultColumnBuilder {
+  return tsCol(name)
+    .notNull()
+    .$defaultFn(() => new Date()) as unknown as TimestampDefaultColumnBuilder;
+}
+
+/**
+ * The row's modification time.
+ *
+ * `$onUpdate` bumps it on every write that goes through drizzle. A
+ * hand-written `UPDATE` has to set it itself.
+ */
+export function updatedAtCol(name = "updated_at"): TimestampDefaultColumnBuilder {
+  return tsCol(name)
+    .notNull()
+    .$defaultFn(() => new Date())
+    .$onUpdate(() => new Date()) as unknown as TimestampDefaultColumnBuilder;
 }
 
 /* ------------------------------------------------------------------ *
@@ -356,15 +414,17 @@ export function defineTable<
  * ------------------------------------------------------------------ */
 
 /** A non-unique index. */
-export function index(name: string): SQLiteIndexBuilder {
-  return (isPostgres ? pgIndex(name) : sqliteIndex(name)) as unknown as SQLiteIndexBuilder;
+export function index(name: string): IndexBuilderOn {
+  return (isPostgres
+    ? pgIndex(name)
+    : sqliteIndex(name)) as unknown as IndexBuilderOn;
 }
 
 /** A unique constraint. */
-export function unique(name: string): SQLiteUniqueConstraintBuilder {
+export function unique(name: string): UniqueOnConstraintBuilder {
   return (isPostgres
     ? pgUnique(name)
-    : sqliteUnique(name)) as unknown as SQLiteUniqueConstraintBuilder;
+    : sqliteUnique(name)) as unknown as UniqueOnConstraintBuilder;
 }
 
 /**
@@ -373,27 +433,27 @@ export function unique(name: string): SQLiteUniqueConstraintBuilder {
  * `.where(...)` makes it a *partial* index. SQLite supports partial
  * indexes, so the one-live-alert rule works on both dialects.
  */
-export function uniqueIndex(name: string): SQLiteIndexBuilder {
+export function uniqueIndex(name: string): IndexBuilderOn {
   return (isPostgres
     ? pgUniqueIndex(name)
-    : sqliteUniqueIndex(name)) as unknown as SQLiteIndexBuilder;
+    : sqliteUniqueIndex(name)) as unknown as IndexBuilderOn;
 }
 
 /** A CHECK constraint. */
-export function check(name: string, value: SQL): SQLiteCheckBuilder {
+export function check(name: string, value: SQL): CheckBuilder {
   return (isPostgres
     ? pgCheck(name, value)
-    : sqliteCheck(name, value)) as unknown as SQLiteCheckBuilder;
+    : sqliteCheck(name, value)) as unknown as CheckBuilder;
 }
 
 /** A composite primary key. */
 export function primaryKey(config: {
   columns: PortableColumn[];
   name?: string;
-}): SQLitePrimaryKeyBuilder {
+}): PrimaryKeyBuilder {
   return (isPostgres
     ? pgPrimaryKey(config as never)
-    : sqlitePrimaryKey(config as never)) as unknown as SQLitePrimaryKeyBuilder;
+    : sqlitePrimaryKey(config as never)) as unknown as PrimaryKeyBuilder;
 }
 
 /* ------------------------------------------------------------------ *

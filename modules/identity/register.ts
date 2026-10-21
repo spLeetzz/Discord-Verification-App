@@ -4,11 +4,11 @@
  * The manager calls {@link registerIdentity} from `handlers/listeners.ts`,
  * and {@link shutdownIdentity} from the graceful-exit path.
  *
- * The OCR provider is decided on and warmed up at boot: the decision says
- * whether the OCR runs at all, and the first Tesseract worker downloads the
- * language model — doing that lazily means the first screenshot of the day
- * waits for the download. The provider is shut down on the way out, so the
- * worker is terminated and the process can go.
+ * The OCR provider is decided on at boot: the decision says whether the
+ * OCR runs at all. There is nothing to warm up — the provider is a remote
+ * service that fetches the image itself, and there is no model to
+ * download — and the provider is shut down on the way out, so the requests
+ * that are on the wire are aborted and the process can go.
  */
 
 import { Events } from "discord.js";
@@ -18,7 +18,7 @@ import { loadChannelCache } from "./cache.js";
 import { registerIdentityInteractions } from "./interactions.js";
 import type { IdentityRouter } from "./interactions.js";
 import { handleIdentityMessage } from "./listeners.js";
-import { shutdownOcr, decideOcr, warmupOcr } from "./ocr.js";
+import { shutdownOcr, decideOcr } from "./ocr.js";
 import { stopSsWizardStore } from "./views/ssmod.js";
 
 /**
@@ -44,8 +44,7 @@ export function registerIdentity(client: Client, router?: IdentityRouter): void 
 }
 
 /**
- * Decides whether the OCR runs, loads the channel cache and warms the OCR
- * provider up.
+ * Decides whether the OCR runs and loads the channel cache.
  *
  * Called on `ClientReady`. The order matters:
  *
@@ -54,9 +53,7 @@ export function registerIdentity(client: Client, router?: IdentityRouter): void 
  *     with the wrong setting;
  *  2. the **channel cache**, because it is what tells the message listener
  *     whether a channel is one of ours — so it has to be loaded before the
- *     first message is looked at;
- *  3. the **warm-up**, so the language model is downloaded at startup
- *     rather than on the first screenshot of the day.
+ *     first message is looked at.
  */
 export async function warmIdentity(): Promise<void> {
   try {
@@ -77,12 +74,6 @@ export async function warmIdentity(): Promise<void> {
       "[Identity] Could not load the channel cache; the message listeners will not fire until the bot restarts.",
       error,
     );
-  }
-
-  try {
-    await warmupOcr();
-  } catch (error) {
-    logger.error("[Identity] Could not warm the OCR provider up.", error);
   }
 }
 

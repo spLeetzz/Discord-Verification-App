@@ -4,11 +4,45 @@
  * The bug this prevents: Quotient looked records up by `block_id` alone,
  * so a user and a guild that happened to share an id collided — and
  * unblocking one of them unblocked the other.
+ *
+ * The last block of this file is proved against the live database: the
+ * key is the id *and* the kind, and the database says so.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { rmSync } from "node:fs";
+import { closeDatabase } from "../../db/client.js";
 import { BLOCK_ID_TYPE, BlocklistCache, blocklistKey } from "./blocklist.js";
+import {
+  deleteBlocklistEntry,
+  insertBlocklistEntry,
+  loadBlocklist,
+} from "./repo.js";
 import type { BlocklistEntry } from "./types.js";
+
+/**
+ * The database this file runs against.
+ *
+ * **A file of its own.** SQLite has one writer, so two test files that
+ * shared a database file would fight over it and fail with
+ * `SQLITE_BUSY`. The file is in the system temporary directory, and it is
+ * dropped when the run ends.
+ *
+ * The client reads `DB_FILE` when it is imported and applies the
+ * migrations to it as it goes, so the variable has to be set *before*
+ * the import of `db/client.js` — which is what `vi.hoisted` is for.
+ */
+const { databaseFile } = vi.hoisted(() => {
+  const directory = process.env.TMPDIR || process.env.TEMP || "/tmp";
+  const file = `${directory}/quotient-moderation-blocklist-${process.pid}-${Math.random().toString(36).slice(2)}.db`;
+
+  process.env.DB_FILE = file;
+
+  return { databaseFile: file };
+});
+
+/** An id no real row can have. */
+const SHARED_ID = "blocklist-test-shared-id";
 
 /** An entry, with the parts a test cares about overridden. */
 function entry(overrides: Partial<BlocklistEntry> = {}): BlocklistEntry {
@@ -103,5 +137,86 @@ describe("BlocklistCache", () => {
     await cache.refresh();
 
     expect(cache.get("123")?.reason).toBe("being rude");
+  });
+});
+
+describe("the block list in the database", () => {
+  afterAll(async () => {
+    await closeDatabase();
+
+    rmSync(databaseFile, { force: true });
+  });
+
+  it("keeps a user and a guild with the same id apart", async () => {
+    await insertBlocklistEntry({
+      blockId: SHARED_ID,
+      blockIdType: BLOCK_ID_TYPE.user,
+      blockedBy: "moderator",
+      reason: "a user",
+    });
+
+    await insertBlocklistEntry({
+      blockId: SHARED_ID,
+      blockIdType: BLOCK_ID_TYPE.guild,
+      blockedBy: "moderator",
+      reason: "a guild",
+    });
+
+    const stored = (await loadBlocklist()).filter(
+      (row) => row.blockId === SHARED_ID,
+    );
+
+    // Two entries, not one: the key is the id *and* the kind.
+    expect(stored).toHaveLength(2);
+    expect(stored.map((row) => row.blockIdType).sort()).toEqual(["1", "2"]);
+  });
+
+  it("unblocks one kind without unblocking the other", async () => {
+    const id = "blocklist-test-unblock-id";
+
+    await insertBlocklistEntry({
+      blockId: id,
+      blockIdType: BLOCK_ID_TYPE.user,
+      blockedBy: "moderator",
+      reason: "a user",
+    });
+
+    await insertBlocklistEntry({
+      blockId: id,
+      blockIdType: BLOCK_ID_TYPE.guild,
+      blockedBy: "moderator",
+      reason: "a guild",
+    });
+
+    await deleteBlocklistEntry(id, BLOCK_ID_TYPE.guild);
+
+    const stored = (await loadBlocklist()).filter((row) => row.blockId === id);
+
+    // The user is still blocked.
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.blockIdType).toBe(BLOCK_ID_TYPE.user);
+  });
+
+  it("refuses a second entry for the same id and kind", async () => {
+    const id = "blocklist-test-twin-id";
+
+    await insertBlocklistEntry({
+      blockId: id,
+      blockIdType: BLOCK_ID_TYPE.user,
+      blockedBy: "moderator",
+      reason: "the first one",
+    });
+
+    await insertBlocklistEntry({
+      blockId: id,
+      blockIdType: BLOCK_ID_TYPE.user,
+      blockedBy: "moderator",
+      reason: "the second one",
+    });
+
+    const stored = (await loadBlocklist()).filter((row) => row.blockId === id);
+
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.reason).toBe("the first one");
   });
 });

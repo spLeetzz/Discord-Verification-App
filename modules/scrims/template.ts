@@ -28,11 +28,15 @@ export interface EmbedTemplateField {
  * The shape of a stored embed template.
  *
  * It is deliberately the subset of an embed that a template needs. The
- * column is `jsonb`, so the shape is not database-enforced — this
- * interface is the contract, and `parseTemplate` is the only way a
+ * column is a JSON document, so the shape is not database-enforced —
+ * this type is the contract, and `parseTemplate` is the only way a
  * template enters the process.
+ *
+ * A **type alias**, not an interface: the column is
+ * `jsonCol<Record<string, unknown>>`, and only an object type — an
+ * interface has no implicit index signature — can be written to one.
  */
-export interface EmbedTemplate {
+export type EmbedTemplate = {
   readonly title?: string;
   readonly description?: string;
   readonly color?: number;
@@ -44,10 +48,10 @@ export interface EmbedTemplate {
     readonly icon_url?: string;
     readonly url?: string;
   };
-}
+};
 
 /**
- * Reads a stored `jsonb` value as a template.
+ * Reads a stored template value.
  *
  * A malformed value must not crash a render (D32's whole point), so
  * anything unrecognisable becomes an empty template and the caller falls

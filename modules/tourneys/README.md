@@ -430,10 +430,10 @@ than copied.
 
 | # | Where | What it did | What it does now |
 |---|---|---|---|
-| 1 | `models/esports/tourney.py:437-444` | The fake-tag check was raw SQL that quoted schema-qualified identifiers as single names, so it raised `relation does not exist` at runtime. The check had never worked. | A typed query over one table: `tourney_slots.members && $1::text[]` (`repo.findFakeTagMatches`). |
+| 1 | `models/esports/tourney.py:437-444` | The fake-tag check was raw SQL that quoted schema-qualified identifiers as single names, so it raised `relation does not exist` at runtime. The check had never worked. | A **join** against the member table (`tourney_slot_members`) — the same question the source's `&&` asked, and a faster one (`repo.findFakeTagMatches`). |
 | 2 | `events/tourneys.py:180-181` | The cross-reaction cancel was a literal `await ...` on the `Ellipsis` object, which raises `TypeError`. **The feature had never worked.** | The reacting user's slot for that message is deleted, the confirmation is struck through, and the success role is removed when it was their only slot. |
 | 3 | `events/tourneys.py:170-175` | The reaction path **skipped the requirements matrix entirely** and never checked whether the tournament was open, so a tournament that had never opened accepted registrations. | The same guards run, and only a tournament whose status is `open` accepts registrations. |
-| 4 | `events/tourneys.py:75-77` | The slot number was `max(num) + 1` under a process-global `asyncio.Lock` that died with the process, so two registrations could be handed the same number. | The number comes from a **per-tourney sequence**: the tournament row is locked `FOR UPDATE` inside the transaction that inserts the slot, so the database serialises the allocation and the lock survives a restart. |
+| 4 | `events/tourneys.py:75-77` | The slot number was `max(num) + 1` under a process-global `asyncio.Lock` that died with the process, so two registrations could be handed the same number. | The number comes from a **per-tourney sequence**: the allocation happens in the transaction that inserts the slot, behind a per-tourney mutex, and the transaction takes the write lock with a conditional `UPDATE` on the tournament row — SQLite has no `SELECT … FOR UPDATE`. |
 | 5 | `views/tourney/slotm.py:302-303` | "Swap Groups" was two independent `UPDATE`s, so the intermediate state had **both** rows on the same number — a violation of `UNIQUE (tourney_id, num)`. | One transaction, three statements, with a temporary number: the second slot takes the first one's number, and then the first takes the second's. |
 | 6 | `views/groupm/_paginator.py:47` | The channel of a published group list was rediscovered by a **substring match** on the channel name, so "Group 1" also matched "Group 10". | The channel is **stored on the `tourney_group_lists` row**. |
 | 7 | `views/groupm/main.py:135-147` | The group roles and channels were created in a loop with **no rollback**, so a partial failure left orphans behind. | Everything created is collected and undone — channels, then roles, then the category. |
@@ -523,8 +523,7 @@ The source's checks, all reproduced:
 | `idp.test.ts` | The room-credential post: the three values, the `msg_delete` row that arms the deletion, the payload that carries no password, the ephemeral replies, the dispatcher that claims the row and deletes the message, and the refusal of a member who is not staff (against the live database) |
 | `views/select-handlers.test.ts` | The two select menus: the manager panel's is routed, and the slot manager's opens the rename modal |
 | `slots.test.ts` | The per-tourney sequence (against the live database) and the swap in one transaction |
-| `repo.test.ts` | The registration-channel uniqueness guard, the group-list row, the typed fake-tag query (against the live database) |
+| `repo.test.ts` | The registration-channel uniqueness guard, the group-list row, the join that answers the fake-tag check, and the member list a registration records (against the live database) |
 
 No test in this area talks to Discord. The three database tests talk to
-the local Postgres on `:5433`, like every other database test in the
-repository.
+the local SQLite file, like every other database test in the repository.

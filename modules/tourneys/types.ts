@@ -21,13 +21,20 @@ import type { RegDeny } from "../../core/constants.js";
 export type { TourneyStatus };
 export type { RegDeny };
 
-/** The two emoji a tournament uses for its accept and reject reactions. */
-export interface TourneyEmojis {
+/**
+ * The two emoji a tournament uses for its accept and reject reactions.
+ *
+ * It is a type alias rather than an interface because the column it is
+ * written to is a JSON column, and a JSON column takes a
+ * `Record<string, unknown>`: an interface has no implicit index
+ * signature, a type alias of an object literal type has one.
+ */
+export type TourneyEmojis = {
   /** The tick a successful registration gets. Defaults to `✅`. */
   readonly tick: string;
   /** The cross a refused registration gets. Defaults to `❌`. */
   readonly cross: string;
-}
+};
 
 /**
  * A tournament, as the `tourneys` table holds it.

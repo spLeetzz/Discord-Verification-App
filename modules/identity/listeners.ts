@@ -15,7 +15,7 @@
  */
 
 import { PermissionFlagsBits } from "discord.js";
-import type { Attachment, GuildMember, Message } from "discord.js";
+import type { GuildMember, Message } from "discord.js";
 import { EmbedBuilder } from "discord.js";
 import { EMBED_COLOR } from "../../core/constants.js";
 import { STAFF_ROLE_NAME } from "../../core/guards.js";
@@ -207,8 +207,8 @@ const SCREENSHOT_CONTENT_TYPES = ["image/png", "image/jpeg", "image/jpg"];
 /**
  * Checks the screenshots a participant posted.
  *
- * The OCR takes about two seconds per picture, so the "processing" reply
- * goes out first and the result replaces it.
+ * The OCR is a remote service and takes a moment per picture, so the
+ * "processing" reply goes out first and the result replaces it.
  */
 export async function handleSsVerifyMessage(message: Message): Promise<void> {
   const guild = message.guild;
@@ -229,8 +229,8 @@ export async function handleSsVerifyMessage(message: Message): Promise<void> {
 
   // The OCR is off, or was never decided on: no screenshot can be checked,
   // so none is accepted. The service refuses the submission itself — this
-  // is here so the member is told straight away, and the bot does not
-  // download a picture it is going to refuse.
+  // is here so the member is told straight away, and so the bot does not
+  // ask a service that is not there to read the picture.
   if (!isOcrAvailable()) {
     await message.reply(service.OCR_UNAVAILABLE_MESSAGE);
 
@@ -293,13 +293,13 @@ export async function handleSsVerifyMessage(message: Message): Promise<void> {
     `Processing your ${attachments.size === 1 ? "screenshot" : "screenshots"}… ⏳`,
   );
 
-  const images = await Promise.all(
-    [...attachments.values()].map(async (attachment) => ({
-      buffer: await fetchAttachment(attachment),
-      channelId: message.channelId,
-      messageId: message.id,
-    })),
-  );
+  const images = [...attachments.values()].map((attachment) => ({
+    // The OCR service fetches the image itself, so it gets the CDN URL and
+    // the bot never downloads the picture.
+    url: attachment.url,
+    channelId: message.channelId,
+    messageId: message.id,
+  }));
 
   const outcome = await service.processSubmission(config, authorId, images);
 
@@ -372,23 +372,6 @@ export function isStaffMember(member: GuildMember): boolean {
   if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
 
   return member.roles.cache.some((role) => role.name === STAFF_ROLE_NAME);
-}
-
-/**
- * Downloads an attachment.
- *
- * The OCR provider takes the image's bytes, so they are fetched here.
- */
-async function fetchAttachment(attachment: Attachment): Promise<Buffer> {
-  const response = await fetch(attachment.url);
-
-  if (!response.ok) {
-    throw new Error(
-      `could not download the attachment ${attachment.id}: ${response.status}`,
-    );
-  }
-
-  return Buffer.from(await response.arrayBuffer());
 }
 
 /**

@@ -75,13 +75,42 @@ async function databaseIsReachable(): Promise<boolean> {
 
 const reachable = await databaseIsReachable();
 
-/** The PostgreSQL SQLSTATE of the error a constraint violation produced. */
-function pgErrorCode(error: unknown): string | undefined {
+/**
+ * The kind of constraint a violation was.
+ *
+ * Postgres names it with a SQLSTATE (`23514` for a check violation);
+ * SQLite names it with an extended result code. This reads whichever the
+ * running engine produced, so the assertion says what was violated
+ * rather than which engine said it.
+ */
+function constraintKind(error: unknown): "unique" | "check" | "other" {
   const candidate = error as
-    | { code?: string; cause?: { code?: string } }
+    | {
+        code?: string;
+        extendedCode?: string;
+        cause?: { code?: string; extendedCode?: string };
+      }
     | undefined;
 
-  return candidate?.cause?.code ?? candidate?.code;
+  const code =
+    candidate?.cause?.extendedCode ??
+    candidate?.cause?.code ??
+    candidate?.extendedCode ??
+    candidate?.code;
+
+  if (
+    code === "23505" ||
+    code === "SQLITE_CONSTRAINT_UNIQUE" ||
+    code === "SQLITE_CONSTRAINT_PRIMARYKEY"
+  ) {
+    return "unique";
+  }
+
+  if (code === "23514" || code === "SQLITE_CONSTRAINT_CHECK") {
+    return "check";
+  }
+
+  return "other";
 }
 
 /** Creates a tournament with a unique registration channel. */
@@ -191,7 +220,7 @@ describe.skipIf(!reachable)("the tourney_open job", () => {
         (caught: unknown) => caught,
       );
 
-    expect(pgErrorCode(refused)).toBe("23514");
+    expect(constraintKind(refused)).toBe("check");
 
     await db
       .delete(jobs)

@@ -34,6 +34,7 @@ import { closeDatabase, db } from "../../db/client.js";
 import { scrims, slots } from "../../db/schema.js";
 import { setSlotsClient } from "./client.js";
 import { claimSlot, getScrim } from "./repo.js";
+import { withBusyRetry } from "./test-db.js";
 import {
   buildSlotListPanel,
   publishSlotList,
@@ -143,38 +144,45 @@ function makeClient(channel: TextChannel): Client {
 
 /** Creates the fixture scrim and its two slots. */
 async function seed(): Promise<void> {
-  const rows = await db
-    .insert(scrims)
-    .values({
-      guildId: GUILD_ID,
-      name: "Slot list test scrim",
-      status: "closed",
-      registrationChannelId: "900000000000000102",
-      slotlistChannelId: CHANNEL_ID,
-      roleId: "900000000000000103",
-      openTime: new Date(),
-      totalSlots: 2,
-      startFrom: 1,
-      hostId: "900000000000000104",
-      closedAt: new Date(),
-      matchTime: new Date(Date.now() + 3_600_000),
-    })
-    .returning({ id: scrims.id });
+  const rows = await withBusyRetry(() =>
+    db
+      .insert(scrims)
+      .values({
+        guildId: GUILD_ID,
+        name: "Slot list test scrim",
+        status: "closed",
+        registrationChannelId: "900000000000000102",
+        slotlistChannelId: CHANNEL_ID,
+        roleId: "900000000000000103",
+        openTime: new Date(),
+        totalSlots: 2,
+        startFrom: 1,
+        hostId: "900000000000000104",
+        closedAt: new Date(),
+        matchTime: new Date(Date.now() + 3_600_000),
+      })
+      .returning({ id: scrims.id }),
+  );
 
   scrimId = rows[0]?.id ?? "";
 
-  await db.insert(slots).values([
-    { scrimId, num: 1 },
-    { scrimId, num: 2 },
-  ]);
+  await withBusyRetry(() =>
+    db.insert(slots).values([
+      { scrimId, num: 1 },
+      { scrimId, num: 2 },
+    ]),
+  );
 }
 
 /** Removes every fixture. */
 async function clean(): Promise<void> {
   if (!scrimId) return;
 
-  await db.delete(slots).where(eq(slots.scrimId, scrimId));
-  await db.delete(scrims).where(eq(scrims.id, scrimId));
+  await withBusyRetry(() =>
+    db.delete(slots).where(eq(slots.scrimId, scrimId)),
+  );
+
+  await withBusyRetry(() => db.delete(scrims).where(eq(scrims.id, scrimId)));
 }
 
 beforeEach(async () => {
@@ -184,7 +192,10 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await clean();
-  await db.delete(scrims).where(eq(scrims.guildId, GUILD_ID));
+
+  await withBusyRetry(() =>
+    db.delete(scrims).where(eq(scrims.guildId, GUILD_ID)),
+  );
 
   await closeDatabase();
 });

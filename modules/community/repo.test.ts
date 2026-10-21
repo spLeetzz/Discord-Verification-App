@@ -1,13 +1,14 @@
 /**
  * The repository, against the live database.
  *
- * Two of the statements in `repo.ts` are hand-written SQL, and both are
- * for a reason:
+ * The statements in `repo.ts` that are not plain reads are the ones
+ * worth proving, because they are the ones that look right and are not:
  *
  *  - the tag usage counter is an atomic `usage = usage + 1`, which has to
  *    be one statement;
- *  - the auto-role toggle is an `INSERT … ON CONFLICT DO UPDATE` that
- *    adds or removes a role id in the array **atomically**.
+ *  - the auto-role toggle adds or removes a role **atomically**, and the
+ *    database's own unique constraint is what decides which of the two
+ *    happens.
  *
  * Hand-written SQL is exactly the kind of thing that looks right and is
  * not, so it is proved here rather than eyeballed.
@@ -16,7 +17,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { closeDatabase, db } from "../../db/client.js";
-import { autoroleConfigs, jobs, snipes } from "../../db/schema.js";
+import { autoroleConfigs, jobs, snipes, tags } from "../../db/schema.js";
 import * as repo from "./repo.js";
 
 /** A guild id no real row can have, unique to this test run. */
@@ -40,8 +41,9 @@ const MARKER = `community-repo-test-${Date.now()}`;
 /**
  * Is the database there?
  *
- * The test is skipped rather than failed when it is not, so the unit
- * tests still run on a machine without Postgres.
+ * The test is skipped rather than failed when it is not. The database
+ * this file uses is created for the run, so this is a guard against a
+ * half-built schema rather than against a missing server.
  */
 async function databaseIsReachable(): Promise<boolean> {
   try {
@@ -81,15 +83,17 @@ afterAll(async () => {
 
 describe.skipIf(!reachable)("the auto-role toggle", () => {
   it("creates the row and adds the role", async () => {
-    const roles = await repo.toggleAutoroleRole(GUILD_ID, "humans", ROLE_ID);
+    const result = await repo.toggleAutoroleRole(GUILD_ID, "humans", ROLE_ID);
 
-    expect(roles).toEqual([ROLE_ID]);
+    expect(result.added).toBe(true);
+    expect(result.roles).toEqual([ROLE_ID]);
   });
 
   it("removes the role when it is there already", async () => {
-    const roles = await repo.toggleAutoroleRole(GUILD_ID, "humans", ROLE_ID);
+    const result = await repo.toggleAutoroleRole(GUILD_ID, "humans", ROLE_ID);
 
-    expect(roles).toEqual([]);
+    expect(result.added).toBe(false);
+    expect(result.roles).toEqual([]);
   });
 
   it("keeps the two lists apart", async () => {
@@ -129,6 +133,164 @@ describe.skipIf(!reachable)("the auto-role toggle", () => {
 
     expect(config?.humans).toEqual([]);
     expect(config?.bots).toEqual([]);
+  });
+
+  it("loses no role when two toggles race", async () => {
+    await repo.clearAutoroleRoles(GUILD_ID);
+
+    // Two moderators clicking at the same moment, on two different
+    // roles. The toggle is decided by the database — the insert
+    // conflicts or it does not — so neither of them can overwrite the
+    // other.
+    await Promise.all([
+      repo.toggleAutoroleRole(GUILD_ID, "humans", ROLE_ID),
+      repo.toggleAutoroleRole(GUILD_ID, "humans", OTHER_ROLE_ID),
+    ]);
+
+    const config = await repo.findAutoroleConfig(GUILD_ID);
+
+    expect(config?.humans).toEqual([ROLE_ID, OTHER_ROLE_ID]);
+  });
+
+  it("loses no role when a crowd of toggles races", async () => {
+    await repo.clearAutoroleRoles(GUILD_ID);
+
+    const roleIds = Array.from(
+      { length: 8 },
+      (_unused, index) => `9000000000000010${index}`,
+    );
+
+    await Promise.all(
+      roleIds.map((roleId) => repo.toggleAutoroleRole(GUILD_ID, "bots", roleId)),
+    );
+
+    const config = await repo.findAutoroleConfig(GUILD_ID);
+
+    expect(config?.bots).toEqual(roleIds);
+  });
+
+  it("never holds the same role twice when the same toggle races itself", async () => {
+    await repo.clearAutoroleRoles(GUILD_ID);
+
+    // The same role, toggled twice at once. Either order is the same
+    // order of events, and both of them end with the role there once or
+    // not at all — never twice.
+    const results = await Promise.all([
+      repo.toggleAutoroleRole(GUILD_ID, "humans", ROLE_ID),
+      repo.toggleAutoroleRole(GUILD_ID, "humans", ROLE_ID),
+    ]);
+
+    const config = await repo.findAutoroleConfig(GUILD_ID);
+
+    expect(config?.humans.length).toBeLessThanOrEqual(1);
+    expect(new Set(config?.humans).size).toBe(config?.humans.length);
+
+    // Exactly one of the two toggles added the role, and exactly one
+    // removed it.
+    expect(results.filter((result) => result.added)).toHaveLength(1);
+  });
+});
+
+describe.skipIf(!reachable)("the unique constraint", () => {
+  it("is recognised as a unique violation", async () => {
+    await db.delete(tags).where(eq(tags.guildId, GUILD_ID));
+
+    await repo.insertTag({
+      guildId: GUILD_ID,
+      name: "once",
+      content: "Something.",
+      isEmbed: false,
+      ownerId: USER_ID,
+    });
+
+    let caught: unknown;
+
+    try {
+      await repo.insertTag({
+        guildId: GUILD_ID,
+        name: "once",
+        content: "Something else.",
+        isEmbed: false,
+        ownerId: USER_ID,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    // The second insert is refused by the database, and the refusal is
+    // recognised — which is the answer "that tag name is already taken"
+    // is built on when two members create the same tag at once.
+    expect(caught).toBeDefined();
+    expect(repo.isUniqueViolation(caught)).toBe(true);
+  });
+});
+
+describe.skipIf(!reachable)("the tag search", () => {  it("finds a tag whatever case the query is in", async () => {
+    await db.delete(tags).where(eq(tags.guildId, GUILD_ID));
+
+    await repo.insertTag({
+      guildId: GUILD_ID,
+      name: "foo",
+      content: "Something.",
+      isEmbed: false,
+      ownerId: USER_ID,
+    });
+
+    for (const query of ["Foo", "foo", "FOO"]) {
+      const found = await repo.listTagsMatching(GUILD_ID, query);
+
+      expect(found.map((tag) => tag.name), query).toEqual(["foo"]);
+    }
+  });
+
+  it("finds every spelling of a name that is stored in more than one", async () => {
+    await db.delete(tags).where(eq(tags.guildId, GUILD_ID));
+
+    // The canonical name is what the service stores, so a tag is
+    // lower-cased. The rows below were written straight to the
+    // repository, which does not fold them, and the unique constraint is
+    // on the exact name — so all three can exist.
+    for (const name of ["Foo", "foo", "FOO"]) {
+      await repo.insertTag({
+        guildId: GUILD_ID,
+        name,
+        content: "Something.",
+        isEmbed: false,
+        ownerId: USER_ID,
+      });
+    }
+
+    const found = await repo.listTagsMatching(GUILD_ID, "foo");
+
+    expect(found.map((tag) => tag.name).sort()).toEqual(["FOO", "Foo", "foo"]);
+  });
+});
+
+describe.skipIf(!reachable)("the tag usage counter", () => {
+  it("survives concurrent increments", async () => {
+    await db.delete(tags).where(eq(tags.guildId, GUILD_ID));
+
+    await repo.insertTag({
+      guildId: GUILD_ID,
+      name: "counted",
+      content: "Something.",
+      isEmbed: false,
+      ownerId: USER_ID,
+    });
+
+    const increments = 20;
+
+    await Promise.all(
+      Array.from({ length: increments }, () =>
+        repo.incrementTagUsage(GUILD_ID, "counted"),
+      ),
+    );
+
+    const after = await repo.findTagByName(GUILD_ID, "counted");
+
+    // Not one of the twenty counts was lost: the statement is an
+    // increment, not a read and a write.
+    expect(after?.usage).toBe(increments);
   });
 });
 

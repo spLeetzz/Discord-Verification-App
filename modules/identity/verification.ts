@@ -22,8 +22,9 @@
  * ## The OCR engine changed
  *
  * Quotient's rules were calibrated against a remote OCR service that is not
- * in its repository. This port uses the local Tesseract provider, and the
- * two read a screenshot differently. Three rules changed because of it:
+ * in its repository, and this port reads the screenshot with a remote
+ * service too — the same shape, but not the same engine, and the two read
+ * a screenshot differently enough that three rules changed:
  *
  *  1. **The page-name check is tolerant of noise.** Quotient asked for the
  *     page name as one contiguous piece of the OCR text. An icon that the
@@ -31,7 +32,7 @@
  *     as `team|phoenix`) broke a check a human would pass. The check now
  *     also accepts the name with a couple of stray characters in it.
  *  2. **The literal button checks are case-insensitive.** Quotient looked
- *     for `"SUBSCRIBE "` and `"FOLLOW "` in the raw text. Tesseract does
+ *     for `"SUBSCRIBE "` and `"FOLLOW "` in the raw text. An engine does
  *     not guarantee the same casing the screen shows, so the checks are
  *     case-insensitive word matches now. They still refuse "SUBSCRIBED" and
  *     "Following", exactly as Quotient's trailing space did.
@@ -40,6 +41,9 @@
  *     which destroys `"SUBSCRIBE "`; `OcrResult.rawText` keeps it. Both
  *     sides of a contains check are normalised with the *same* function, so
  *     a space in the configured name cannot make the comparison fail.
+ *
+ * All three are safe against any engine, which is why they stayed when the
+ * port went back to a remote service.
  */
 
 import { normaliseText } from "../ssverify/ocr/index.js";
