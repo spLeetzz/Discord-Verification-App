@@ -10,13 +10,49 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { ButtonStyle } from "discord.js";
 import type { EmbedBuilder } from "discord.js";
-import { prompt } from "./prompt.js";
+import { prompt, PROMPT_CUSTOM_ID_PREFIX } from "./prompt.js";
 import { fakeInteraction } from "./interaction.fake.js";
 
 /** The payload a timeout edit carries. */
 interface EmbedPayload {
   embeds: EmbedBuilder[];
+}
+
+/**
+ * One button of a row, as a payload carries it.
+ */
+interface PayloadButton {
+  readonly label?: string;
+  readonly style?: number;
+  readonly custom_id?: string;
+  readonly disabled?: boolean;
+}
+
+/**
+ * The buttons of the first row a payload carries.
+ */
+function payloadButtons(payload: unknown): readonly PayloadButton[] {
+  const rows =
+    (
+      payload as {
+        components?: readonly {
+          toJSON: () => { components?: readonly PayloadButton[] };
+        }[];
+      }
+    ).components ?? [];
+
+  return rows[0]?.toJSON().components ?? [];
+}
+
+/**
+ * The embed a payload carries.
+ */
+function payloadEmbed(payload: unknown): ReturnType<EmbedBuilder["toJSON"]> {
+  const embeds = (payload as { embeds?: readonly EmbedBuilder[] }).embeds ?? [];
+
+  return embeds[0]?.toJSON() ?? {};
 }
 
 describe("prompt", () => {
@@ -140,5 +176,89 @@ describe("the prompt's owner", () => {
     expect(confirmed).toBe(true);
     expect(sent[0]?.handle.clicks[0]?.userId).toBe("someone-else");
     expect(sent[0]?.handle.clicks[0]?.accepted).toBe(true);
+  });
+});
+
+describe("the prompt's appearance", () => {
+  it("asks the question under a short title", async () => {
+    // The prompt is the bot's most-used dialog, so it is the same
+    // everywhere: a title that says what kind of thing it is, the
+    // question under it, and the hint in the footer.
+    const { interaction, sent } = fakeInteraction();
+
+    await prompt(interaction, "Delete the slotlist?");
+
+    const embed = payloadEmbed(sent[0]?.payload);
+
+    expect(embed.title).toBe("Confirm");
+    expect(embed.description).toBe("Delete the slotlist?");
+    expect(embed.footer?.text).toBe("Confirm to go ahead, or cancel to stop.");
+  });
+
+  it("offers a green Confirm and a grey Cancel", async () => {
+    // Green confirms, grey does everything else. A red Cancel would
+    // say the cancel destroys something, and it does not.
+    const { interaction, sent } = fakeInteraction();
+
+    await prompt(interaction, "Delete the slotlist?");
+
+    const buttons = payloadButtons(sent[0]?.payload);
+
+    expect(buttons.map((button) => button.label)).toEqual([
+      "Confirm",
+      "Cancel",
+    ]);
+    expect(buttons[0]?.style).toBe(ButtonStyle.Success);
+    expect(buttons[1]?.style).toBe(ButtonStyle.Secondary);
+  });
+
+  it("keeps the collector's custom ids on the buttons", async () => {
+    // The buttons are answered by a collector, so the ids carry the
+    // collector's prefix and the token. They are the router's contract
+    // and they do not change.
+    const { interaction, sent } = fakeInteraction();
+
+    await prompt(interaction, "Delete the slotlist?");
+
+    const buttons = payloadButtons(sent[0]?.payload);
+
+    expect(buttons).toHaveLength(2);
+
+    for (const button of buttons) {
+      expect(button.custom_id).toMatch(
+        new RegExp(
+          `^${PROMPT_CUSTOM_ID_PREFIX}:[A-Za-z0-9_-]+:(confirm|cancel)$`,
+        ),
+      );
+    }
+  });
+
+  it("says what happened when it is answered", async () => {
+    // The question stays on the panel, so the answer can be read in
+    // context.
+    const { interaction, sent } = fakeInteraction();
+
+    await prompt(interaction, "Delete the slotlist?");
+
+    const update = sent[0]?.handle.clicks[0]?.update;
+    const embed = payloadEmbed(update?.mock.calls[0]?.[0]);
+
+    expect(embed.title).toBe("Confirmed");
+    expect(embed.description).toBe("Delete the slotlist?");
+  });
+
+  it("names the timeout in the title", async () => {
+    const { interaction, sent } = fakeInteraction({
+      userId: "owner",
+      clicks: [{ userId: "someone-else" }],
+    });
+
+    await prompt(interaction, "Delete the slotlist?", { timeoutMs: 20 });
+
+    const payload = sent[0]?.handle.edit.mock.calls[0]?.[0];
+    const embed = payloadEmbed(payload);
+
+    expect(embed.title).toBe("Timed out");
+    expect(embed.description).toContain("timed out");
   });
 });

@@ -20,9 +20,11 @@
  *    tournament", "Delete", "Back". A label is a button, not a sentence.
  *  - **A panel always says what to do next.** The embed's footer carries
  *    the hint, so the description does not have to shout it.
- *  - **Every modal has a way out.** A form that can only be submitted is a
- *    trap; Discord cannot cancel a modal on its own, so the modal's
- *    second button is always Cancel.
+ *  - **A modal is closed by the client, not by a button.** Discord's modal
+ *    API takes text inputs and nothing else — a button inside a modal is
+ *    rejected by the API. Every modal therefore gets its way out from the
+ *    client: Escape, or the X in the corner. The panel that opened the
+ *    modal is what has to carry a visible way back, and it always does.
  *
  * **Emoji.** The default is none. A label is clearer than an emoji, and
  * the bot's panels have a lot of buttons in them. Emoji is for the cases
@@ -34,10 +36,15 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelSelectMenuBuilder,
   EmbedBuilder,
+  MentionableSelectMenuBuilder,
   ModalBuilder,
+  RoleSelectMenuBuilder,
+  StringSelectMenuBuilder,
   TextInputBuilder,
   TextInputStyle,
+  UserSelectMenuBuilder,
 } from "discord.js";
 import { EMBED_COLOR, ERROR_COLOR } from "./constants.js";
 
@@ -144,6 +151,55 @@ export function successButton(options: ButtonOptions): ButtonBuilder {
  */
 export function dangerButton(options: ButtonOptions): ButtonBuilder {
   return buildButton(ButtonStyle.Danger, options);
+}
+
+/**
+ * A link to somewhere else.
+ *
+ * The one button that cannot carry a custom id: it opens a URL rather
+ * than doing something in the bot, so there is nothing for the router to
+ * dispatch on.
+ */
+export function linkButton(options: {
+  readonly url: string;
+  readonly label: string;
+  readonly emoji?: string;
+}): ButtonBuilder {
+  const builder = new ButtonBuilder()
+    .setURL(options.url)
+    .setStyle(ButtonStyle.Link)
+    .setLabel(options.label.slice(0, 80));
+
+  if (options.emoji) builder.setEmoji(options.emoji);
+
+  return builder;
+}
+
+/**
+ * A row of any component.
+ *
+ * `actionRow` is for buttons. A select menu cannot go in a button row —
+ * Discord types the row by what it holds — so a menu gets its own row
+ * through this.
+ */
+export function componentRow<
+  T extends
+    | ButtonBuilder
+    | StringSelectMenuBuilder
+    | ChannelSelectMenuBuilder
+    | RoleSelectMenuBuilder
+    | UserSelectMenuBuilder
+    | MentionableSelectMenuBuilder,
+>(
+  ...components: readonly T[]
+): ActionRowBuilder<T> {
+  if (components.length > MAX_BUTTONS_PER_ROW) {
+    throw new RangeError(
+      `a row may hold at most ${MAX_BUTTONS_PER_ROW} components, got ${components.length}`,
+    );
+  }
+
+  return new ActionRowBuilder<T>().addComponents(...components);
 }
 
 /**

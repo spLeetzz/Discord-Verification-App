@@ -15,20 +15,32 @@
  * has to reload its pages on every press, so the paginator is given a
  * `loadPages` function. A paginator over a fixed list of lines can use the
  * in-memory lines instead.
+ *
+ * **The look.** The paginator is the row of navigation under every list
+ * panel in the bot, so it is one row of grey buttons that read as a unit:
+ * "First", "Previous", "Next", "Last". The buttons at the ends of the
+ * list are disabled, so the row says where in the list the user is, and
+ * the page count sits in the footer of the panel, out of the way of the
+ * list itself.
  */
 
-import {
+import type {
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle,
+  ButtonInteraction,
   EmbedBuilder,
+  RepliableInteraction,
 } from "discord.js";
-import type { ButtonInteraction, RepliableInteraction } from "discord.js";
 import { respond } from "./context.js";
-import type { ReplyHandle } from "./context.js";
-import { EMBED_COLOR } from "./constants.js";
+import type { ReplyHandle, ReplyPayload } from "./context.js";
 import { registerButton, registeredPrefixes } from "./router.js";
 import { run } from "./fire-and-forget.js";
+import {
+  label,
+  navigationRow,
+  panelEmbed,
+  secondaryButton,
+} from "./ui.js";
 import { logger } from "../utils/logger.js";
 
 /** The prefix every paginator button id starts with. */
@@ -169,6 +181,10 @@ function isPagerAction(value: string): value is PagerAction {
 
 /**
  * The embed for a page.
+ *
+ * A panel is a title, the data, and a footer that says where the user
+ * is: the page count goes in the footer, where it is out of the way of
+ * the list.
  */
 export function buildPagerEmbed(
   pages: readonly (readonly string[])[],
@@ -178,23 +194,36 @@ export function buildPagerEmbed(
   const lines = pages[index] ?? [];
   const description = lines.join("\n").slice(0, MAX_DESCRIPTION);
 
-  const embed = new EmbedBuilder()
-    .setDescription(description)
-    .setColor(options.color ?? EMBED_COLOR);
+  return panelEmbed({
+    title: pagerTitle(options),
+    description,
+    color: options.color,
+    footer:
+      options.showPageCount !== false
+        ? `Page ${index + 1} of ${pages.length}`
+        : undefined,
+  });
+}
 
-  if (options.title) embed.setTitle(options.title);
+/**
+ * The title of a paginator's panel.
+ *
+ * A caller usually names its own list, and that name is the title. A
+ * paginator without one still gets a title, because a panel without a
+ * title is not a panel.
+ */
+function pagerTitle(options: PaginatorOptions): string {
+  const title = options.title?.trim();
 
-  if (options.showPageCount !== false) {
-    embed.setFooter({ text: `Page ${index + 1} of ${pages.length}` });
-  }
-
-  return embed;
+  return title ? title : "Results";
 }
 
 /**
  * The button row for a page.
  *
- * The buttons at the ends of the list are disabled, as in Quotient.
+ * One row of navigation, all of it grey: the buttons at the ends of the
+ * list are disabled, as in Quotient, so the disabled state says which
+ * end of the list the user is on.
  */
 export function buildPagerRow(
   namespace: string,
@@ -204,27 +233,27 @@ export function buildPagerRow(
   const isFirst = index <= 0;
   const isLast = index >= pageCount - 1;
 
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(pagerCustomId(namespace, PAGER_ACTIONS.first, index))
-      .setEmoji("⏮️")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(isFirst),
-    new ButtonBuilder()
-      .setCustomId(pagerCustomId(namespace, PAGER_ACTIONS.previous, index))
-      .setEmoji("⏪")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(isFirst),
-    new ButtonBuilder()
-      .setCustomId(pagerCustomId(namespace, PAGER_ACTIONS.next, index))
-      .setEmoji("⏩")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(isLast),
-    new ButtonBuilder()
-      .setCustomId(pagerCustomId(namespace, PAGER_ACTIONS.last, index))
-      .setEmoji("⏭️")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(isLast),
+  return navigationRow(
+    secondaryButton({
+      customId: pagerCustomId(namespace, PAGER_ACTIONS.first, index),
+      label: label(PAGER_ACTIONS.first),
+      disabled: isFirst,
+    }),
+    secondaryButton({
+      customId: pagerCustomId(namespace, PAGER_ACTIONS.previous, index),
+      label: label(PAGER_ACTIONS.previous),
+      disabled: isFirst,
+    }),
+    secondaryButton({
+      customId: pagerCustomId(namespace, PAGER_ACTIONS.next, index),
+      label: label(PAGER_ACTIONS.next),
+      disabled: isLast,
+    }),
+    secondaryButton({
+      customId: pagerCustomId(namespace, PAGER_ACTIONS.last, index),
+      label: label(PAGER_ACTIONS.last),
+      disabled: isLast,
+    }),
   );
 }
 
@@ -334,13 +363,7 @@ export class Paginator {
     const pages = await this.load();
 
     if (pages.length === 0) {
-      await respond(interaction, {
-        embeds: [
-          new EmbedBuilder()
-            .setDescription("There is nothing to show.")
-            .setColor(EMBED_COLOR),
-        ],
-      });
+      await respond(interaction, this.buildEmptyPanel());
 
       return;
     }
@@ -351,6 +374,25 @@ export class Paginator {
     });
 
     this.expireLater(handle);
+  }
+
+  /**
+   * The panel for a list with nothing in it.
+   *
+   * The empty state is the first thing a new user sees, so it is a
+   * panel like any other: a title and a line that says what is going
+   * on.
+   */
+  private buildEmptyPanel(): ReplyPayload {
+    return {
+      embeds: [
+        panelEmbed({
+          title: pagerTitle(this.options),
+          description: "There is nothing to show.",
+          color: this.options.color,
+        }),
+      ],
+    };
   }
 
   /**
@@ -419,9 +461,10 @@ async function handlePagerPress(
   if (pages.length === 0) {
     await interaction.update({
       embeds: [
-        new EmbedBuilder()
-          .setDescription("There is nothing to show.")
-          .setColor(entry.options.color ?? EMBED_COLOR),
+        panelEmbed({
+          title: pagerTitle(entry.options),
+          description: "There is nothing to show.",
+        }),
       ],
       components: [],
     });

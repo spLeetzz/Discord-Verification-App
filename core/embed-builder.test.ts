@@ -12,6 +12,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ButtonStyle } from "discord.js";
 import { logger } from "../utils/logger.js";
 import {
   EmbedDesigner,
@@ -82,6 +83,72 @@ function panelCustomIds(payload: unknown): string[] {
   }
 
   return ids;
+}
+
+/**
+ * The buttons of a panel, as the panel carries them.
+ */
+function panelButtons(payload: unknown): readonly {
+  label?: string;
+  style?: number;
+  custom_id?: string;
+}[] {
+  const rows =
+    (
+      payload as {
+        components?: readonly {
+          toJSON: () => {
+            components?: readonly {
+              label?: string;
+              style?: number;
+              custom_id?: string;
+            }[];
+          };
+        }[];
+      }
+    ).components ?? [];
+
+  const buttons: {
+    label?: string;
+    style?: number;
+    custom_id?: string;
+  }[] = [];
+
+  for (const row of rows) {
+    for (const component of row.toJSON().components ?? []) {
+      if (component.custom_id?.startsWith("embeds:save:")) {
+        buttons.push(component);
+      }
+    }
+  }
+
+  return buttons;
+}
+
+/**
+ * The text inputs of a modal, as the modal carries them.
+ */
+function modalFields(modal: unknown): readonly {
+  label?: string;
+  placeholder?: string;
+  custom_id?: string;
+  required?: boolean;
+}[] {
+  const rows =
+    (
+      modal as {
+        components?: readonly {
+          components?: readonly {
+            label?: string;
+            placeholder?: string;
+            custom_id?: string;
+            required?: boolean;
+          }[];
+        }[];
+      }
+    ).components ?? [];
+
+  return rows.flatMap((row) => row.components ?? []);
 }
 
 beforeEach(() => {
@@ -488,5 +555,74 @@ describe("the designer's panel", () => {
     const payload = embeds.buildPanel(token);
 
     expect(panelCustomIds(payload)).toEqual([`embeds:options:${token}`]);
+  });
+});
+
+describe("the designer's appearance", () => {
+  it("makes the save button the panel's one main action", () => {
+    // One primary action per panel, and it sits alone on its own row.
+    const embeds = registeredDesigner();
+    const token = embeds.start({ title: "Rules" }, "owner-1", () => undefined);
+
+    const buttons = panelButtons(embeds.buildPanel(token));
+
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]?.label).toBe("Save");
+    expect(buttons[0]?.style).toBe(ButtonStyle.Primary);
+    expect(buttons[0]?.custom_id).toBe(`embeds:save:${token}`);
+  });
+
+  it("says what the menu is for", () => {
+    // The placeholder is the only thing on the menu itself, so it says
+    // what the user is picking.
+    const embeds = designer();
+    const token = embeds.start({ title: "Rules" }, "owner-1");
+
+    const menu = embeds.buildOptions(token).toJSON();
+
+    expect(menu.placeholder).toBe("Pick what to edit");
+    expect(menu.options?.map((option) => option.label)).toEqual([
+      "Edit message",
+      "Edit thumbnail",
+      "Edit main image",
+      "Edit footer icon",
+      "Set color",
+    ]);
+  });
+
+  it("gives every field of the modal a short label and an example", () => {
+    // A field is a noun, and its placeholder shows what to type.
+    const embeds = designer();
+    const token = embeds.start({ title: "Rules" }, "owner-1");
+
+    const modal = embeds.buildModal("main", token).toJSON();
+
+    expect(modal.title).toBe("Edit message");
+
+    const fields = modalFields(modal);
+
+    expect(fields.map((field) => field.label)).toEqual([
+      "Title",
+      "Description",
+      "Footer",
+    ]);
+
+    for (const field of fields) {
+      expect(field.placeholder).toMatch(/^e\.g\./);
+      expect(field.required).toBe(false);
+    }
+  });
+
+  it("keeps the field ids the modal handler reads", () => {
+    const embeds = designer();
+    const token = embeds.start({ title: "Rules" }, "owner-1");
+
+    const fields = modalFields(embeds.buildModal("main", token).toJSON());
+
+    expect(fields.map((field) => field.custom_id)).toEqual([
+      "title",
+      "description",
+      "footer",
+    ]);
   });
 });

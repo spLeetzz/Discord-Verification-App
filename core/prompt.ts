@@ -10,6 +10,12 @@
  * answer. Somebody else's click is ignored, and the buttons stay live for
  * the caller.
  *
+ * **The look.** The prompt is the bot's most-used dialog, so it is the
+ * same everywhere: the question under a short title, a green Confirm, a
+ * grey Cancel, and a footer that says what to do next. It is built from
+ * the shared helpers in `core/ui.ts`, so it looks like every other panel
+ * in the bot.
+ *
  * The token in the custom id is not a secret — it is in the message, and
  * the message is in a channel other people can read — so the owner check
  * is on the **user**, not on the id. A caller that wants a prompt anyone
@@ -28,18 +34,20 @@
  * helper.
  */
 
-import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ComponentType,
-  EmbedBuilder,
-} from "discord.js";
+import { ComponentType } from "discord.js";
 import type { MessageComponentInteraction, RepliableInteraction } from "discord.js";
 import { sendCollectable } from "./context.js";
 import type { ReplyHandle } from "./context.js";
 import { COLLECTOR_CUSTOM_ID_PREFIX, randomId } from "./custom-id.js";
-import { EMBED_COLOR, ERROR_COLOR } from "./constants.js";
+import {
+  DANGER_COLOR,
+  PANEL_COLOR,
+  SUCCESS_COLOR,
+  actionRow,
+  panelEmbed,
+  secondaryButton,
+  successButton,
+} from "./ui.js";
 
 /**
  * The prefix every prompt button id starts with.
@@ -52,6 +60,22 @@ export const PROMPT_CUSTOM_ID_PREFIX = `${COLLECTOR_CUSTOM_ID_PREFIX}:prompt`;
 
 /** How long a prompt stays open by default. */
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * The title of the prompt's panel.
+ *
+ * The prompt is one thing everywhere, so the title says what kind of
+ * thing it is: the caller is being asked to confirm something.
+ */
+const PROMPT_TITLE = "Confirm";
+
+/**
+ * The hint the prompt's footer carries.
+ *
+ * The footer is where a panel says what to do next, so the question
+ * itself does not have to.
+ */
+const PROMPT_FOOTER = "Confirm to go ahead, or cancel to stop.";
 
 /** How a prompt is shaped. */
 export interface PromptOptions {
@@ -132,20 +156,16 @@ export async function prompt(
   const confirmId = promptCustomId(token, "confirm");
   const cancelId = promptCustomId(token, "cancel");
 
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(confirmId)
-      .setLabel("Confirm")
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(cancelId)
-      .setLabel("Cancel")
-      .setStyle(ButtonStyle.Secondary),
+  const row = actionRow(
+    successButton({ customId: confirmId, label: "Confirm" }),
+    secondaryButton({ customId: cancelId, label: "Cancel" }),
   );
 
-  const embed = new EmbedBuilder()
-    .setDescription(question)
-    .setColor(EMBED_COLOR);
+  const embed = panelEmbed({
+    title: PROMPT_TITLE,
+    description: question,
+    footer: PROMPT_FOOTER,
+  });
 
   const handle = await sendCollectable(
     interaction,
@@ -180,11 +200,15 @@ export async function prompt(
 
   await answer.update({
     embeds: [
-      new EmbedBuilder()
-        .setDescription(
-          confirmed ? `${question}\n\n✅ Confirmed.` : `${question}\n\n❌ Cancelled.`,
-        )
-        .setColor(confirmed ? EMBED_COLOR : ERROR_COLOR),
+      // The question stays on the panel, so the answer can be read in
+      // context: the title says what happened, the colour says how it
+      // went. Green is a confirmation; a refusal is not a problem, so
+      // it is not red.
+      panelEmbed({
+        title: confirmed ? "Confirmed" : "Cancelled",
+        description: question,
+        color: confirmed ? SUCCESS_COLOR : PANEL_COLOR,
+      }),
     ],
     components: clearButtons ? [] : [row],
   });
@@ -209,9 +233,11 @@ async function finishWithTimeout(
   try {
     await handle.edit({
       embeds: [
-        new EmbedBuilder()
-          .setDescription("⏳ The prompt timed out. The action was cancelled.")
-          .setColor(ERROR_COLOR),
+        panelEmbed({
+          title: "Timed out",
+          description: "The prompt timed out. The action was cancelled.",
+          color: DANGER_COLOR,
+        }),
       ],
       components: clearButtons ? [] : undefined,
     });

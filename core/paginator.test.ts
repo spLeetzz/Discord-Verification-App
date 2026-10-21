@@ -14,15 +14,41 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
-import type { ButtonInteraction } from "discord.js";
+import { ButtonStyle } from "discord.js";
+import type { ActionRowBuilder, ButtonBuilder, ButtonInteraction } from "discord.js";
 import { logger } from "../utils/logger.js";
 import { clearRegistry, dispatch, registeredPrefixes } from "./router.js";
 import {
   PAGER_ACTIONS,
   PAGER_CUSTOM_ID_PREFIX,
   Paginator,
+  buildPagerEmbed,
+  buildPagerRow,
   pagerCustomId,
 } from "./paginator.js";
+
+/**
+ * One button of a row, as the row carries it.
+ */
+interface RowButton {
+  readonly label?: string;
+  readonly style?: number;
+  readonly custom_id?: string;
+  readonly disabled?: boolean;
+}
+
+/**
+ * The buttons of a row.
+ *
+ * Discord types a button as a union of the kinds there are, and only
+ * one of them carries a custom id, so the row is read as the shape
+ * this test cares about.
+ */
+function rowButtons(
+  row: ActionRowBuilder<ButtonBuilder>,
+): readonly RowButton[] {
+  return row.toJSON().components as unknown as readonly RowButton[];
+}
 
 /** The warnings the router wrote. */
 const warnings: string[] = [];
@@ -104,5 +130,87 @@ describe("the paginator's router registration", () => {
     };
 
     expect(payload.embeds[0]?.data.description).toBe("new page");
+  });
+});
+
+describe("the paginator's row", () => {
+  it("is one row of grey navigation buttons", () => {
+    // The paginator is the row under every list panel, so it reads as
+    // one unit: four words, all of them grey.
+    const buttons = rowButtons(buildPagerRow("tags", 1, 3));
+
+    expect(buttons.map((button) => button.label)).toEqual([
+      "First",
+      "Previous",
+      "Next",
+      "Last",
+    ]);
+
+    for (const button of buttons) {
+      expect(button.style).toBe(ButtonStyle.Secondary);
+    }
+  });
+
+  it("keeps the custom ids the router matches on", () => {
+    // The ids are the router's contract and the collector's contract.
+    // They do not change.
+    const buttons = rowButtons(buildPagerRow("tags", 1, 3));
+
+    expect(buttons.map((button) => button.custom_id)).toEqual([
+      "pager:tags:first:1",
+      "pager:tags:previous:1",
+      "pager:tags:next:1",
+      "pager:tags:last:1",
+    ]);
+  });
+
+  it("disables the buttons at the ends of the list", () => {
+    // The disabled state is how the row says where the user is: there
+    // is no page before the first one and none after the last one.
+    const first = rowButtons(buildPagerRow("tags", 0, 3));
+
+    expect(first[0]?.disabled).toBe(true);
+    expect(first[1]?.disabled).toBe(true);
+    expect(first[2]?.disabled).toBe(false);
+    expect(first[3]?.disabled).toBe(false);
+
+    const last = rowButtons(buildPagerRow("tags", 2, 3));
+
+    expect(last[0]?.disabled).toBe(false);
+    expect(last[1]?.disabled).toBe(false);
+    expect(last[2]?.disabled).toBe(true);
+    expect(last[3]?.disabled).toBe(true);
+  });
+});
+
+describe("the paginator's panel", () => {
+  it("puts the page count in the footer", () => {
+    // The page indicator stays where it was: the footer, out of the way
+    // of the list itself.
+    const embed = buildPagerEmbed([["a"], ["b"], ["c"]], 1, {
+      namespace: "tags",
+      title: "Tags",
+    });
+
+    expect(embed.toJSON().title).toBe("Tags");
+    expect(embed.toJSON().description).toBe("b");
+    expect(embed.toJSON().footer?.text).toBe("Page 2 of 3");
+  });
+
+  it("names the list when the caller does not", () => {
+    // A panel without a title is not a panel.
+    const embed = buildPagerEmbed([["a"]], 0, { namespace: "tags" });
+
+    expect(embed.toJSON().title).toBe("Results");
+  });
+
+  it("leaves the page count out when the caller asks it to", () => {
+    const embed = buildPagerEmbed([["a"], ["b"]], 0, {
+      namespace: "tags",
+      title: "Tags",
+      showPageCount: false,
+    });
+
+    expect(embed.toJSON().footer).toBeUndefined();
   });
 });

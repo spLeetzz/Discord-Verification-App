@@ -31,6 +31,11 @@
  * helper. The collection rules are the same for all three — the menu
  * belongs to the member who opened it, the timeout takes the menu off the
  * message it is really on — so the three share one implementation.
+ *
+ * **The wording.** A menu says what it wants in two places: the
+ * placeholder on the menu itself and the footer of the panel it sits on.
+ * Both say the same thing — "Pick an option", "Pick a channel", "Pick a
+ * role" — so the bot asks for things the same way everywhere.
  */
 
 import {
@@ -38,20 +43,20 @@ import {
   ChannelSelectMenuBuilder,
   ChannelType,
   ComponentType,
-  EmbedBuilder,
   RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
 } from "discord.js";
 import type {
   Channel,
+  EmbedBuilder,
   MessageComponentInteraction,
   RepliableInteraction,
 } from "discord.js";
 import { sendCollectable } from "./context.js";
 import type { ReplyPayload } from "./context.js";
 import { COLLECTOR_CUSTOM_ID_PREFIX, randomId } from "./custom-id.js";
-import { EMBED_COLOR } from "./constants.js";
+import { panelEmbed } from "./ui.js";
 
 /**
  * The prefix every select-menu custom id starts with.
@@ -72,6 +77,50 @@ export const ROLE_SELECT_CUSTOM_ID_PREFIX =
 
 /** How long a menu stays open by default. */
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * The title of a menu's panel.
+ *
+ * The prompt's panel is titled "Confirm"; a menu's is titled "Choose".
+ * Between them they are the two ways the bot asks the user something.
+ */
+const MENU_TITLE = "Choose";
+
+/** The hint under a menu of options. */
+const STRING_MENU_FOOTER = "Pick an option from the menu below.";
+
+/** The hint under a menu of channels. */
+const CHANNEL_MENU_FOOTER = "Pick a channel from the menu below.";
+
+/** The hint under a menu of roles. */
+const ROLE_MENU_FOOTER = "Pick a role from the menu below.";
+
+/**
+ * The hint under each kind of auto-populated menu.
+ *
+ * A channel menu and a role menu are the same flow with a different
+ * component, so the hint follows the component.
+ */
+const AUTO_MENU_FOOTERS: Readonly<
+  Record<ComponentType.ChannelSelect | ComponentType.RoleSelect, string>
+> = {
+  [ComponentType.ChannelSelect]: CHANNEL_MENU_FOOTER,
+  [ComponentType.RoleSelect]: ROLE_MENU_FOOTER,
+};
+
+/**
+ * The panel a menu is shown on.
+ *
+ * The question is the description, and the footer carries the hint about
+ * what to do next — which is the one thing a menu cannot say for itself.
+ */
+function menuPanel(question: string, footer: string): EmbedBuilder {
+  return panelEmbed({
+    title: MENU_TITLE,
+    description: question,
+    footer,
+  });
+}
 
 /** Discord's own limits. */
 const MAX_OPTIONS = 25;
@@ -287,7 +336,7 @@ export async function awaitSelect(
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(customId)
-    .setPlaceholder(settings.placeholder ?? "Choose an option")
+    .setPlaceholder(settings.placeholder ?? "Pick an option")
     .setMinValues(1)
     .setMaxValues(Math.min(maxValues, options.length));
 
@@ -311,11 +360,7 @@ export async function awaitSelect(
     interaction,
     settings.question
       ? {
-          embeds: [
-            new EmbedBuilder()
-              .setDescription(settings.question)
-              .setColor(EMBED_COLOR),
-          ],
+          embeds: [menuPanel(settings.question, STRING_MENU_FOOTER)],
           components: [row],
         }
       : { components: [row] },
@@ -494,9 +539,10 @@ async function collectAutoSelect(
     settings.question
       ? {
           embeds: [
-            new EmbedBuilder()
-              .setDescription(settings.question)
-              .setColor(EMBED_COLOR),
+            menuPanel(
+              settings.question,
+              AUTO_MENU_FOOTERS[menu.componentType],
+            ),
           ],
           components: menu.components,
         }

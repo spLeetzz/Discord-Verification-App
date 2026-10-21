@@ -37,12 +37,9 @@
 
 import {
   ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   EmbedBuilder,
   ModalBuilder,
   StringSelectMenuBuilder,
-  TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
 import type {
@@ -52,7 +49,13 @@ import type {
   RepliableInteraction,
 } from "discord.js";
 import { TokenStore } from "./custom-id.js";
-import { EMBED_COLOR } from "./constants.js";
+import {
+  PANEL_COLOR,
+  actionRow,
+  buildModal,
+  panelEmbed,
+  primaryButton,
+} from "./ui.js";
 import { replyError, replySuccess, respond } from "./context.js";
 import type { ReplyHandle, ReplyPayload } from "./context.js";
 import { OWNER_DENIAL_MESSAGE } from "./guards.js";
@@ -219,24 +222,31 @@ export function parseEmbedColor(input: string): number | null {
  *
  * This is the one function that turns a stored template into something
  * Discord can show (D32).
+ *
+ * A template is the user's own embed, so it is rendered as it was
+ * written: a template with no title has no title. The panel helper is
+ * for the panels the bot builds, and every panel has a title — so a
+ * template without one is built on its own.
  */
 export function embedTemplateToBuilder(template: EmbedTemplate): EmbedBuilder {
-  const embed = new EmbedBuilder();
+  const embed = template.title
+    ? panelEmbed({ title: template.title, color: template.color })
+    : new EmbedBuilder().setColor(template.color ?? PANEL_COLOR);
 
-  if (template.title) embed.setTitle(template.title);
   if (template.description) embed.setDescription(template.description);
 
-  embed.setColor(template.color ?? EMBED_COLOR);
+  // A footer may carry an icon and no text. Discord will not take a
+  // footer with empty text, so a template with an icon and no words
+  // gets no footer at all.
+  if (template.footerText) {
+    embed.setFooter({
+      text: template.footerText,
+      ...(template.footerIconUrl ? { iconURL: template.footerIconUrl } : {}),
+    });
+  }
 
   if (template.thumbnailUrl) embed.setThumbnail(template.thumbnailUrl);
   if (template.imageUrl) embed.setImage(template.imageUrl);
-
-  if (template.footerText || template.footerIconUrl) {
-    embed.setFooter({
-      text: template.footerText ?? "",
-      iconURL: template.footerIconUrl,
-    });
-  }
 
   return embed;
 }
@@ -422,37 +432,32 @@ export function buildEmbedDesignerOptions(
 ): StringSelectMenuBuilder {
   return new StringSelectMenuBuilder()
     .setCustomId(embedDesignerSelectCustomId(token, prefix))
-    .setPlaceholder("Select an option to design the message.")
+    .setPlaceholder("Pick what to edit")
     .addOptions(
       {
-        label: "Edit Message (Title, Description, Footer)",
+        label: "Edit message",
         value: EMBED_EDIT_TARGETS.main,
-        description: "Edit your embed title, description, and footer.",
-        emoji: "📝",
+        description: "The title, the description and the footer.",
       },
       {
-        label: "Edit Thumbnail Image",
+        label: "Edit thumbnail",
         value: EMBED_EDIT_TARGETS.thumbnail,
-        description: "Small image on the right side of the embed.",
-        emoji: "🖼️",
+        description: "The small image on the right of the embed.",
       },
       {
-        label: "Edit Main Image",
+        label: "Edit main image",
         value: EMBED_EDIT_TARGETS.image,
-        description: "Edit the embed's big image.",
-        emoji: "🖼️",
+        description: "The big image under the embed.",
       },
       {
-        label: "Edit Footer Icon",
+        label: "Edit footer icon",
         value: EMBED_EDIT_TARGETS.footerIcon,
-        description: "Small icon next to the footer message.",
-        emoji: "🖌️",
+        description: "The small icon next to the footer.",
       },
       {
-        label: "Edit Embed Color",
+        label: "Set color",
         value: EMBED_EDIT_TARGETS.color,
-        description: "Change the colour of the embed.",
-        emoji: "🎨",
+        description: "Change the color of the embed.",
       },
     );
 }
@@ -471,95 +476,93 @@ export function buildEmbedDesignerModal(
   token: string,
   prefix = EMBED_DESIGNER_PREFIX,
 ): ModalBuilder {
-  const modal = new ModalBuilder()
-    .setCustomId(embedDesignerModalCustomId(target, token, prefix))
-    .setTitle(EMBED_EDIT_TARGET_TITLES[target]);
+  const customId = embedDesignerModalCustomId(target, token, prefix);
 
   if (target === EMBED_EDIT_TARGETS.main) {
-    modal.addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("title")
-          .setLabel("Title")
-          .setPlaceholder("Enter text for the title of the embed here...")
-          .setMaxLength(256)
-          .setRequired(false)
-          .setStyle(TextInputStyle.Short)
-          .setValue(template.title ?? ""),
-      ),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("description")
-          .setLabel("Description")
-          .setPlaceholder("Enter text for the description of the embed here...")
-          .setMaxLength(4000)
-          .setRequired(false)
-          .setStyle(TextInputStyle.Paragraph)
-          .setValue(template.description ?? ""),
-      ),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("footer")
-          .setLabel("Footer Text")
-          .setPlaceholder("Enter text for the footer of the embed here...")
-          .setMaxLength(2048)
-          .setRequired(false)
-          .setStyle(TextInputStyle.Paragraph)
-          .setValue(template.footerText ?? ""),
-      ),
-    );
-
-    return modal;
+    return buildModal({
+      customId,
+      title: EMBED_EDIT_TARGET_TITLES[target],
+      inputs: [
+        {
+          id: "title",
+          label: "Title",
+          placeholder: "e.g. Match schedule",
+          value: template.title ?? "",
+          required: false,
+          maxLength: 256,
+          style: TextInputStyle.Short,
+        },
+        {
+          id: "description",
+          label: "Description",
+          placeholder: "e.g. The times of every match in the bracket",
+          value: template.description ?? "",
+          required: false,
+          maxLength: 4000,
+          style: TextInputStyle.Paragraph,
+        },
+        {
+          id: "footer",
+          label: "Footer",
+          placeholder: "e.g. Updated every hour",
+          value: template.footerText ?? "",
+          required: false,
+          maxLength: 2048,
+          style: TextInputStyle.Paragraph,
+        },
+      ],
+    });
   }
 
   if (target === EMBED_EDIT_TARGETS.color) {
-    modal.addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("color")
-          .setLabel("Enter a valid colour")
-          .setPlaceholder("Examples: red, #00ffb3, 0,255,179")
-          .setMaxLength(32)
-          .setRequired(false)
-          .setStyle(TextInputStyle.Short)
-          .setValue(
+    return buildModal({
+      customId,
+      title: EMBED_EDIT_TARGET_TITLES[target],
+      inputs: [
+        {
+          id: "color",
+          label: "Color",
+          placeholder: "e.g. red, #00ffb3 or 0,255,179",
+          value:
             template.color === undefined
               ? ""
               : `#${template.color.toString(16).padStart(6, "0")}`,
-          ),
-      ),
-    );
-
-    return modal;
+          required: false,
+          maxLength: 32,
+          style: TextInputStyle.Short,
+        },
+      ],
+    });
   }
 
   const urlKey = EMBED_EDIT_TARGET_URLS[target];
 
-  modal.addComponents(
-    new ActionRowBuilder<TextInputBuilder>().addComponents(
-      new TextInputBuilder()
-        .setCustomId("url")
-        .setLabel("Enter Image URL (optional)")
-        .setPlaceholder("Leave empty to remove it.")
-        .setMaxLength(1024)
-        .setRequired(false)
-        .setStyle(TextInputStyle.Short)
-        .setValue(template[urlKey] ?? ""),
-    ),
-  );
-
-  return modal;
+  return buildModal({
+    customId,
+    title: EMBED_EDIT_TARGET_TITLES[target],
+    inputs: [
+      {
+        id: "url",
+        label: "Image URL",
+        placeholder: "e.g. https://example.com/image.png — leave empty to remove",
+        value: template[urlKey] ?? "",
+        required: false,
+        maxLength: 1024,
+        style: TextInputStyle.Short,
+      },
+    ],
+  });
 }
 
 /** The title of the modal for each edit target. */
 const EMBED_EDIT_TARGET_TITLES: Readonly<
   Record<(typeof EMBED_EDIT_TARGETS)[keyof typeof EMBED_EDIT_TARGETS], string>
 > = {
-  main: "Set Embed Message",
-  thumb: "Edit Thumbnail Image",
-  image: "Edit Main Image",
-  footer_icon: "Edit Footer Icon",
-  color: "Set Embed Color",
+  main: "Edit message",
+  thumb: "Edit thumbnail",
+  image: "Edit main image",
+  footer_icon: "Edit footer icon",
+  color: "Set color",
 };
 
 /** The template field each image target writes to. */
@@ -851,11 +854,12 @@ export class EmbedDesigner {
       ),
       ...(draft?.onSave
         ? [
-            new ActionRowBuilder<ButtonBuilder>().addComponents(
-              new ButtonBuilder()
-                .setCustomId(embedDesignerSaveCustomId(token, this.prefix))
-                .setLabel("Save")
-                .setStyle(ButtonStyle.Primary),
+            // The one main action of the panel, alone on its row.
+            actionRow(
+              primaryButton({
+                customId: embedDesignerSaveCustomId(token, this.prefix),
+                label: "Save",
+              }),
             ),
           ]
         : []),

@@ -10,12 +10,38 @@
 
 import { describe, expect, it } from "vitest";
 import { ChannelType, ComponentType } from "discord.js";
+import type { EmbedBuilder } from "discord.js";
 import { prompt } from "./prompt.js";
 import { awaitChannelSelect, awaitRoleSelect, awaitSelect } from "./select.js";
 import { fakeInteraction, sentComponent } from "./interaction.fake.js";
 
 /** One choice. */
 const ALPHA = { label: "Alpha", value: "alpha" };
+
+/**
+ * The placeholder of the menu a payload carries.
+ */
+function payloadPlaceholder(payload: unknown): string | undefined {
+  const rows =
+    (
+      payload as {
+        components?: readonly {
+          toJSON: () => { components?: readonly { placeholder?: string }[] };
+        }[];
+      }
+    ).components ?? [];
+
+  return rows[0]?.toJSON().components?.[0]?.placeholder;
+}
+
+/**
+ * The embed a payload carries.
+ */
+function payloadEmbed(payload: unknown): ReturnType<EmbedBuilder["toJSON"]> {
+  const embeds = (payload as { embeds?: readonly EmbedBuilder[] }).embeds ?? [];
+
+  return embeds[0]?.toJSON() ?? {};
+}
 
 describe("awaitSelect", () => {
   it("collects on the interaction's own reply", async () => {
@@ -504,5 +530,68 @@ describe("awaitRoleSelect", () => {
 
     expect(roles).toEqual(["role-1"]);
     expect(sent[0]?.handle.clicks[0]?.accepted).toBe(true);
+  });
+});
+
+describe("the menu's wording", () => {
+  it("says what a menu of options is for", async () => {
+    // The placeholder is the only thing on the menu itself, so it says
+    // what the user is picking — and it says it the same way every
+    // menu in the bot does.
+    const { interaction, sent } = fakeInteraction({
+      selectValues: ["alpha"],
+    });
+
+    await awaitSelect(interaction, [ALPHA]);
+
+    expect(payloadPlaceholder(sent[0]?.payload)).toBe("Pick an option");
+  });
+
+  it("says what a channel menu is for", async () => {
+    const { interaction, sent } = fakeInteraction({
+      selectValues: ["channel-1"],
+    });
+
+    await awaitChannelSelect(interaction);
+
+    expect(payloadPlaceholder(sent[0]?.payload)).toBe("Pick a channel");
+  });
+
+  it("says what a role menu is for", async () => {
+    const { interaction, sent } = fakeInteraction({
+      selectValues: ["role-1"],
+    });
+
+    await awaitRoleSelect(interaction);
+
+    expect(payloadPlaceholder(sent[0]?.payload)).toBe("Pick a role");
+  });
+
+  it("keeps the placeholder the caller asked for", async () => {
+    const { interaction, sent } = fakeInteraction({
+      selectValues: ["alpha"],
+    });
+
+    await awaitSelect(interaction, [ALPHA], {
+      placeholder: "Pick a channel",
+    });
+
+    expect(payloadPlaceholder(sent[0]?.payload)).toBe("Pick a channel");
+  });
+
+  it("asks the question under a short title, with the hint in the footer", async () => {
+    const { interaction, sent } = fakeInteraction({
+      selectValues: ["channel-1"],
+    });
+
+    await awaitChannelSelect(interaction, {
+      question: "Which channel should the slotlist go in?",
+    });
+
+    const embed = payloadEmbed(sent[0]?.payload);
+
+    expect(embed.title).toBe("Choose");
+    expect(embed.description).toBe("Which channel should the slotlist go in?");
+    expect(embed.footer?.text).toBe("Pick a channel from the menu below.");
   });
 });
