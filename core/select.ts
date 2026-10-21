@@ -372,7 +372,23 @@ export async function awaitSelect(
   );
 
   try {
-    const answer = await handle.awaitMessageComponent({
+    // **The collector is anchored on the client, not on the message.**
+    //
+    // An ephemeral reply is a real message, but discord.js models it
+    // with the *interaction's* id — the API does not hand back an
+    // ephemeral message's own snowflake. So a collector built on that
+    // message waits for a message id the pick will never carry, and
+    // the pick is never collected: the menu is sent, the user chooses,
+    // and the choice goes unanswered — which Discord shows as "the bot
+    // didn't respond in time".
+    //
+    // A client-level collector has no message to be wrong about. The
+    // filter narrows it to this menu's own id and this user.
+    const channel = interaction.channel;
+
+    if (!channel) return [];
+
+    const collector = channel.createMessageComponentCollector({
       componentType: ComponentType.StringSelect,
       time: timeoutMs,
       // The owner check. A choice from somebody else is not an answer:
@@ -383,11 +399,17 @@ export async function awaitSelect(
         candidate.customId === customId,
     });
 
-    const values = answer.isStringSelectMenu() ? answer.values : [];
+    try {
+      const answer = await collector.next;
 
-    await answer.update({ components: [] });
+      const values = answer.isStringSelectMenu() ? answer.values : [];
 
-    return values;
+      await answer.update({ components: [] });
+
+      return values;
+    } finally {
+      collector.stop("done");
+    }
   } catch {
     // Timed out. Nobody chose anything.
     try {
@@ -555,7 +577,24 @@ async function collectAutoSelect(
   );
 
   try {
-    const answer = await handle.awaitMessageComponent({
+    // **The collector is anchored on the client, not on the message.**
+    //
+    // An ephemeral reply is a real message, but discord.js models it
+    // with the *interaction's* id — the API does not hand back an
+    // ephemeral message's own snowflake. So a collector built on that
+    // message waits for a message id that the pick will never carry,
+    // and the pick is never collected: the menu is sent, the user
+    // chooses, and the choice goes unanswered — which Discord shows as
+    // "the bot didn't respond in time".
+    //
+    // A client-level collector has no message to be wrong about. The
+    // filter narrows it to this menu's own id and this user, which is
+    // what actually identifies the answer.
+    const channel = interaction.channel;
+
+    if (!channel) return [];
+
+    const collector = channel.createMessageComponentCollector({
       componentType: menu.componentType,
       time: timeoutMs,
       filter: async (candidate) => {
@@ -592,11 +631,17 @@ async function collectAutoSelect(
       },
     });
 
-    const values = menu.readValues(answer);
+    try {
+      const answer = await collector.next;
 
-    await answer.update({ components: [] });
+      const values = menu.readValues(answer);
 
-    return values;
+      await answer.update({ components: [] });
+
+      return values;
+    } finally {
+      collector.stop("done");
+    }
   } catch {
     // Timed out. Nobody chose anything.
     try {

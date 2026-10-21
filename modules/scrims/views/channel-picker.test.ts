@@ -164,6 +164,11 @@ function buttonInteraction(options: {
     user: { id: ownerId },
     guildId: GUILD_ID,
     client: fake.interaction.client,
+    // The pickers collect on the channel, not on the message: a menu
+    // sent as an ephemeral reply is modelled with the interaction's id,
+    // so a message-anchored collector waits for a message the pick will
+    // never carry.
+    channel: fake.interaction.channel,
     customId: options.customId,
     isButton: () => true,
     isAnySelectMenu: () => false,

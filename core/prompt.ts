@@ -178,22 +178,46 @@ export async function prompt(
 
   let answer: MessageComponentInteraction;
 
+  // **The collector is anchored on the client, not on the message.**
+  //
+  // A prompt is usually ephemeral, and discord.js models an ephemeral
+  // reply with the *interaction's* id rather than the message's own
+  // snowflake. A collector built on that message therefore waits for a
+  // message id the click will never carry, so the click is never
+  // collected: the prompt is sent, the user answers, and the answer
+  // goes unanswered — which Discord shows as "the bot didn't respond in
+  // time".
+  //
+  // A client-level collector has no message to be wrong about. The
+  // filter narrows it to this prompt's own ids and this user.
+  const channel = interaction.channel;
+
+  if (!channel) {
+    await finishWithTimeout(handle, clearButtons);
+
+    return false;
+  }
+
+  const collector = channel.createMessageComponentCollector({
+    componentType: ComponentType.Button,
+    time: timeoutMs,
+    // The owner check. A click from somebody else is not an answer:
+    // the collector keeps waiting, and the buttons stay live for the
+    // caller.
+    filter: (candidate) =>
+      (allowOthers || candidate.user.id === ownerId) &&
+      (candidate.customId === confirmId || candidate.customId === cancelId),
+  });
+
   try {
-    answer = await handle.awaitMessageComponent({
-      componentType: ComponentType.Button,
-      time: timeoutMs,
-      // The owner check. A click from somebody else is not an answer:
-      // the collector keeps waiting, and the buttons stay live for the
-      // caller.
-      filter: (candidate) =>
-        (allowOthers || candidate.user.id === ownerId) &&
-        (candidate.customId === confirmId || candidate.customId === cancelId),
-    });
+    answer = await collector.next;
   } catch {
     // The prompt timed out. Nobody answered, so the answer is "no".
     await finishWithTimeout(handle, clearButtons);
 
     return false;
+  } finally {
+    collector.stop("done");
   }
 
   const confirmed = answer.customId === confirmId;

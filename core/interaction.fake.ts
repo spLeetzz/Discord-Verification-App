@@ -371,6 +371,32 @@ export function fakeInteraction(
     user: { id: ownerId },
     guildId,
     client,
+    /**
+     * The channel-level component collector.
+     *
+     * The real one is anchored on the *channel* rather than on a
+     * message, so a menu sent as an ephemeral reply — which discord.js
+     * models with the interaction's id rather than the message's own
+     * snowflake — still collects the answer. The fake delegates to the
+     * handle that carried the menu, which is the same thing.
+     */
+    channel: {
+      createMessageComponentCollector: vi.fn(
+        (options: CollectorOptions) => ({
+          // `next` is a getter in discord.js, so the fake matches it.
+          get next() {
+            const handle = sent[sent.length - 1]?.handle;
+
+            if (!handle) {
+              throw new Error("No component was sent to collect from");
+            }
+
+            return handle.awaitMessageComponent(options as never);
+          },
+          stop: vi.fn(),
+        }),
+      ),
+    },
     reply,
     editReply,
     followUp,
