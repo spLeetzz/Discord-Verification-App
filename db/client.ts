@@ -55,11 +55,20 @@ import {
  * parallel and SQLite serialises its writers, so two workers on one file
  * would lock each other out — and a test failure would then be a lock
  * error rather than the thing the test was about.
+ *
+ * **The process id is part of the name.** The worker id is not unique
+ * across *runs*: two runs of the suite at the same time would share
+ * worker 1, share the file, and share the rows in it — so a test would
+ * see rows it did not write, and two runs would lock each other out.
+ * The process id is unique for the life of the process, so the file is
+ * unique for the life of the run.
  */
 function defaultDatabaseFile(): string {
   const worker = process.env.VITEST_WORKER_ID ?? process.env.VITEST_POOL_ID;
 
-  return worker ? `data/test-${worker}.db` : "data/quotient.db";
+  return worker
+    ? `data/test-${worker}-${process.pid}.db`
+    : "data/quotient.db";
 }
 
 /**
@@ -113,38 +122,27 @@ if (databasePath !== null) {
 }
 
 /**
- * How long a contended write waits for the writer lock.
- *
- * SQLite has one writer. Two writes at the same instant — a slot claim and
- * a command-usage row, say — would otherwise fail immediately with
- * `SQLITE_BUSY` instead of waiting their turn. Five seconds is far longer
- * than any of our transactions takes, so a timeout here means something is
- * genuinely stuck rather than merely queued.
- *
- * **The busy timeout is not the queue.** It makes a contended *statement*
- * wait; it does nothing for a statement that collides with an *open
- * transaction* on another connection, because that transaction holds the
- * write lock for its whole body. The queue in `db/write-queue.ts` is what
- * covers that case, and the timeout is what covers the case of another
- * process — a deploy's migration, say — writing the same file.
- */
-const BUSY_TIMEOUT_MS = 5_000;
-
-/**
  * The libsql client.
  *
  * A local file, opened through the native libsql binding. There is no
  * server, no connection string and no pool: SQLite serialises its own
  * writes, and one bot process is one writer.
  *
- * **The busy timeout is set on the client, not only by a pragma.** The
- * pragma below reaches one connection of the pool; the `timeout` option
- * is applied by the driver to *every* connection it opens, which is the
- * only way the setting reaches the connection a transaction is given.
+ * **There is no busy timeout.** The driver can be told to wait five
+ * seconds for the writer lock, and that was the wrong answer: the
+ * timeout is applied to *every* connection the driver opens, so it
+ * covers the connection a transaction is given — the one that already
+ * holds the write lock. Two transactions that overlap in one process
+ * then stall for the whole five seconds and one of them fails with
+ * `SQLITE_BUSY` anyway. A fast failure is the better answer, and the
+ * queue in `db/write-queue.ts` is what makes it a rare one: one writer
+ * at a time, in this process, by construction.
+ *
+ * Nothing else writes this file: the bot applies its own migrations at
+ * boot, and the deploy pipeline has no migration step, so there is no
+ * second process to wait for.
  */
-const client = createClient({ url: databaseUrl, timeout: BUSY_TIMEOUT_MS });
-
-await client.execute(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+const client = createClient({ url: databaseUrl });
 
 /**
  * The queue of writes.
@@ -218,13 +216,31 @@ const beginTransaction = raw.transaction as (
  * through the async call chain, so a write issued anywhere inside the
  * body finds the transaction it belongs to.
  *
+ * **The body is run in the transaction's scope.** The scope is what
+ * the context holds while the transaction is open; `run` puts it in
+ * place for the body's own chain, and takes it out again when the body
+ * ends.
+ *
+ * **The caller's chain is not in the transaction.** The queued client
+ * enters the scope in the chain that opened the transaction, so that
+ * the chain can find the transaction it opened. This chain is not that
+ * chain: the caller may go on to do other work while the body runs, and
+ * that work has to *wait* for the transaction rather than join it. So
+ * the scope is taken out of this chain — here, before the body starts.
+ *
  * The signature is drizzle's, unchanged.
  */
 async function transactionInContext<T>(
   body: (tx: DrizzleTransaction) => Promise<T>,
   config?: SQLiteTransactionConfig,
 ): Promise<T> {
-  const result = await beginTransaction.call(
+  // The transaction that is open in *this* chain, if there is one. A
+  // transaction opened while another is open is a savepoint on the
+  // parent's connection: it does not take the queue, and it does not
+  // enter a scope of its own.
+  const open = transactionContext.getStore()?.transaction;
+
+  const started = beginTransaction.call(
     raw,
     async (tx) => {
       const handle = tx as Transaction;
@@ -233,12 +249,22 @@ async function transactionInContext<T>(
         handle.execute = execute;
       }
 
-      return transactionContext.run(queuedClient.activeTransaction, () =>
+      return transactionContext.run(queuedClient.activeScope, () =>
         body(handle),
       );
     },
     config,
   );
+
+  // The transaction has been opened, and its scope is in this chain.
+  // This chain is not inside the transaction: a write the caller makes
+  // in parallel with the body has to wait for it, not join it.
+  //
+  // A transaction opened inside another one does not enter a scope of
+  // its own, so there is nothing to take out of this chain.
+  if (!open) transactionContext.enterWith(undefined);
+
+  const result = await started;
 
   return result as T;
 }

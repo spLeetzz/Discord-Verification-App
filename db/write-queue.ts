@@ -29,6 +29,13 @@
  * its whole body, so it holds the queue for its whole body too.
  * Everything inside it runs on its own connection, without going back
  * through the queue — otherwise the transaction would wait for itself.
+ *
+ * **The transaction context.** A write issued inside a transaction
+ * belongs to that transaction, so it must not go back into the queue:
+ * the transaction is holding the queue, and a write that waited for it
+ * would be waiting for itself. The context is what tells a write which
+ * transaction it belongs to. It is entered when the transaction opens
+ * and emptied when the transaction finishes.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -185,6 +192,23 @@ export function statementText(statement: InStatement): string {
  * ------------------------------------------------------------------ */
 
 /**
+ * The transaction of the chain that is driving a transaction body.
+ *
+ * **A box, not the transaction itself.** The context has to be entered
+ * *before* the transaction exists — the driver opens it asynchronously,
+ * so there is nothing to enter at the moment the caller asks for a
+ * transaction — and it has to be emptied *after* the transaction has
+ * finished, by which time the caller's chain has moved on and the store
+ * can no longer be unwound. A box can be both: it is entered
+ * synchronously, filled in when the transaction opens, and emptied when
+ * it finishes.
+ */
+export interface TransactionScope {
+  /** The open transaction, or `undefined` once it has finished. */
+  transaction: Transaction | undefined;
+}
+
+/**
  * The transaction the current call is inside, if it is inside one.
  *
  * **This is what makes the queue re-entrant.** A transaction's body
@@ -198,9 +222,17 @@ export function statementText(statement: InStatement): string {
  * transaction and the rest of the bot are running at the same time: a
  * write from *outside* the body must not be dragged into the
  * transaction.
+ *
+ * **What is in the store is a scope, not a transaction.** The store
+ * holds a box that is filled in when a transaction opens and emptied
+ * when it finishes. `AsyncLocalStorage` propagates a store to the
+ * async resources created *after* it is set, and it cannot unwind a
+ * store out of a frame that has already moved on — so the box, rather
+ * than the store, is what records whether the transaction is still
+ * open.
  */
 export const transactionContext = new AsyncLocalStorage<
-  Transaction | undefined
+  TransactionScope | undefined
 >();
 
 /* ------------------------------------------------------------------ *
@@ -220,12 +252,12 @@ export class QueuedClient implements Client {
   readonly #queue: WriteQueue;
 
   /**
-   * The transaction that holds the queue, if there is one.
+   * The scope of the transaction that holds the queue, if there is one.
    *
    * There is never more than one: a transaction holds the queue from
    * the moment it is opened until it is committed or rolled back.
    */
-  #active: Transaction | undefined;
+  #activeScope: TransactionScope | undefined;
 
   constructor(inner: Client, queue: WriteQueue) {
     this.#inner = inner;
@@ -234,7 +266,20 @@ export class QueuedClient implements Client {
 
   /** The open transaction, if there is one. */
   get activeTransaction(): Transaction | undefined {
-    return this.#active;
+    return this.#activeScope?.transaction;
+  }
+
+  /**
+   * The scope of the open transaction, if there is one.
+   *
+   * The scope is what the transaction context holds while the
+   * transaction is open. Whoever drives a transaction's body runs it
+   * inside this scope, so that a write issued through the client
+   * during the body belongs to the transaction rather than to the
+   * queue the transaction is holding.
+   */
+  get activeScope(): TransactionScope | undefined {
+    return this.#activeScope;
   }
 
   async execute(stmt: InStatement): Promise<ResultSet>;
@@ -249,7 +294,7 @@ export class QueuedClient implements Client {
     // A transaction that has already been committed is not a transaction
     // any more: a statement that outlived the body it was started in
     // is an ordinary write, and it is queued like one.
-    const open = transactionContext.getStore();
+    const open = transactionContext.getStore()?.transaction;
 
     if (open && !open.closed) return open.execute(statement);
 
@@ -265,7 +310,7 @@ export class QueuedClient implements Client {
     stmts: Array<InStatement | [string, InArgs?]>,
     mode?: TransactionMode,
   ): Promise<ResultSet[]> {
-    const open = transactionContext.getStore();
+    const open = transactionContext.getStore()?.transaction;
 
     if (open && !open.closed) {
       return open.batch(stmts.map((statement) => toStatement(statement)));
@@ -286,12 +331,37 @@ export class QueuedClient implements Client {
   }
 
   async transaction(mode?: TransactionMode): Promise<Transaction> {
-    const open = transactionContext.getStore();
+    const open = transactionContext.getStore()?.transaction;
 
     // A transaction inside a transaction. It cannot take the queue —
     // the queue is held by the transaction it is nested in — so it
     // becomes a savepoint on the same connection.
+    //
+    // **It does not enter a scope of its own.** The scope in the
+    // context is the parent's, and a second one would shadow it: the
+    // parent would finish, empty the wrong scope, and the writes of
+    // the nested block would go back into the queue — into a queue the
+    // parent is holding. The savepoint runs on the parent's
+    // connection, so the nested block's writes belong to the parent
+    // anyway.
     if (open && !open.closed) return SavepointTransaction.open(open);
+
+    // The scope of this transaction, entered *synchronously*.
+    //
+    // The chain that opened the transaction has to be able to find it:
+    // a write issued through the client while the transaction is open
+    // belongs to the transaction, and a write that went back into the
+    // queue would wait for a lock the transaction itself is holding.
+    //
+    // Entering the scope here, before the first `await`, is what makes
+    // that work. `AsyncLocalStorage` gives a store to the async
+    // resources created *after* it is set, so a scope entered from an
+    // asynchronous continuation — which is where `await
+    // this.#inner.transaction()` would put it — would never reach the
+    // chain that opened the transaction.
+    const scope: TransactionScope = { transaction: undefined };
+
+    transactionContext.enterWith(scope);
 
     const release = await this.#queue.acquire();
 
@@ -300,15 +370,28 @@ export class QueuedClient implements Client {
     try {
       inner = await this.#inner.transaction(mode);
     } catch (error) {
+      // Nothing was opened, so there is nothing to empty — but the
+      // scope is in the caller's chain, and it must not look like an
+      // open transaction.
+      scope.transaction = undefined;
       release();
       throw error;
     }
 
     const queued = new QueuedTransaction(inner, release, () => {
-      this.#active = undefined;
+      this.#activeScope = undefined;
+
+      // **The exit.** The transaction is finished, so the scope is
+      // emptied: a write issued later in this chain is an ordinary
+      // write and is queued like one. The store itself cannot be
+      // unwound from here — the caller's chain is an outer frame, and
+      // `AsyncLocalStorage` only unwinds the frame it is called in —
+      // so the box is emptied instead of the store being restored.
+      scope.transaction = undefined;
     });
 
-    this.#active = queued;
+    scope.transaction = queued;
+    this.#activeScope = scope;
 
     return queued;
   }
@@ -359,6 +442,12 @@ function toStatement(statement: InStatement | [string, InArgs?]): InStatement {
  * The queue slot is taken when the transaction is opened and given back
  * when it is committed or rolled back — a transaction holds the write
  * lock for its whole body, so it holds the queue for its whole body too.
+ *
+ * **Finishing is the exit.** `#finish()` runs exactly once, whichever
+ * of the three ways out of a transaction happens first — a commit, a
+ * rollback or a `close()` — and it is what empties the transaction's
+ * scope, so that a write issued later in the chain that opened the
+ * transaction is an ordinary write and is queued like one.
  */
 class QueuedTransaction implements Transaction {
   readonly #inner: Transaction;
@@ -413,6 +502,13 @@ class QueuedTransaction implements Transaction {
     return this.#inner.closed;
   }
 
+  /**
+   * The one place a transaction ends.
+   *
+   * It runs once, whatever ended the transaction: a commit, a rollback
+   * or a `close()`. It empties the scope — the exit — and gives the
+   * queue slot back.
+   */
   #finish(): void {
     if (this.#finished) return;
 
@@ -429,6 +525,10 @@ class QueuedTransaction implements Transaction {
  * the same connection, and a rollback undoes only what the nested block
  * wrote. The parent keeps the queue, which is the whole point — the
  * nested transaction must not wait for a slot the parent is holding.
+ *
+ * **It has no scope of its own.** The context still holds the parent's
+ * scope, and the savepoint runs on the parent's connection, so the
+ * nested block's writes belong to the parent either way.
  */
 class SavepointTransaction implements Transaction {
   readonly #parent: Transaction;

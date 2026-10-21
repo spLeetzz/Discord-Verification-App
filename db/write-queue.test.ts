@@ -21,6 +21,8 @@
  */
 
 import { afterAll, describe, expect, it } from "vitest";
+import { createClient } from "@libsql/client";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,10 +31,24 @@ import { eq, inArray, sql } from "drizzle-orm";
 /** The database this run uses. Dropped when the run ends. */
 const directory = mkdtempSync(join(tmpdir(), "quotient-queue-test-"));
 
-process.env.DB_FILE = join(directory, "queue-test.db");
+/** The file the database lives in. */
+const databaseFile = join(directory, "queue-test.db");
+
+process.env.DB_FILE = databaseFile;
 
 const { closeDatabase, db, withTransaction } = await import("./client.js");
 const { tags } = await import("./schema.js");
+const { QueuedClient, WriteQueue, transactionContext } = await import(
+  "./write-queue.js"
+);
+
+/**
+ * The instance type of the queued client.
+ *
+ * The class arrives through a dynamic import, so the binding is a value
+ * and cannot be used as a type on its own.
+ */
+type QueuedClientInstance = InstanceType<typeof QueuedClient>;
 
 /**
  * A guild id no real row can have, unique to this test run.
@@ -344,7 +360,174 @@ describe("db/write-queue", () => {
     await transaction;
     await read;
   });
+
+  it("holds the transaction in the context while the body runs, and not after", async () => {
+    const guild = guildId("context");
+
+    usedGuilds.push(guild);
+
+    let held: unknown;
+
+    await withTransaction(async (tx) => {
+      await tx.insert(tags).values({
+        guildId: guild,
+        name: "inside",
+        content: "written inside the transaction",
+        ownerId: "1",
+      });
+
+      // The body runs inside the transaction's scope, so a write it
+      // makes through the database handle finds the transaction it
+      // belongs to.
+      held = transactionContext.getStore()?.transaction;
+    });
+
+    expect(held).toBeDefined();
+
+    // The caller's chain is not inside the transaction. A write the
+    // caller makes in parallel with the body has to wait for the
+    // transaction, not join it.
+    expect(transactionContext.getStore()?.transaction).toBeUndefined();
+  });
 });
+
+/**
+ * The handle path: a transaction the caller drives itself.
+ *
+ * drizzle drives the transaction for the application — `db.transaction`
+ * takes the body as a callback — but the libsql client hands out a
+ * transaction *handle*, and the body is then the caller's own code.
+ * That is the path where the context has to carry the transaction
+ * itself: there is no callback for the queue to wrap.
+ *
+ * **The client is a second connection**, so it has a second queue. The
+ * two queues do not know about each other, so these tests keep the two
+ * clients apart in time: nothing else is writing while a raw
+ * transaction is open.
+ */
+describe("db/write-queue (the handle path)", () => {
+  it("puts a write made during the transaction into the transaction", async () => {
+    const guild = guildId("raw");
+
+    usedGuilds.push(guild);
+
+    const raw = rawClient();
+
+    const transaction = await raw.transaction();
+
+    // The write goes through the *client*, not the transaction handle.
+    // It has to find the transaction it belongs to: a write that went
+    // back into the queue would wait for the slot the transaction is
+    // holding — for itself.
+    await raw.execute(insertTag(guild, "raw"));
+
+    // The context holds the open transaction.
+    expect(transactionContext.getStore()?.transaction).toBe(transaction);
+
+    await transaction.rollback();
+
+    // The write was part of the transaction, so the rollback undid it.
+    expect(await tagNames(guild)).toEqual([]);
+
+    raw.close();
+  });
+
+  it("empties the context when the transaction finishes", async () => {
+    const guild = guildId("exit");
+
+    usedGuilds.push(guild);
+
+    const raw = rawClient();
+
+    const transaction = await raw.transaction();
+
+    expect(transactionContext.getStore()?.transaction).toBe(transaction);
+
+    await transaction.rollback();
+
+    // The transaction is finished. The context must not hold it any
+    // more: a write issued now, in this chain, is an ordinary write.
+    expect(transactionContext.getStore()?.transaction).toBeUndefined();
+
+    // And it succeeds, because it is not sent to a transaction that has
+    // closed.
+    await raw.execute(insertTag(guild, "after"));
+
+    expect(await tagNames(guild)).toEqual(["after"]);
+
+    raw.close();
+  });
+
+  it("makes a transaction opened inside a transaction a savepoint", async () => {
+    const guild = guildId("nested-raw");
+
+    usedGuilds.push(guild);
+
+    const raw = rawClient();
+
+    const outer = await raw.transaction();
+
+    // A transaction opened while another is open is a savepoint on the
+    // same connection. It does not wait for a slot the parent is
+    // holding — the parent is holding it.
+    const inner = await raw.transaction();
+
+    // The context still holds the parent: the savepoint did not enter a
+    // scope of its own, so it cannot shadow the parent's.
+    expect(transactionContext.getStore()?.transaction).toBe(outer);
+
+    await raw.execute(insertTag(guild, "raw"));
+
+    await inner.rollback();
+    await outer.rollback();
+
+    // The savepoint's rollback undid the write, and so did the
+    // parent's.
+    expect(await tagNames(guild)).toEqual([]);
+
+    raw.close();
+  });
+});
+
+/**
+ * A raw client on the same database file.
+ *
+ * It is the queued client on its own: its own connection, and its own
+ * queue.
+ */
+function rawClient(): QueuedClientInstance {
+  return new QueuedClient(
+    createClient({ url: `file:${databaseFile}` }),
+    new WriteQueue(),
+  );
+}
+
+/**
+ * An insert into the tags table, written by hand.
+ *
+ * The raw client does not have drizzle's query builder, so the
+ * statement is spelled out.
+ */
+function insertTag(
+  guild: string,
+  name: string,
+): { sql: string; args: Array<string | number> } {
+  const now = Date.now();
+
+  return {
+    sql: `insert into tags (id, guild_id, name, content, owner_id, created_at, updated_at)
+          values (?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      randomUUID(),
+      guild,
+      name,
+      `written by the raw client: ${name}`,
+      "1",
+      now,
+      now,
+    ],
+  };
+}
 
 /**
  * Claims a subject that may only be claimed once.

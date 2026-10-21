@@ -62,16 +62,20 @@ database one after the other, so the loser gets the constraint's error.
 | **What is not queued** | The reads. A read must not wait behind a long write, or the whole bot stalls behind one slow transaction. |
 | **The transaction is the unit** | A transaction holds the write lock for its whole body, so it holds the queue for its whole body too. Everything inside it runs on its own connection, without going back through the queue — otherwise the transaction would wait for itself. |
 | **It is re-entrant** | A transaction's body calls repository functions that write. Those writes are part of the transaction: an `AsyncLocalStorage` carries the open transaction through the async call chain, so a write issued anywhere inside the body finds the transaction it belongs to. A write from *outside* the body is not dragged into it. |
-| **A transaction inside a transaction** | It cannot take the queue — the outer transaction is holding it — so it becomes a savepoint on the same connection. |
+| **The context is entered and exited** | The context holds a **scope**: a box that is filled in when the transaction opens and emptied when the transaction finishes. A write that finds an empty scope is an ordinary write and is queued like one, so the chain that opened the transaction is never left holding a transaction that has closed. |
+| **A transaction inside a transaction** | It cannot take the queue — the outer transaction is holding it — so it becomes a savepoint on the same connection. It does not enter a scope of its own: the scope in the context is the parent's, and a second one would shadow it. |
 
-**The busy timeout is not the queue.** `busy_timeout` makes a contended
-*statement* wait; it does nothing for a statement that collides with an
-*open transaction* on another connection, because that transaction holds
-the write lock for its whole body. The timeout is set on the client
-(`timeout: 5000`), so the driver applies it to every connection it
-opens — a `PRAGMA` would only reach the one connection that happened to
-run it. The timeout is what covers another *process* writing the same
-file; the queue is what covers this one.
+**There is no busy timeout.** The driver can be told to wait for the
+writer lock, and it was the wrong answer. The timeout is applied to
+*every* connection the driver opens, so it covers the connection a
+transaction is given — the one that already holds the write lock. Two
+transactions that overlap in one process then stall for the whole
+timeout, and one of them fails with `SQLITE_BUSY` anyway: a slow
+failure instead of a fast one. One writer at a time is what SQLite
+needs, and the queue is what makes that true by construction. Nothing
+else writes the file — the bot applies its own migrations at boot, and
+the deploy pipeline has no migration step — so there is no second
+process to wait for either.
 
 ---
 
@@ -405,8 +409,8 @@ owners of one slot. The database enforces the invariant instead.
 
 ```sql
 UPDATE slots
-   SET state = 'claimed', team_name = $3, owner_user_id = $4
- WHERE scrim_id = $1 AND num = $2 AND state = 'free'
+   SET state = 'claimed', team_name = ?, owner_user_id = ?
+ WHERE scrim_id = ? AND num = ? AND state = 'free'
  RETURNING id;
 ```
 
@@ -417,14 +421,14 @@ The cancel, which only the owner can do:
 
 ```sql
 UPDATE slots
-   SET state = 'free', team_name = null, owner_user_id = null
- WHERE id = $1 AND owner_user_id = $2;
+   SET state = 'free', team_name = NULL, owner_user_id = NULL
+ WHERE id = ? AND owner_user_id = ?;
 ```
 
 How many are free — a count, not a read-modify-write:
 
 ```sql
-SELECT count(*) FROM slots WHERE scrim_id = $1 AND state = 'free';
+SELECT count(*) FROM slots WHERE scrim_id = ? AND state = 'free';
 ```
 
 In drizzle:
