@@ -23,6 +23,7 @@ live in `modules/scrims/commands/`.
 | `/scrims create` | Creates a scrim: registration channel, slotlist channel, success role, required mentions, total slots, open time, autoclean time. |
 | `/scrims reserve` | Reserves a slot in a scrim. **Has the mod guard** — the source had none. |
 | `/scrims unban` | Lifts a user's bans from the scrims of this server. |
+| `/scrims banlog` | Shows the channel ban entries are written to, or sets it when a channel is given. |
 | `/scrims slotinfo` | Shows the slots a user holds. |
 | `/scrims slotlist` | Posts a scrim's slotlist into the current channel. |
 
@@ -178,27 +179,66 @@ A registration message is checked against an **ordered list of guards**.
 Each guard returns a deny reason or `null`; the first reason wins.
 
 Quotient's `check_scrim_requirements` is two independent `if`s followed
-by an `elif` chain hanging off the second one. Both facts are reproduced
-exactly.
+by an `elif` chain hanging off the second one. The port is a flat list of
+the same eight checks, in the same order.
 
-| # | Guard | Reason | Notes |
+| # | Guard | Reason | When it runs |
 |---|---|---|---|
-| 1 | Team name required | `no_team_name` | **Independent.** The source searched for `team.*` anywhere in the message, so "steam" satisfies it. Preserved. |
-| 2 | Bot mentions rejected | `mentioned bots` | **Independent.** Only when the scrim asks for at least one mention. |
-| 3 | Mention count | `insufficient mentions` | **Chain.** |
-| 4 | Banned user | `banned` | **Chain.** |
-| 5 | Required lines | `no_lines` | **Chain.** |
-| 6 | One registration per person | `multiregister` | **Chain.** |
-| 7 | Duplicate team name | `duplicate_name` | **Chain.** The name compared is the one `core/team-name.ts` derives. |
-| 8 | Duplicate / fake tags | `fake_tag` | **Chain.** The overlap of the mentioned ids with `slots.members`. |
+| 1 | Team name required | `no_team_name` | **Always.** The source searched for `team.*` anywhere in the message, so "steam" satisfies it. Preserved. |
+| 2 | Bot mentions rejected | `mentioned bots` | Only when the scrim asks for at least one mention. |
+| 3 | Mention count | `insufficient mentions` | Only when the scrim asks for at least one mention. |
+| 4 | Banned user | `banned` | **Always.** |
+| 5 | Required lines | `no_lines` | **Always.** |
+| 6 | One registration per person | `multiregister` | **Always.** |
+| 7 | Duplicate team name | `duplicate_name` | **Always.** The name compared is the one `core/team-name.ts` derives. |
+| 8 | Duplicate / fake tags | `fake_tag` | **Always.** The overlap of the mentioned ids with `slots.members`. |
 
-**The chain only runs when guard 2's condition is false.** Guard 2's
-condition is `required_mentions > 0 AND no mentioned user is a bot`, so
-a scrim that asks for **no** mentions skips guards 3–8 entirely: the
-banned-user check, the line check, the one-registration check, the
-duplicate-name check and the fake-tag check all stop firing. That is a
-source quirk, and it is preserved rather than "fixed", because a guild
-that sets `required_mentions` to `0` gets exactly that behaviour there.
+**Only the two mention checks depend on `required_mentions`.** Every
+other check runs whatever the scrim asks for.
+
+### The `elif` chain, and the bypass it hid
+
+The source's second `if` was
+`scrim.required_mentions and not all(mentions are humans)`, and the
+whole `elif` chain hung off it:
+
+```python
+if scrim.required_mentions and not all(...bot...):
+    ...                      # the bot-mention refusal
+elif not len(message.mentions) >= scrim.required_mentions:
+    ...                      # too few mentions
+elif message.author.id in await scrim.banned_user_ids():
+    ...                      # banned
+elif len(message.content.splitlines()) < scrim.required_lines:
+    ...                      # not enough lines
+elif not scrim.multiregister and message.author.id in get_slots(...):
+    ...                      # already registered
+elif scrim.no_duplicate_name:
+    ...                      # duplicate name
+elif not scrim.allow_duplicate_tags:
+    ...                      # fake tag
+```
+
+In Python an `elif` chain runs when the `if` is **false**. So the chain
+ran whenever the scrim asked for no mentions, and it did *not* run when
+somebody mentioned a bot — the bot-mention reason simply won, because it
+was the `if`.
+
+The first port of this file misread that shape and made the chain
+conditional on the `if` being **true**. On a scrim with
+`required_mentions = 0` that skipped guards 3–8 entirely: **a banned
+user could register**, a duplicate team name was allowed, and the
+one-registration-per-person rule did not apply. That is a bypass, not a
+quirk, and it is closed.
+
+The port is now a flat list, and the first match wins. The source's
+"the bot-mention reason wins" case is reproduced by the **ordering**
+(guard 2 comes before the rest) rather than by a chain, and every other
+check is unconditional.
+
+`requirements.test.ts` proves it: a scrim with `required_mentions = 0`
+refuses a banned user, and the matrix is compared guard-by-guard so a
+guard cannot be wrapped in a condition again.
 
 ### The fake-tag check
 
@@ -258,6 +298,11 @@ rebuilt the whole model from `dict(self.record)` on every interaction,
 which relied on Tortoise internals and wrote columns another writer may
 have changed.
 
+**The editor has no room for a twenty-first field.** It is exactly 25
+components, which is Discord's limit for one message, so a field that
+is not one of the twenty lives in a sub-panel: the **Auto Slotlist**
+switch is in the design panel, not here.
+
 **Every "type a value" flow is a modal or a select menu** (D17). The
 one exception is the match-time editor, which takes several
 `#channel time` lines in one message and keeps a message collector,
@@ -279,7 +324,7 @@ the row. The wizard's state is a token, not a row.
 | Bans | Ban Users, Unban Users, Unban All, and a list of the bans. |
 | Reserved slots | The scrim's slots with their reservations, Reserve Slot, Remove Reserved. |
 | Autoclean | The two toggles and the time the pass runs at. |
-| Design | The open message, the close message and the slotlist design. |
+| Design | The open message, the close message, the slotlist design, and the **Auto Slotlist** switch. |
 | Slotlist | Repost, Edit, Punish, Info — and the published message carries the same three buttons. |
 
 ### The ban matrix
@@ -297,6 +342,28 @@ A ban with a duration creates a `scrim_ban` job row for the unban. A
 user who is already banned from a scrim is skipped, and the
 `banned_teams` unique constraint on `(scrim_id, user_id)` makes that
 idempotent.
+
+### The ban log
+
+`/scrims banlog` is the setup surface the `ban_logs` table was missing.
+The table is one row per guild (`UNIQUE (guild_id)`), so setting the
+channel again replaces the row.
+
+| Invocation | What it does |
+|---|---|
+| `/scrims banlog` | Shows the channel the ban log goes to, or says that none is set. |
+| `/scrims banlog channel:#scrim-logs` | Sets it. The bot must be able to see the channel and send messages in it. |
+
+The channel is written to by `views/ban-log.ts`, on every ban and every
+unban: a ban from the ban panel, a punish from the slotlist, an unban
+from the ban panel, an unban from `/scrims unban`, and a ban whose time
+was up. **The write never fails the ban** — the ban is already in the
+database by the time the log is written, and every failure in the log
+path is swallowed.
+
+The source wrote the same entries to the same kind of channel; what it
+did not have is a way to *choose* the channel per guild without a
+config file.
 
 ### The templates (D32)
 
@@ -324,19 +391,22 @@ serialised embed, so a keyword in a field name was replaced too.
 |---|---|
 | `PremiumFeature.scrimSlots` | The reactions, the required lines, the duplicate-tag toggle, and the free-tier allowance of **3 scrims**. |
 
-The allowance is read from `FREE_TIER` in `core/premium.ts` (D45), never
-from a literal. The entitlement check happens **before** the state
-mutation (D15).
+The allowance is read from `FREE_TIER` (D45), never from a literal. The
+entitlement check happens **before** the state mutation (D15).
 
-**`modules/scrims/entitlements.ts` is a local stand-in.** The premium
-module is owned by another engineer and had not landed when this area
-was built. The file has the documented signature —
-`assertEntitled(guildId: string, feature: PremiumFeature): Promise<void>`,
-throwing the target's `DenialError` — and is backed by the
-`guild_entitlements` table. **When `modules/premium/` lands, delete
-that file and re-point the imports.** The call sites do not change.
+**The gate is `modules/premium/`.** The scrims area calls
+`assertEntitled(guildId, feature)` and `isEntitled(guildId, feature)`
+from `modules/premium/index.js` and nothing else. The expiry is
+evaluated **lazily at read time** — `enabled AND (expires_at IS NULL OR
+expires_at > now())` — so a lapsed entitlement stops being a gate the
+moment it lapses, not when a sweep last ran.
 
-**`canUseScrimMod` is also a local stand-in.** The brief says the mod
+There is **no** local stand-in any more, and nothing in this area reads
+the `guild_entitlements` table: `assertEntitled` is the only place a
+gate is read. The earlier stand-in (`modules/scrims/entitlements.ts`)
+has been deleted.
+
+**`canUseScrimMod` is still a local stand-in.** The brief says the mod
 guard is `canUseScrimMod` in `core/guards.ts`; that function is not
 there yet. `modules/scrims/guards.ts` has the same shape and the same
 behaviour the source had (`manage_guild` or the `scrims-mod` role), and
@@ -365,13 +435,15 @@ it for the core one is a one-line change.
 - The **team-name rule** accepts any message containing the substring
   `team` — "steam" passes it, because the source searched for
   `team.*` anywhere in the text.
-- The **whole `elif` chain is skipped** when the scrim asks for no
-  mentions.
 - The **one reason** the port reports where the source dispatched up to
   two deny events.
 - The **role-name lookup** for the `scrims-mod` role. D16 forbids name
   lookups in general, but this role is a guild-wide convention with
-  nowhere in the schema to store its id.
+  nowhere in the schema to store its id. It is **kept on purpose**: the
+  role name is the constant `SCRIM_MOD_ROLE_NAME` in `guards.ts`, used
+  by the lookup, by the refusal message and by the listener that skips a
+  scrim moderator's own messages. It is *additive* — the `Moderator`
+  staff role and the Administrator permission also pass.
 - **`time_elapsed` as a duration.** S4 renamed the column to
   `time_elapsed_seconds`; the sentence is formatted at render time.
 
@@ -390,10 +462,8 @@ modules/scrims/
   state.ts        the scrim lifecycle
   render.ts       the three message renders
   repo.ts         ALL the SQL for this area
-  service.ts      the state machine and the rules
+  service.ts      the state machine, the rules, and this area's channel cache
   guards.ts       the scrim mod guard
-  entitlements.ts the premium seam (a local stand-in)
-  channel-cache.ts the registration-channel cache
   listeners.ts    the MessageCreate registration intake
   jobs.ts         the durable job handlers
   register.ts     registerScrims / registerScrimsInteractions
@@ -404,6 +474,34 @@ modules/scrims/
 
 **The rule that matters:** no SQL outside `repo.ts`, no `client.` calls
 outside `views/` and `listeners.ts`, no Discord ids parsed as numbers.
+
+### The channel cache
+
+The cache itself is `core/channel-cache.ts` (D21) — one implementation,
+shared with the tournaments area. `modules/scrims/service.ts` owns the
+**scrims instance**, because a scrim registration channel and a tourney
+registration channel are different things: a listener that finds no
+record for a cached channel removes it from the cache, so a shared set
+would let one area evict the other area's channels.
+
+---
+
+## What is not ported
+
+| Thing | Why |
+|---|---|
+| The source's full visual embed builder | The design editor is a **modal** with three fields (title, description, footer) instead. It writes the same `jsonb` and the same keywords; it just does not have the source's drag-and-drop UI, which lived in a generic embed-builder cog rather than in the scrims area. |
+| The registration countdown message (`cdn.msg`) | The column and the template exist and are read back into the record, but **nothing sets them and nothing renders them**: the source's countdown button was commented out of its own design panel, so the source never had a live countdown either. The port's `cdn` is therefore always the column default — `{status: false, countdown: 3, msg: {}}` — and the registration countdown does not exist. |
+| `setup_logs` — creating the `quotient-scrims-logs` channel and the `scrims-mod` role | The source created both on the first scrim. Ours stores what it needs by id and the scrim mod role is a guild-wide convention, so there is nothing to create. The ban log channel is configured with **`/scrims banlog`**, which sets the per-guild row in `ban_logs` (or shows the current one). || `show_time_elapsed` | S11: the column was never read. `time_elapsed_seconds` is always stored and always shown. |
+| Adding a scrim to a slot manager | That belongs to the slot-manager area, which owns the `slot_manager_scrims` join table. |
+
+### The columns that are honoured but not in the editor
+
+| Column | Where it is set |
+|---|---|
+| `autoslotlist` | **The design panel** — the "Auto Slotlist: On/Off" switch. The column is honoured when the scrim closes (the slotlist is published), so the switch that sets it had to be somewhere a moderator can reach. It is not one of the editor's twenty fields: the editor is exactly 25 components, which is Discord's limit for one message, and it has no room. |
+| `cdn` | **Nowhere.** See the table above — the column is read and written back unchanged, and the countdown does not exist. |
+| `autodelete_rejects`, `autodelete_extras` | The editor's "Autodelete rejected" and "Autodelete late messages" toggles. |
 
 ---
 

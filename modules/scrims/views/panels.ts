@@ -221,7 +221,10 @@ export function buildAutocleanPanel(
  * The design
  * ------------------------------------------------------------------ */
 
-/** The design panel: the three message templates. */
+/**
+ * The design panel: the three message templates, and the switch that
+ * publishes the slotlist when the scrim closes.
+ */
 export function buildDesignPanel(
   scrim: ScrimRecord,
 ): { embeds: EmbedBuilder[]; components: PanelComponents } {
@@ -235,6 +238,10 @@ export function buildDesignPanel(
         "**A** — Registration open message",
         "**B** — Registration close message",
         "**C** — Slotlist design",
+        "",
+        `The slotlist is published when the scrim closes: **${
+          scrim.autoslotlist ? "yes" : "no"
+        }**.`,
       ].join("\n"),
     );
 
@@ -257,6 +264,11 @@ export function buildDesignPanel(
         label: "C",
         emoji: "📝",
         style: ButtonStyle.Secondary,
+      }),
+      button({
+        customId: scrimsId("design", scrim.id, "autoslotlist"),
+        label: scrim.autoslotlist ? "Auto Slotlist: On" : "Auto Slotlist: Off",
+        style: scrim.autoslotlist ? ButtonStyle.Success : ButtonStyle.Secondary,
       }),
       button({
         customId: scrimsId("manager", scrim.id),

@@ -17,10 +17,9 @@ import type { ButtonInteraction, EmbedBuilder } from "discord.js";
 import { awaitSelect } from "../../../core/select.js";
 import { prompt } from "../../../core/prompt.js";
 import { parseNaturalTime } from "../../../core/time.js";
-import { Day } from "../../../core/constants.js";
+import { Day, PremiumFeature } from "../../../core/constants.js";
 import type { Weekday } from "../../../db/schema/common.js";
-import { assertEntitled, isEntitled, PremiumFeature } from "../entitlements.js";
-import { FREE_SCrim_LIMIT } from "../entitlements.js";
+import { assertEntitled, FREE_TIER, isEntitled } from "../../premium/index.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
 import { slotNumbers } from "../slots.js";
@@ -52,8 +51,10 @@ import {
   updatePanel,
 } from "./handlers.js";
 import { buildSlotlistPanel, publishSlotlist } from "./slotlist.js";
+import { writeBanLog } from "./ban-log.js";
 import { openRegistrationFlow, closeRegistrationFlow } from "./lifecycle.js";
-import { punishSelection } from "./modal-handlers.js";import { awaitChannelSelect, awaitRoleSelect } from "./select-flow.js";
+import { punishSelection } from "./modal-handlers.js";
+import { awaitChannelSelect, awaitRoleSelect } from "./select-flow.js";
 import { slotSelection } from "./modal-handlers.js";
 import { randomId } from "../../../core/custom-id.js";
 
@@ -68,7 +69,7 @@ export async function canCreateScrim(guildId: string): Promise<boolean> {
 
   const current = await repo.countScrims(guildId);
 
-  return current < FREE_SCrim_LIMIT;
+  return current < FREE_TIER.scrims;
 }
 
 /**
@@ -172,7 +173,7 @@ async function startWizard(interaction: ButtonInteraction): Promise<void> {
   if (!(await canCreateScrim(guildId))) {
     await fail(
       interaction,
-      `You can only have ${FREE_SCrim_LIMIT} scrims on this server. The limit comes from the free-tier allowance.`,
+      `You can only have ${FREE_TIER.scrims} scrims on this server. The limit comes from the free-tier allowance.`,
     );
 
     return;
@@ -1056,8 +1057,23 @@ async function handleBanButton(
 
     if (chosen.length === 0) return;
 
+    const guild = interaction.guild;
+
     for (const userId of chosen) {
       await service.unbanUser(scrim.id, userId);
+
+      if (guild) {
+        const ban = bans.find((entry) => entry.userId === userId);
+
+        await writeBanLog(guild, {
+          action: "unbanned",
+          userId,
+          scrimName: scrim.name,
+          reason: ban?.reason ?? null,
+          expires: ban?.expires ?? null,
+          moderatorId: interaction.user.id,
+        });
+      }
     }
 
     const bans2 = await repo.listBans(scrim.id);
@@ -1083,9 +1099,21 @@ async function handleBanButton(
     }
 
     const bans = await repo.listBans(scrim.id);
+    const guild = interaction.guild;
 
     for (const ban of bans) {
       await service.unbanUser(scrim.id, ban.userId);
+
+      if (guild) {
+        await writeBanLog(guild, {
+          action: "unbanned",
+          userId: ban.userId,
+          scrimName: scrim.name,
+          reason: ban.reason,
+          expires: ban.expires,
+          moderatorId: interaction.user.id,
+        });
+      }
     }
 
     await refresh(interaction, buildBanPanel(scrim, []));
@@ -1308,6 +1336,25 @@ async function handleDesignButton(
         ],
       }),
     );
+
+    return;
+  }
+
+  if (action === "autoslotlist") {
+    // The column was honoured when the scrim closed but nothing set it,
+    // so the switch was unreachable. It lives in the design panel
+    // because that is where the close-time behaviour is decided.
+    await repo.updateScrim(scrim.id, { autoslotlist: !scrim.autoslotlist });
+
+    const fresh = await repo.getScrim(scrim.id);
+
+    if (!fresh) {
+      await fail(interaction, "This scrim no longer exists.");
+
+      return;
+    }
+
+    await updatePanel(interaction, buildDesignPanel(fresh));
 
     return;
   }

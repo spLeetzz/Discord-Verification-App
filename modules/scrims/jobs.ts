@@ -20,13 +20,13 @@ import type { Client, Guild, TextChannel } from "discord.js";
 import { run } from "../../core/fire-and-forget.js";
 import { dayName } from "../../core/time.js";
 import { logger } from "../../utils/logger.js";
-import { scrimChannelCache } from "./channel-cache.js";
 import * as repo from "./repo.js";
 import * as service from "./service.js";
 import { shouldRunAutoclean } from "./schedule.js";
 import { shouldAutoOpen } from "./state.js";
 import { publishSlotlist, refreshSlotlistMessage } from "./views/slotlist.js";
 import { openScrimInGuild } from "./views/lifecycle.js";
+import { writeBanLog } from "./views/ban-log.js";
 
 /** The events this area handles. */
 export const SCRIM_JOB_EVENTS = [
@@ -59,7 +59,7 @@ export async function handleScrimJob(
       await onAutoclean(payload, client);
       return;
     case "scrim_ban":
-      await onScrimBan(payload);
+      await onScrimBan(payload, client);
       return;
     case "scrim_reserve":
       await onScrimReserve(payload);
@@ -232,15 +232,35 @@ export async function stripRole(
  * ------------------------------------------------------------------ */
 
 /** Lifts the bans whose time is up. */
-export async function onScrimBan(payload: unknown): Promise<void> {
+export async function onScrimBan(
+  payload: unknown,
+  client: Client,
+): Promise<void> {
   const scrimIds = repo.allScrimIdsOf(payload);
   const userIds = repo.userIdsOf(payload);
 
   if (scrimIds.length === 0 || userIds.length === 0) return;
 
   for (const scrimId of scrimIds) {
+    const scrim = await repo.getScrim(scrimId);
+
+    const guild = client.guilds.cache.get(scrim?.guildId ?? "");
+
     for (const userId of userIds) {
       await repo.unbanUser(scrimId, userId);
+
+      // The ban ran out on its own. It still goes in the log: the
+      // moderator who reads it wants to see the whole history.
+      if (guild && scrim) {
+        await writeBanLog(guild, {
+          action: "unbanned",
+          userId,
+          scrimName: scrim.name,
+          reason: null,
+          expires: null,
+          moderatorId: null,
+        });
+      }
     }
   }
 }
@@ -314,13 +334,16 @@ export async function onScrimMatch(
  * Called at startup, so the bot does not have to ask the database about
  * every message it sees before it knows which channels accept
  * registrations.
+ *
+ * The cache owns the invalidation (D21); this function is the area's
+ * query, handed to it.
  */
 export async function rebuildChannelCache(): Promise<void> {
-  const scrims = await repo.listOpenScrims();
+  await service.scrimChannelCache.rebuild(async () => {
+    const scrims = await repo.listOpenScrims();
 
-  scrimChannelCache.replace(
-    scrims.map((scrim) => scrim.registrationChannelId),
-  );
+    return scrims.map((scrim) => scrim.registrationChannelId);
+  });
 }
 
 /** The channel a scrim's slotlist lives in. */
@@ -384,4 +407,4 @@ export function background(fn: () => Promise<unknown>, label: string): void {
 }
 
 /** The cache the listeners use. */
-export { scrimChannelCache };
+export { scrimChannelCache } from "./service.js";

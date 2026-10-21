@@ -7,7 +7,7 @@ import {
   MAX_ROWS,
 } from "./components.js";
 import { buildEditorPanel, buildWizardPanel, newWizardState } from "./manager.js";
-import { buildBanPanel, buildReservePanel } from "./panels.js";
+import { buildBanPanel, buildDesignPanel, buildReservePanel } from "./panels.js";
 import { buildSlotlistPanel } from "./slotlist.js";
 import { parseScrimsId, scrimsId } from "./ids.js";
 import type { ScrimRecord } from "../types.js";
@@ -161,6 +161,16 @@ describe("the other panels", () => {
 
     expect(countComponents(panel.components)).toBeLessThanOrEqual(
       MAX_COMPONENTS_PER_MESSAGE,
+    );
+  });
+
+  it("the design panel carries the auto-slotlist switch", () => {
+    // The column is honoured when the scrim closes, so the switch that
+    // sets it cannot live in a place nobody can reach.
+    const panel = buildDesignPanel(scrim());
+
+    expect(buttonIds(panel)).toContain(
+      scrimsId("design", scrim().id, "autoslotlist"),
     );
   });
 });

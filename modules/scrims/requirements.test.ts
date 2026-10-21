@@ -3,16 +3,18 @@ import { describe, expect, it } from "vitest";
 import { RegDeny } from "../../core/constants.js";
 import {
   REGISTRATION_GUARDS,
+  bannedUser,
   botMentionsRejected,
   countLines,
   duplicateTags,
   duplicateTeamName,
-  elifChainApplies,
   evaluateRegistration,
   hasTeamToken,
   mentionCount,
+  mentionsAreChecked,
   normalisedContent,
   oneRegistrationPerPerson,
+  requiredLines,
   teamNameRequired,
 } from "./requirements.js";
 import type {
@@ -96,9 +98,9 @@ describe("the requirements matrix", () => {
     expect(reason).toBe(RegDeny.noteamname);
   });
 
-  it("keeps the source's two independent checks independent of the chain", async () => {
+  it("keeps the source's two independent checks independent of the rest", async () => {
     // The bot-mention check is an independent `if`, so it fires even when
-    // the chain below it would also have fired.
+    // the rules below it would also have fired.
     const ctx = context({
       settings: { requiredMentions: 4, requiredLines: 10 },
       rawContent: "team alpha",
@@ -106,26 +108,80 @@ describe("the requirements matrix", () => {
     });
 
     expect(botMentionsRejected(ctx)).toBe(RegDeny.botmention);
-    // ...and the chain does not run, because the `if` above it was true.
-    expect(elifChainApplies(ctx)).toBe(false);
+    // ...and the first match wins, so the bot-mention reason is the one
+    // that is reported.
     expect(await evaluateRegistration(ctx)).toBe(RegDeny.botmention);
   });
 
-  it("skips the whole elif chain when the scrim asks for no mentions", async () => {
-    // `if scrim.required_mentions and ...` is falsy when the count is
-    // zero, so the chain hanging off it never runs. That is a source
-    // quirk and it is preserved.
+  it("still checks the ban on a scrim that asks for no mentions", async () => {
+    // The regression this file exists for.
+    //
+    // The source hung the banned-user check off an `elif` chain. The
+    // first port of this matrix made the whole chain conditional on the
+    // scrim asking for mentions, so a scrim with `required_mentions = 0`
+    // skipped the ban check and a banned user could register.
+    //
+    // A ban is a ban: the check runs whatever the scrim asks for.
     const ctx = context({
-      settings: { requiredMentions: 0, requiredLines: 10 },
-      rawContent: "one line only",
-      mentions: [BOT],
+      settings: { requiredMentions: 0 },
       authorId: "banned",
       bannedUserIds: ["banned"],
     });
 
-    expect(elifChainApplies(ctx)).toBe(false);
+    expect(mentionsAreChecked(ctx)).toBe(false);
+    expect(await evaluateRegistration(ctx)).toBe(RegDeny.banned);
+  });
+
+  it("runs every rule that is not a mention rule on a scrim that asks for no mentions", async () => {
+    // One scrim, `required_mentions = 0`, and each rule broken in turn.
+    // The order of the matrix decides which reason is reported, so each
+    // case breaks exactly one rule.
+    const noMentions = { requiredMentions: 0 } as const;
+
+    const tooFewLines = context({
+      settings: { ...noMentions, requiredLines: 10 },
+      rawContent: "one line only",
+    });
+
+    expect(await evaluateRegistration(tooFewLines)).toBe(RegDeny.nolines);
+
+    const secondRegistration = context({
+      settings: noMentions,
+      authorId: "captain",
+      claimedOwnerIds: ["captain"],
+    });
+
+    expect(await evaluateRegistration(secondRegistration)).toBe(
+      RegDeny.multiregister,
+    );
+
+    const duplicateName = context({
+      settings: { ...noMentions, noDuplicateName: true },
+      teamName: "Team Alpha",
+      claimedTeamNames: ["Team Alpha"],
+    });
+
+    expect(await evaluateRegistration(duplicateName)).toBe(RegDeny.duplicate);
+
+    const fakeTag = context({
+      settings: { ...noMentions, allowDuplicateTags: false },
+      fakeTagMatches: 1,
+    });
+
+    expect(await evaluateRegistration(fakeTag)).toBe(RegDeny.faketag);
+  });
+
+  it("does not refuse a bot mention on a scrim that asks for no mentions", async () => {
+    // The source's second `if` was
+    // `scrim.required_mentions and not all(mentions are humans)`, so a
+    // scrim that asks for no mentions never rejected a bot mention.
+    // That part is the source's behaviour and it is kept.
+    const ctx = context({
+      settings: { requiredMentions: 0 },
+      mentions: [BOT],
+    });
+
     expect(botMentionsRejected(ctx)).toBeNull();
-    // The "too few lines" and "banned" rules never get a chance to fire.
     expect(await evaluateRegistration(ctx)).toBeNull();
   });
 
@@ -202,6 +258,16 @@ describe("the requirements matrix", () => {
         authorId: "banned",
         bannedUserIds: ["banned"],
         mentions: [HUMAN, HUMAN, HUMAN, HUMAN],
+      });
+
+      expect(await evaluateRegistration(ctx)).toBe(RegDeny.banned);
+    });
+
+    it("refuses a banned author on a scrim that asks for no mentions", async () => {
+      const ctx = context({
+        settings: { requiredMentions: 0 },
+        authorId: "banned",
+        bannedUserIds: ["banned"],
       });
 
       expect(await evaluateRegistration(ctx)).toBe(RegDeny.banned);
@@ -319,5 +385,23 @@ describe("the requirements matrix", () => {
 
   it("has the eight guards in the source's order", () => {
     expect(REGISTRATION_GUARDS).toHaveLength(8);
+  });
+
+  it("lists the guards themselves, so no guard can be wrapped in a condition again", () => {
+    // The matrix is a flat list of the eight guards. The first port of
+    // this file wrapped five of them in a `chainGuard` that skipped them
+    // when the scrim asked for no mentions, and the banned user could
+    // register. Comparing the array by identity fails the moment a guard
+    // is wrapped again.
+    expect(REGISTRATION_GUARDS).toEqual([
+      teamNameRequired,
+      botMentionsRejected,
+      mentionCount,
+      bannedUser,
+      requiredLines,
+      oneRegistrationPerPerson,
+      duplicateTeamName,
+      duplicateTags,
+    ]);
   });
 });

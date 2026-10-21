@@ -33,7 +33,7 @@ import { ChannelType, PermissionFlagsBits } from "discord.js";
 import { run } from "../../core/fire-and-forget.js";
 import { logger } from "../../utils/logger.js";
 import { evaluateRegistration } from "./requirements.js";
-import { scrimChannelCache } from "./channel-cache.js";
+import { SCRIM_MOD_ROLE_NAME } from "./guards.js";
 import * as repo from "./repo.js";
 import * as service from "./service.js";
 import { closeScrimInGuild } from "./views/lifecycle.js";
@@ -86,13 +86,13 @@ export async function handleRegistrationMessage(
 
   const channelId = message.channelId;
 
-  if (!scrimChannelCache.has(channelId)) return false;
+  if (!service.scrimChannelCache.has(channelId)) return false;
 
   const scrim = await repo.getScrimByRegistrationChannel(channelId);
 
   if (!scrim) {
     // The scrim was deleted. The cache is stale.
-    scrimChannelCache.remove(channelId);
+    service.scrimChannelCache.remove(channelId);
 
     return false;
   }
@@ -195,7 +195,7 @@ export function isScrimMod(member: {
   if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
 
   return member.roles.cache.some(
-    (role) => role.name.trim().toLowerCase() === "scrims-mod",
+    (role) => role.name.trim().toLowerCase() === SCRIM_MOD_ROLE_NAME,
   );
 }
 

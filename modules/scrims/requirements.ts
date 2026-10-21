@@ -31,19 +31,28 @@
  * Two consequences of that shape are load-bearing and are reproduced here
  * exactly:
  *
- *  1. **The `elif` chain only runs when the second `if` is false.** The
- *     second `if` is `scrim.required_mentions and not all(mentions are
- *     humans)`. When `required_mentions` is `0` the whole `if` is falsy,
- *     so *the entire chain is skipped* — the banned-user check, the line
- *     check, the one-registration check, the duplicate-name check and the
- *     fake-tag check all stop firing. That is a source quirk, and it is
- *     preserved rather than "fixed", because a guild that sets
- *     `required_mentions` to `0` gets exactly this behaviour there.
- *
- *  2. **The team-name check is independent of everything else.** It can
+ *  1. **The team-name check is independent of everything else.** It can
  *     fire alongside the bot-mention check. The port reports one reason
  *     (the first match wins), which is the behaviour the decision log
  *     asks for; the source dispatched up to two events.
+ *
+ *  2. **Only the two mention checks depend on `required_mentions`.** The
+ *     source's second `if` is `scrim.required_mentions and not all(mentions
+ *     are humans)`, and the whole `elif` chain hangs off it. In Python an
+ *     `elif` chain runs when the `if` is **false**, so the chain ran
+ *     whenever the scrim asked for no mentions, and it did *not* run when
+ *     somebody mentioned a bot — the bot-mention reason simply won.
+ *
+ *     The first port of this file misread that shape: it made the whole
+ *     chain conditional on the second `if` being **true**, so a scrim
+ *     with `required_mentions = 0` skipped the banned-user check, the
+ *     line check, the one-registration check, the duplicate-name check and
+ *     the fake-tag check. A banned user could register on such a scrim.
+ *     That is a bypass, not a quirk, and it is closed here.
+ *
+ *     The port is now a flat list of guards and the first match wins, so
+ *     the source's "the bot-mention reason wins" case is reproduced by
+ *     the ordering rather than by a chain.
  *
  * The module is pure: the caller gathers the facts, the guards decide.
  */
@@ -60,7 +69,12 @@ export interface MentionSummary {
 
 /** The settings a guard may read. */
 export interface RegistrationSettings {
-  /** How many mentions a registration needs. `0` disables the chain. */
+  /**
+   * How many mentions a registration needs.
+   *
+   * `0` turns the two mention checks off — the bot-mention check and the
+   * mention count. It does **not** turn any other check off.
+   */
   readonly requiredMentions: number;
   /** How many lines the message needs. */
   readonly requiredLines: number;
@@ -155,29 +169,19 @@ export function hasTeamToken(content: string): boolean {
 }
 
 /**
- * Does the `elif` chain apply?
+ * Do the mention checks apply?
  *
- * The chain hangs off `if scrim.required_mentions and not all(mentions
- * are humans)`. It runs when that condition is **false**, which means:
- * the scrim asks for mentions, and nobody mentioned a bot.
+ * The two checks that read `required_mentions` — the bot-mention check
+ * and the mention count — only apply when the scrim asks for at least
+ * one mention. A scrim that asks for no mentions does not care about
+ * mentions at all.
+ *
+ * **Nothing else is conditional.** The banned-user, line,
+ * one-registration, duplicate-name and fake-tag checks run whatever the
+ * scrim asks for.
  */
-export function elifChainApplies(context: RegistrationContext): boolean {
-  if (context.settings.requiredMentions <= 0) return false;
-
-  return !context.mentions.some((mention) => mention.isBot);
-}
-
-/**
- * Wraps a check so it only runs as part of the `elif` chain.
- */
-function chainGuard(
-  check: (context: RegistrationContext) => RegDenyType | null,
-): RegistrationGuard {
-  return (context) => {
-    if (!elifChainApplies(context)) return null;
-
-    return check(context);
-  };
+export function mentionsAreChecked(context: RegistrationContext): boolean {
+  return context.settings.requiredMentions > 0;
 }
 
 /**
@@ -205,17 +209,24 @@ export function teamNameRequired(
 export function botMentionsRejected(
   context: RegistrationContext,
 ): RegDenyType | null {
-  if (context.settings.requiredMentions <= 0) return null;
+  if (!mentionsAreChecked(context)) return null;
 
   if (!context.mentions.some((mention) => mention.isBot)) return null;
 
   return RegDeny.botmention;
 }
 
-/** Guard 3 — enough mentions. */
+/**
+ * Guard 3 — enough mentions.
+ *
+ * Only when the scrim asks for mentions. A scrim that asks for none
+ * cannot fall short of none.
+ */
 export function mentionCount(
   context: RegistrationContext,
 ): RegDenyType | null {
+  if (!mentionsAreChecked(context)) return null;
+
   if (context.mentions.length < context.settings.requiredMentions) {
     return RegDeny.nomention;
   }
@@ -223,14 +234,22 @@ export function mentionCount(
   return null;
 }
 
-/** Guard 4 — the author is not banned from this scrim. */
+/**
+ * Guard 4 — the author is not banned from this scrim.
+ *
+ * **Always.** A ban is a ban, whatever the scrim asks for.
+ */
 export function bannedUser(context: RegistrationContext): RegDenyType | null {
   if (!context.bannedUserIds.has(context.authorId)) return null;
 
   return RegDeny.banned;
 }
 
-/** Guard 5 — the message has enough lines. */
+/**
+ * Guard 5 — the message has enough lines.
+ *
+ * **Always.**
+ */
 export function requiredLines(
   context: RegistrationContext,
 ): RegDenyType | null {
@@ -241,7 +260,11 @@ export function requiredLines(
   return null;
 }
 
-/** Guard 6 — one registration per person. */
+/**
+ * Guard 6 — one registration per person.
+ *
+ * **Always.**
+ */
 export function oneRegistrationPerPerson(
   context: RegistrationContext,
 ): RegDenyType | null {
@@ -257,6 +280,8 @@ export function oneRegistrationPerPerson(
  *
  * The name compared is the one the *team-name* derivation produces, so
  * the comparison is with the same normalisation the slotlist shows.
+ *
+ * **Always.**
  */
 export function duplicateTeamName(
   context: RegistrationContext,
@@ -268,7 +293,11 @@ export function duplicateTeamName(
   return RegDeny.duplicate;
 }
 
-/** Guard 8 — no two teams share a member. */
+/**
+ * Guard 8 — no two teams share a member.
+ *
+ * **Always.**
+ */
 export function duplicateTags(context: RegistrationContext): RegDenyType | null {
   if (context.settings.allowDuplicateTags) return null;
 
@@ -280,18 +309,20 @@ export function duplicateTags(context: RegistrationContext): RegDenyType | null 
 /**
  * The requirements matrix.
  *
- * The order is the source's order, and the chain guards carry the
- * chain's precondition with them.
+ * The order is the source's order, and the first match wins.
+ *
+ * Only the two mention checks are conditional (on `required_mentions >
+ * 0`); every other guard always runs.
  */
 export const REGISTRATION_GUARDS: readonly RegistrationGuard[] = [
   teamNameRequired,
   botMentionsRejected,
-  chainGuard(mentionCount),
-  chainGuard(bannedUser),
-  chainGuard(requiredLines),
-  chainGuard(oneRegistrationPerPerson),
-  chainGuard(duplicateTeamName),
-  chainGuard(duplicateTags),
+  mentionCount,
+  bannedUser,
+  requiredLines,
+  oneRegistrationPerPerson,
+  duplicateTeamName,
+  duplicateTags,
 ];
 
 /**

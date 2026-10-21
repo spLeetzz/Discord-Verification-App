@@ -14,8 +14,8 @@
 
 import { findTeam, TEAM_NAME_MAX_LENGTH } from "../../core/team-name.js";
 import { truncate } from "../../core/text.js";
+import { ChannelIdCache } from "../../core/channel-cache.js";
 import { planBan } from "./bans.js";
-import { scrimChannelCache } from "./channel-cache.js";
 import * as repo from "./repo.js";
 import { classifyClaim, slotNumbers } from "./slots.js";
 import { nextDailySchedule, nextMatchTime } from "./schedule.js";
@@ -29,6 +29,16 @@ import type {
   ScrimRecord,
   SlotRecord,
 } from "./types.js";
+
+/**
+ * The registration-channel cache of this area.
+ *
+ * The cache itself is `core/channel-cache.ts` (D21) — one implementation,
+ * shared with the tournaments area. This is the scrims **instance**: a
+ * scrim registration channel and a tourney registration channel are
+ * different things, so the two areas must not share one set.
+ */
+export const scrimChannelCache = new ChannelIdCache();
 
 /** A refusal the caller should show to a person. */
 export class ScrimError extends Error {

@@ -22,7 +22,7 @@ import { handleScrimsButton } from "./views/button-handlers.js";
 import { handleScrimsModal } from "./views/modal-handlers.js";
 import { handleScrimsSelect } from "./views/select-handlers.js";
 import { parseScrimsId } from "./views/ids.js";
-import { scrimChannelCache } from "./channel-cache.js";
+import { scrimChannelCache } from "./service.js";
 
 /**
  * Registers the scrims listeners.

@@ -18,6 +18,9 @@
  * convention, not a per-scrim column, and there is nowhere in the schema
  * to store its id. It is kept, and it is *additive*: the existing
  * `Moderator` staff role and the Administrator permission also pass.
+ *
+ * The role name is the constant {@link SCRIM_MOD_ROLE_NAME} — one
+ * literal, used by the lookup and by the refusal message.
  */
 
 import { PermissionFlagsBits } from "discord.js";
@@ -29,9 +32,13 @@ import { getGuildMember } from "../../utils/member.js";
 /** The name of the role the source used for scrim moderators. */
 export const SCRIM_MOD_ROLE_NAME = "scrims-mod";
 
-/** The refusal a non-moderator gets. */
-export const SCRIM_MOD_DENIAL_MESSAGE =
-  "You need the **scrims-mod** role or **Manage Server** permissions to use this command.";
+/**
+ * The refusal a non-moderator gets.
+ *
+ * The role name is the constant above, not a second copy of the literal:
+ * the message and the lookup must not be able to disagree.
+ */
+export const SCRIM_MOD_DENIAL_MESSAGE = `You need the **${SCRIM_MOD_ROLE_NAME}** role or **Manage Server** permissions to use this command.`;
 
 /**
  * The interactions a scrims guard sees.

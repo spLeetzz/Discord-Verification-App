@@ -9,6 +9,7 @@ import { SlashCommandSubcommandBuilder } from "discord.js";
 import { canUseScrimMod } from "../guards.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
+import { writeBanLog } from "../views/ban-log.js";
 import type { ScrimSubcommand } from "./types.js";
 
 /** The subcommand. */
@@ -48,6 +49,7 @@ export const unbanSubcommand: ScrimSubcommand = {
 
     const user = interaction.options.getUser("user", true);
     const reason = interaction.options.getString("reason");
+    const reasonText = reason && reason.length > 0 ? reason : null;
 
     const scrimIds = await repo.listScrimsBanning(guild.id, user.id);
 
@@ -61,6 +63,17 @@ export const unbanSubcommand: ScrimSubcommand = {
 
     for (const scrimId of scrimIds) {
       await service.unbanUser(scrimId, user.id);
+
+      const scrim = await repo.getScrim(scrimId);
+
+      await writeBanLog(guild, {
+        action: "unbanned",
+        userId: user.id,
+        scrimName: scrim?.name ?? "a scrim",
+        reason: reasonText,
+        expires: null,
+        moderatorId: interaction.user.id,
+      });
     }
 
     await interaction.editReply({

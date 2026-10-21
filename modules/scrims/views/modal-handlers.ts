@@ -14,12 +14,14 @@ import { MessageFlags } from "discord.js";
 import { parseNaturalTime } from "../../../core/time.js";
 import { truncate } from "../../../core/text.js";
 import { TEAM_NAME_MAX_LENGTH } from "../../../core/team-name.js";
+import { PremiumFeature } from "../../../core/constants.js";
 import type { Weekday } from "../../../db/schema/common.js";
-import { assertEntitled, PremiumFeature } from "../entitlements.js";
+import { assertEntitled } from "../../premium/index.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
 import { slotNumbers } from "../slots.js";
 import { modalText } from "./components.js";
+import { writeBanLog } from "./ban-log.js";
 import {
   buildEditorPanel,
   buildWizardPanel,
@@ -514,6 +516,8 @@ async function handleBanModal(
 
   const expires = duration ? parseNaturalTime(`in ${duration}`) : null;
 
+  const guild = interaction.guild;
+
   for (const userId of userIds) {
     await service.banUsers({
       scrimId: scrim.id,
@@ -524,6 +528,17 @@ async function handleBanModal(
       reason: reason.length > 0 ? reason : null,
       expires,
     });
+
+    if (guild) {
+      await writeBanLog(guild, {
+        action: "banned",
+        userId,
+        scrimName: scrim.name,
+        reason: reason.length > 0 ? reason : null,
+        expires,
+        moderatorId: interaction.user.id,
+      });
+    }
   }
 
   const bans = await repo.listBans(scrim.id);
@@ -560,6 +575,8 @@ async function handlePunishModal(
   const slotIds = punishSelection.get(scrimId) ?? [];
   punishSelection.delete(scrimId);
 
+  const guild = interaction.guild;
+
   for (const slotId of slotIds) {
     const slot = await repo.getSlot(slotId);
 
@@ -574,6 +591,17 @@ async function handlePunishModal(
       reason: reason.length > 0 ? reason : null,
       expires,
     });
+
+    if (guild && slot.ownerUserId) {
+      await writeBanLog(guild, {
+        action: "banned",
+        userId: slot.ownerUserId,
+        scrimName: scrim.name,
+        reason: reason.length > 0 ? reason : null,
+        expires,
+        moderatorId: interaction.user.id,
+      });
+    }
   }
 
   const bans = await repo.listBans(scrim.id);

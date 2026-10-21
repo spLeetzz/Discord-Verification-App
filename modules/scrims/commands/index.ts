@@ -1,13 +1,14 @@
 /**
  * The `/scrims` command group.
  *
- * One top-level command with six subcommands. The file in
+ * One top-level command with seven subcommands. The file in
  * `commands/esports/scrims.ts` is a one-line re-export of this.
  */
 
 import { SlashCommandBuilder } from "discord.js";
 import type { Command } from "../../../types/command.js";
 import { scrimsModGuard } from "../guards.js";
+import { banLogSubcommand } from "./banlog.js";
 import { createSubcommand } from "./create.js";
 import { managerSubcommand } from "./manager.js";
 import { reserveSubcommand } from "./reserve.js";
@@ -22,6 +23,7 @@ export const SCRIM_SUBCOMMANDS: readonly ScrimSubcommand[] = [
   createSubcommand,
   reserveSubcommand,
   unbanSubcommand,
+  banLogSubcommand,
   slotInfoSubcommand,
   slotListSubcommand,
 ];
@@ -48,6 +50,7 @@ export const scrimsCommand: Command = {
     .addSubcommand(createSubcommand.data)
     .addSubcommand(reserveSubcommand.data)
     .addSubcommand(unbanSubcommand.data)
+    .addSubcommand(banLogSubcommand.data)
     .addSubcommand(slotInfoSubcommand.data)
     .addSubcommand(slotListSubcommand.data),
 

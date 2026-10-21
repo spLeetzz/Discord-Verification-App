@@ -14,7 +14,8 @@ import {
   SlashCommandSubcommandBuilder,
 } from "discord.js";
 import { parseNaturalTime } from "../../../core/time.js";
-import { FREE_SCrim_LIMIT, isEntitled, PremiumFeature } from "../entitlements.js";
+import { PremiumFeature } from "../../../core/constants.js";
+import { FREE_TIER, isEntitled } from "../../premium/index.js";
 import { canUseScrimMod } from "../guards.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
@@ -115,9 +116,9 @@ export const createSubcommand: ScrimSubcommand = {
     if (!(await isEntitled(guild.id, PremiumFeature.scrimSlots))) {
       const current = await repo.countScrims(guild.id);
 
-      if (current >= FREE_SCrim_LIMIT) {
+      if (current >= FREE_TIER.scrims) {
         await interaction.editReply({
-          content: `You can only have ${FREE_SCrim_LIMIT} scrims on this server without the **scrim slots** entitlement. You already have ${current}.`,
+          content: `You can only have ${FREE_TIER.scrims} scrims on this server without the **scrim slots** entitlement. You already have ${current}.`,
         });
 
         return;
