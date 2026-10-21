@@ -245,9 +245,13 @@ export class QueuedClient implements Client {
 
     // Inside a transaction, the statement belongs to the transaction.
     // It runs on the transaction's own connection, without the queue.
+    //
+    // A transaction that has already been committed is not a transaction
+    // any more: a statement that outlived the body it was started in
+    // is an ordinary write, and it is queued like one.
     const open = transactionContext.getStore();
 
-    if (open) return open.execute(statement);
+    if (open && !open.closed) return open.execute(statement);
 
     // A read does not wait for a write.
     if (!isWriteStatement(statementText(statement))) {
@@ -263,7 +267,7 @@ export class QueuedClient implements Client {
   ): Promise<ResultSet[]> {
     const open = transactionContext.getStore();
 
-    if (open) {
+    if (open && !open.closed) {
       return open.batch(stmts.map((statement) => toStatement(statement)));
     }
 
@@ -287,7 +291,7 @@ export class QueuedClient implements Client {
     // A transaction inside a transaction. It cannot take the queue —
     // the queue is held by the transaction it is nested in — so it
     // becomes a savepoint on the same connection.
-    if (open) return SavepointTransaction.open(open);
+    if (open && !open.closed) return SavepointTransaction.open(open);
 
     const release = await this.#queue.acquire();
 

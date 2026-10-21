@@ -24,7 +24,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 
 /** The database this run uses. Dropped when the run ends. */
 const directory = mkdtempSync(join(tmpdir(), "quotient-queue-test-"));
@@ -34,8 +34,18 @@ process.env.DB_FILE = join(directory, "queue-test.db");
 const { closeDatabase, db, withTransaction } = await import("./client.js");
 const { tags } = await import("./schema.js");
 
-/** A guild id no real row can have, unique to this test run. */
-const GUILD_ID = `queue-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+/**
+ * A guild id no real row can have, unique to this test run.
+ *
+ * Every test gets one of its own, so that a test only ever sees the
+ * rows it wrote.
+ */
+function guildId(name: string): string {
+  return `queue-test-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** The guilds this file used, so they can be cleaned up. */
+const usedGuilds: string[] = [];
 
 /**
  * The extended SQLite error code of a failure.
@@ -74,12 +84,19 @@ function pause(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-/** The tags this file created, so they can be cleaned up. */
-const createdTagNames: string[] = [];
+/** The names of the tags of one guild. */
+async function tagNames(guild: string): Promise<string[]> {
+  const rows = await db
+    .select({ name: tags.name })
+    .from(tags)
+    .where(eq(tags.guildId, guild));
+
+  return rows.map((row) => row.name).sort();
+}
 
 afterAll(async () => {
-  if (createdTagNames.length > 0) {
-    await db.delete(tags).where(eq(tags.guildId, GUILD_ID));
+  if (usedGuilds.length > 0) {
+    await db.delete(tags).where(inArray(tags.guildId, usedGuilds));
   }
 
   await closeDatabase();
@@ -88,20 +105,20 @@ afterAll(async () => {
 
 describe("db/write-queue", () => {
   it("answers a contended write with the constraint, not with SQLITE_BUSY", async () => {
-    const name = "contended";
+    const guild = guildId("contended");
 
-    createdTagNames.push(name);
+    usedGuilds.push(guild);
 
     const attempts = await Promise.allSettled([
       db.insert(tags).values({
-        guildId: GUILD_ID,
-        name,
+        guildId: guild,
+        name: "contended",
         content: "the first one",
         ownerId: "1",
       }),
       db.insert(tags).values({
-        guildId: GUILD_ID,
-        name,
+        guildId: guild,
+        name: "contended",
         content: "the second one",
         ownerId: "2",
       }),
@@ -124,10 +141,9 @@ describe("db/write-queue", () => {
   });
 
   it("makes a write outside a transaction wait for the transaction", async () => {
-    const transactionName = "inside";
-    const outsideName = "outside";
+    const guild = guildId("outside");
 
-    createdTagNames.push(transactionName, outsideName);
+    usedGuilds.push(guild);
 
     let openTheGate!: () => void;
 
@@ -137,8 +153,8 @@ describe("db/write-queue", () => {
 
     const transaction = withTransaction(async (tx) => {
       await tx.insert(tags).values({
-        guildId: GUILD_ID,
-        name: transactionName,
+        guildId: guild,
+        name: "inside",
         content: "written inside the transaction",
         ownerId: "1",
       });
@@ -156,8 +172,8 @@ describe("db/write-queue", () => {
     const outside = db
       .insert(tags)
       .values({
-        guildId: GUILD_ID,
-        name: outsideName,
+        guildId: guild,
+        name: "outside",
         content: "written outside the transaction",
         ownerId: "2",
       })
@@ -177,23 +193,13 @@ describe("db/write-queue", () => {
     await outside;
 
     expect(outsideDone).toBe(true);
-
-    const rows = await db
-      .select({ name: tags.name })
-      .from(tags)
-      .where(eq(tags.guildId, GUILD_ID));
-
-    expect(rows.map((row) => row.name).sort()).toEqual([
-      "inside",
-      "outside",
-    ]);
+    expect(await tagNames(guild)).toEqual(["inside", "outside"]);
   });
 
   it("lets a transaction body write through the database handle", async () => {
-    const outerName = "outer";
-    const innerName = "inner";
+    const guild = guildId("inner");
 
-    createdTagNames.push(outerName, innerName);
+    usedGuilds.push(guild);
 
     // The body writes through the transaction handle, and then through
     // the database handle — the way a repository function that writes
@@ -201,47 +207,42 @@ describe("db/write-queue", () => {
     // transaction is holding it.
     await withTransaction(async (tx) => {
       await tx.insert(tags).values({
-        guildId: GUILD_ID,
-        name: outerName,
+        guildId: guild,
+        name: "outer",
         content: "written through the transaction handle",
         ownerId: "1",
       });
 
       await db.insert(tags).values({
-        guildId: GUILD_ID,
-        name: innerName,
+        guildId: guild,
+        name: "inner",
         content: "written through the database handle",
         ownerId: "2",
       });
     });
 
-    const rows = await db
-      .select({ name: tags.name })
-      .from(tags)
-      .where(eq(tags.guildId, GUILD_ID));
-
     // Both writes are there: the inner one joined the transaction rather
     // than waiting for it.
-    expect(rows.map((row) => row.name).sort()).toEqual([innerName, outerName]);
+    expect(await tagNames(guild)).toEqual(["inner", "outer"]);
   });
 
   it("rolls the inner write back with the transaction that made it", async () => {
-    const name = "rolled-back";
+    const guild = guildId("rollback");
 
-    createdTagNames.push(name);
+    usedGuilds.push(guild);
 
     await expect(
       withTransaction(async (tx) => {
         await tx.insert(tags).values({
-          guildId: GUILD_ID,
-          name,
+          guildId: guild,
+          name: "outer",
           content: "written through the transaction handle",
           ownerId: "1",
         });
 
         await db.insert(tags).values({
-          guildId: GUILD_ID,
-          name: `${name}-inner`,
+          guildId: guild,
+          name: "inner",
           content: "written through the database handle",
           ownerId: "2",
         });
@@ -250,36 +251,57 @@ describe("db/write-queue", () => {
       }),
     ).rejects.toThrow("the body failed");
 
-    const rows = await db
-      .select({ name: tags.name })
-      .from(tags)
-      .where(eq(tags.guildId, GUILD_ID));
-
     // Neither write survived: the inner one was part of the transaction.
-    expect(rows).toHaveLength(0);
+    expect(await tagNames(guild)).toEqual([]);
+  });
+
+  it("lets a transaction inside a transaction join it", async () => {
+    const guild = guildId("nested");
+
+    usedGuilds.push(guild);
+
+    // The nested transaction cannot take the queue — the outer one is
+    // holding it — so it becomes a savepoint on the outer connection.
+    await withTransaction(async (tx) => {
+      await tx.insert(tags).values({
+        guildId: guild,
+        name: "outer",
+        content: "written by the outer transaction",
+        ownerId: "1",
+      });
+
+      await withTransaction(async (nested) => {
+        await nested.insert(tags).values({
+          guildId: guild,
+          name: "inner",
+          content: "written by the nested transaction",
+          ownerId: "2",
+        });
+      });
+    });
+
+    expect(await tagNames(guild)).toEqual(["inner", "outer"]);
   });
 
   it("lets the constraint decide the race, not the driver", async () => {
-    const name = "locked";
+    const guild = guildId("locked");
 
-    createdTagNames.push(name);
+    usedGuilds.push(guild);
 
     // The shape the moderation area uses: a subject that may only be
     // locked once, and a second attempt that has to be told "already
     // locked" rather than "database busy".
-    const outcomes = await Promise.all([claim(name), claim(name)]);
+    const outcomes = await Promise.all([claim(guild), claim(guild)]);
 
     expect(outcomes.sort()).toEqual(["already locked", "claimed"]);
-
-    const rows = await db
-      .select({ name: tags.name })
-      .from(tags)
-      .where(eq(tags.guildId, GUILD_ID));
-
-    expect(rows).toHaveLength(1);
+    expect(await tagNames(guild)).toEqual(["locked"]);
   });
 
   it("does not make a read wait for a write", async () => {
+    const guild = guildId("read");
+
+    usedGuilds.push(guild);
+
     let openTheGate!: () => void;
 
     const gate = new Promise<void>((resolve) => {
@@ -288,7 +310,7 @@ describe("db/write-queue", () => {
 
     const transaction = withTransaction(async (tx) => {
       await tx.insert(tags).values({
-        guildId: GUILD_ID,
+        guildId: guild,
         name: "read-behind",
         content: "written inside the transaction",
         ownerId: "1",
@@ -304,7 +326,7 @@ describe("db/write-queue", () => {
     const read = db
       .select({ count: sql<number>`count(*)` })
       .from(tags)
-      .where(eq(tags.guildId, GUILD_ID))
+      .where(eq(tags.guildId, guild))
       .then((rows) => {
         readDone = true;
 
@@ -331,13 +353,13 @@ describe("db/write-queue", () => {
  *          The loser is told what the *constraint* says; a busy error
  *          would escape as a failure instead.
  */
-async function claim(name: string): Promise<"claimed" | "already locked"> {
+async function claim(guild: string): Promise<"claimed" | "already locked"> {
   const rows = await withTransaction(async (tx) =>
     tx
       .insert(tags)
       .values({
-        guildId: GUILD_ID,
-        name,
+        guildId: guild,
+        name: "locked",
         content: "claimed",
         ownerId: "1",
       })
