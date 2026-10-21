@@ -17,7 +17,6 @@ import { PremiumFeature } from "../../core/constants.js";
 import { assertEntitled } from "../premium/entitlements.js";
 import { FREE_TIER } from "../premium/limits.js";
 import { DEFAULT_DUPLICATE_THRESHOLD } from "../ssverify/ocr/hash.js";
-import type { OcrResult } from "../ssverify/ocr/index.js";
 import * as repo from "./repo.js";
 import * as cache from "./cache.js";
 import { getOcrProvider } from "./ocr.js";
@@ -412,7 +411,7 @@ export async function processSubmission(
       );
 
       if (duplicate) {
-        lines.push(describeDuplicate(config, authorId, duplicate));
+        lines.push(describeDuplicate(config, duplicate));
 
         continue;
       }
@@ -471,7 +470,6 @@ export async function processSubmission(
  */
 function describeDuplicate(
   config: SsConfig,
-  authorId: string,
   duplicate: DuplicateMatch,
 ): string {
   const submission = duplicate.submission;

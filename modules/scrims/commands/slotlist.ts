@@ -8,7 +8,6 @@ import { ChannelType, SlashCommandSubcommandBuilder } from "discord.js";
 import { canUseScrimMod } from "../guards.js";
 import * as repo from "../repo.js";
 import { renderSlotlist, slotListLines } from "../render.js";
-import { publishSlotlist } from "../views/slotlist.js";
 import type { ScrimSubcommand } from "./types.js";
 
 /** The subcommand. */
@@ -93,6 +92,3 @@ export const slotListSubcommand: ScrimSubcommand = {
     });
   },
 };
-
-/** The function that publishes the slotlist into a channel. */
-export { publishSlotlist };

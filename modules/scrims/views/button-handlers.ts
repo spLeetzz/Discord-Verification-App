@@ -110,6 +110,9 @@ export async function handleScrimsButton(
     case "editor":
       await handleEditorButton(interaction, parts);
       return;
+    case "editor_open":
+      await openEditor(interaction, parts);
+      return;
     case "editor_nav":
       await handleEditorNav(interaction, parts);
       return;
@@ -382,6 +385,32 @@ async function handleWizardButton(
 /* ------------------------------------------------------------------ *
  * The editor
  * ------------------------------------------------------------------ */
+
+/** Opens the editor of a scrim. */
+async function openEditor(
+  interaction: ButtonInteraction,
+  parts: readonly string[],
+): Promise<void> {
+  const [scrimId] = parts;
+
+  if (!scrimId) {
+    await fail(interaction, "That button is no longer active.");
+
+    return;
+  }
+
+  const scrim = await repo.getScrim(scrimId);
+
+  if (!scrim) {
+    await fail(interaction, "This scrim no longer exists.");
+
+    return;
+  }
+
+  const position = await scrimPosition(scrim);
+
+  await updatePanel(interaction, buildEditorPanel(scrim, position, true));
+}
 
 /** The editor's field buttons. */
 async function handleEditorButton(

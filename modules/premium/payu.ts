@@ -241,8 +241,10 @@ export function payuResponseHash(
   fields.reverse();
 
   // The salt leads the string, then the status, then the rest of the
-  // request's fields in reverse, ending with the key.
-  const reversed = [fields[0], input.status, ...fields.slice(1)];
+  // request's fields in reverse, ending with the key. The salt is the
+  // last field of the request list, so it is the first after the
+  // reversal.
+  const reversed = [credentials.salt, input.status, ...fields.slice(1)];
 
   return sha512(reversed.join("|"));
 }
@@ -256,9 +258,9 @@ export function payuResponseHash(
  * identical, and accepting a second encoding of the same signature
  * broadens compatibility without broadening what an attacker can do.
  *
- * Do not "tighten" this back to a single layout without reading the
- * release notes in `modules/premium/PORT-REPORT.md` — the checkout stops
- * working if PayU's live gateway uses the other form.
+ * Do not "tighten" this back to a single layout without reading
+ * `modules/premium/PAYU-HASH-REPORT.md` — the checkout stops working if
+ * PayU's live gateway uses the other form.
  */
 export function payuResponseHashCandidates(
   credentials: PayuCredentials,

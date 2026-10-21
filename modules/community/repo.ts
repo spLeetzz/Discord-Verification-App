@@ -553,6 +553,19 @@ export async function countAutoPurgeConfigs(guildId: string): Promise<number> {
   return rows[0]?.count ?? 0;
 }
 
+/**
+ * The id of every auto-purge channel, in every guild.
+ *
+ * The cache is built from this at startup.
+ */
+export async function listAutoPurgeChannelIds(): Promise<string[]> {
+  const rows = await db
+    .select({ channelId: autopurgeConfigs.channelId })
+    .from(autopurgeConfigs);
+
+  return rows.map((row) => row.channelId);
+}
+
 /** Creates an auto-purge config. */
 export async function insertAutoPurgeConfig(config: {
   guildId: string;
@@ -673,6 +686,7 @@ export async function clearAutoroleRoles(guildId: string): Promise<void> {
 
 /** Writes a job row. */
 export async function insertJob(job: {
+  id?: string;
   expiresAt: Date;
   event: JobEvent;
   payload: Record<string, unknown>;
@@ -681,6 +695,7 @@ export async function insertJob(job: {
   const rows = await db
     .insert(jobs)
     .values({
+      ...(job.id ? { id: job.id } : {}),
       expiresAt: job.expiresAt,
       event: job.event,
       payload: job.payload,
@@ -694,6 +709,16 @@ export async function insertJob(job: {
 /** Deletes a job row. */
 export async function deleteJob(id: string): Promise<void> {
   await db.delete(jobs).where(eq(jobs.id, id));
+}
+
+/** Deletes every job row of an event. */
+export async function deleteJobsByEvent(event: JobEvent): Promise<number> {
+  const deleted = await db
+    .delete(jobs)
+    .where(eq(jobs.event, event))
+    .returning({ id: jobs.id });
+
+  return deleted.length;
 }
 
 /** How many job rows of an event exist. */

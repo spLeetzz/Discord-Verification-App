@@ -7,6 +7,7 @@
 
 import { SlashCommandBuilder } from "discord.js";
 import type { Command } from "../../../types/command.js";
+import { scrimsModGuard } from "../guards.js";
 import { createSubcommand } from "./create.js";
 import { managerSubcommand } from "./manager.js";
 import { reserveSubcommand } from "./reserve.js";
@@ -27,13 +28,19 @@ export const SCRIM_SUBCOMMANDS: readonly ScrimSubcommand[] = [
 
 /** The command group. */
 export const scrimsCommand: Command = {
-  staffOnly: true,
   /**
    * D43: the esports commands are public by default, matching Quotient.
-   * The dispatcher has to honour this flag; today it defers every
-   * command ephemerally.
    */
   ephemeral: false,
+  /**
+   * The scrim mod guard, and **not** `staffOnly`.
+   *
+   * The source's `/scrims` asked for `manage_guild` or the `scrims-mod`
+   * role, not the guild's `Moderator` role. A `staffOnly` command would
+   * be refused by the dispatcher before this guard ever ran, so a
+   * `scrims-mod` member who is not staff could not use it.
+   */
+  guards: [scrimsModGuard],
   data: new SlashCommandBuilder()
     .setName("scrims")
     .setDescription("Manage scrims.")

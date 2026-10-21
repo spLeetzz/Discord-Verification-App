@@ -205,7 +205,7 @@ export function buildAutocleanPanel(
         style: ButtonStyle.Secondary,
       }),
       button({
-        customId: scrimsId("editor", scrim.id),
+        customId: scrimsId("manager", scrim.id),
         label: "Main Menu",
         style: ButtonStyle.Secondary,
       }),

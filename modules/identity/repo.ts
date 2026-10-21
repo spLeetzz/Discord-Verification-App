@@ -22,6 +22,7 @@
  */
 
 import { and, asc, eq, sql } from "drizzle-orm";
+import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import { db } from "../../db/client.js";
 import {
   easytagChannels,
@@ -514,23 +515,23 @@ export async function updateSsConfig(
   id: string,
   patch: SsConfigPatch,
 ): Promise<void> {
-  const values: Record<string, unknown> = {};
+  const values: PgUpdateSetSource<typeof ssConfigs> = {};
 
-  if (patch.channelId !== undefined) values["channelId"] = patch.channelId;
-  if (patch.roleId !== undefined) values["roleId"] = patch.roleId;
-  if (patch.requiredSs !== undefined) values["requiredSs"] = patch.requiredSs;
-  if (patch.channelName !== undefined) values["channelName"] = patch.channelName;
-  if (patch.channelLink !== undefined) values["channelLink"] = patch.channelLink;
-  if (patch.keywords !== undefined) values["keywords"] = [...patch.keywords];
-  if (patch.allowSame !== undefined) values["allowSame"] = patch.allowSame;
-  if (patch.ssType !== undefined) values["ssType"] = patch.ssType;
+  if (patch.channelId !== undefined) values.channelId = patch.channelId;
+  if (patch.roleId !== undefined) values.roleId = patch.roleId;
+  if (patch.requiredSs !== undefined) values.requiredSs = patch.requiredSs;
+  if (patch.channelName !== undefined) values.channelName = patch.channelName;
+  if (patch.channelLink !== undefined) values.channelLink = patch.channelLink;
+  if (patch.keywords !== undefined) values.keywords = [...patch.keywords];
+  if (patch.allowSame !== undefined) values.allowSame = patch.allowSame;
+  if (patch.ssType !== undefined) values.ssType = patch.ssType;
   if (patch.successMessage !== undefined) {
-    values["successMessage"] = patch.successMessage;
+    values.successMessage = patch.successMessage;
   }
 
   if (Object.keys(values).length === 0) return;
 
-  values["updatedAt"] = new Date();
+  values.updatedAt = new Date();
 
   await db
     .update(ssConfigs)

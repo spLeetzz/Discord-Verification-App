@@ -85,6 +85,14 @@ export interface ReminderJobPayload {
   readonly message: string;
   /** The message the reminder was created from, for the jump link. */
   readonly sourceMessageId?: string;
+  /**
+   * The job's own id.
+   *
+   * The dispatcher hands the handler the payload and nothing else, so the
+   * id travels with it: the embed says "Reminder #<id>" and the id is the
+   * one `/reminder list` shows.
+   */
+  readonly reminderId?: string;
 }
 
 /** The payload of an `autopurge` job. */

@@ -465,8 +465,8 @@ it and therefore needs it before the transaction is created.
 
 | | |
 |---|---|
-| `npm run typecheck` | **My files are clean** — zero errors in `modules/premium/` or `commands/premium/`. The repository as a whole does **not** typecheck right now, because of other areas in flight: `modules/identity/`, `modules/scrims/views/manager.test.ts`, `modules/ssverify/ocr/{http,local}.test.ts`. Not mine, not touched. |
-| `npm test` | **My 8 test files, 133 tests, all pass.** The repository's suite is green as well — 37 files, 538 tests. |
+| `npm run typecheck` | **My files are clean** — zero errors in `modules/premium/` or `commands/premium/`. The repository as a whole does **not** typecheck right now, because of other areas in flight: `modules/identity/`, `modules/ssverify/ocr/`, `modules/scrims/`, `modules/community/`. Not mine, not touched. |
+| `npm test` | **My 8 test files, 133 tests, all pass.** The repository's suite is green as well — 38 files, 548 tests. |
 | `npm run smoke` | Not re-run for this change; my two command files load and serialise correctly on their own. |
 | `deploy.ts` | No change needed — it scans `commands/<folder>/*.ts` one level deep and picks up both premium commands. |
 

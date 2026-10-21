@@ -16,9 +16,9 @@
 
 import { PermissionFlagsBits } from "discord.js";
 import type { Attachment, GuildMember, Message } from "discord.js";
-import { STAFF_ROLE_NAME } from "../../core/constants.js";
-import { EMBED_COLOR } from "../../core/constants.js";
 import { EmbedBuilder } from "discord.js";
+import { EMBED_COLOR } from "../../core/constants.js";
+import { STAFF_ROLE_NAME } from "../../core/guards.js";
 import { findTeam } from "../../core/team-name.js";
 import { errorMessage } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
@@ -105,9 +105,11 @@ export async function handleTagCheckMessage(message: Message): Promise<void> {
   });
 
   if (refusal) {
-    await message.reply(refusal);
+    const reply = await message.reply(refusal);
 
     await message.react("❌");
+
+    scheduleDelete(reply, TAG_CHECK_REPLY_SECONDS);
 
     if (config.deleteAfter) {
       scheduleDelete(message, TAG_CHECK_DELETE_SECONDS);
@@ -128,7 +130,7 @@ export async function handleTagCheckMessage(message: Message): Promise<void> {
   const players =
     mentions.length > 0
       ? mentions.map((mention) => `<@${mention.id}>`).join(", ")
-      : message.author.mention;
+      : `<@${message.author.id}>`;
 
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR)
@@ -168,13 +170,17 @@ export async function handleEasyTagMessage(message: Message): Promise<void> {
     return;
   }
 
-  const members: EasyTagMember[] = [
-    ...message.guild.members.cache.values(),
-  ].map((member) => ({
-    id: member.id,
-    username: member.username,
-    displayName: member.displayName,
-  }));
+  const guild = message.guild;
+
+  if (!guild) return;
+
+  const members: EasyTagMember[] = [...guild.members.cache.values()].map(
+    (member) => ({
+      id: member.id,
+      username: member.user.username,
+      displayName: member.displayName,
+    }),
+  );
 
   const mentions = tags.map((tag) => {
     const memberId = resolveEasyTag(tag, members);
@@ -206,6 +212,10 @@ const SCREENSHOT_CONTENT_TYPES = ["image/png", "image/jpeg", "image/jpg"];
  * goes out first and the result replaces it.
  */
 export async function handleSsVerifyMessage(message: Message): Promise<void> {
+  const guild = message.guild;
+
+  if (!guild) return;
+
   const config = await repo.findSsConfigByChannel(message.channelId);
 
   if (!config) {
@@ -252,7 +262,7 @@ export async function handleSsVerifyMessage(message: Message): Promise<void> {
     return;
   }
 
-  const guildWait = service.submissionLimiters.guild.hit(message.guildId);
+  const guildWait = service.submissionLimiters.guild.hit(guild.id);
 
   if (guildWait !== null) {
     await message.reply(
@@ -317,7 +327,7 @@ export async function handleSsVerifyMessage(message: Message): Promise<void> {
   }
 
   await message.reply(
-    `${message.author.mention} Your screenshots are verified, Move to next step.`,
+    `<@${message.author.id}> Your screenshots are verified, Move to next step.`,
   );
 }
 

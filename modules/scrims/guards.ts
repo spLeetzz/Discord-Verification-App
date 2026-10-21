@@ -23,6 +23,7 @@
 import { PermissionFlagsBits } from "discord.js";
 import type { Interaction, ModalSubmitInteraction } from "discord.js";
 import { STAFF_DENIAL_MESSAGE, isStaff } from "../../core/guards.js";
+import type { Guard } from "../../core/guards.js";
 import { getGuildMember } from "../../utils/member.js";
 
 /** The name of the role the source used for scrim moderators. */
@@ -76,3 +77,14 @@ export async function canUseScrimMod(
  * Re-exported so the scrims views have one place to read it from.
  */
 export const STAFF_REFUSAL = STAFF_DENIAL_MESSAGE;
+
+/**
+ * The scrim mod guard, in the shape the dispatcher wants.
+ *
+ * The source's `/scrims` asked for `manage_guild` or the `scrims-mod`
+ * role — **not** the guild's `Moderator` role — so this is a `guards`
+ * entry rather than `staffOnly`. A `staffOnly` command would be refused
+ * by the dispatcher before this guard ever ran.
+ */
+export const scrimsModGuard: Guard = async (interaction) =>
+  canUseScrimMod(interaction);

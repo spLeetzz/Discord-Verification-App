@@ -132,9 +132,18 @@ export function readPublishDraft(token: string): PublishDraft | undefined {
 
 /**
  * Writes a draft back.
+ *
+ * The draft is stored **by reference**, so a change is made by mutating
+ * the object the store holds. `Object.assign` copies the changed fields
+ * onto it, which keeps the token valid — `TokenStore.issue` would hand
+ * out a *new* token and the button would lose its target.
  */
 export function writePublishDraft(token: string, draft: PublishDraft): void {
-  drafts.issue({ ...draft });
+  const stored = drafts.get(token);
+
+  if (!stored) return;
+
+  Object.assign(stored, draft);
 }
 
 /**

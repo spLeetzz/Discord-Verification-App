@@ -26,8 +26,8 @@
  * path, so it *is* the last refresh time.
  */
 
-import { ChannelType, PermissionOverwrites } from "discord.js";
-import type { CategoryChannel, Guild, Role, TextChannel } from "discord.js";
+import { ChannelType, PermissionFlagsBits } from "discord.js";
+import type { CategoryChannel, Guild, OverwriteData, Role, TextChannel } from "discord.js";
 import { logger } from "../../utils/logger.js";
 import { errorMessage } from "../../utils/errors.js";
 import * as repo from "./repo.js";
@@ -155,7 +155,7 @@ export async function createGroupChannels(
         name,
         type: ChannelType.GuildText,
         parent: category.id,
-        permissionOverwrites: buildChannelOverwrites(guild, overwrites, role),
+        permissionOverwrites: buildChannelOverwrites(overwrites, role),
         reason: `Group management by ${guild.client.user.username}`,
       })) as TextChannel;
 
@@ -176,27 +176,38 @@ export async function createGroupChannels(
 
 /**
  * The overwrites of the category.
+ *
+ * The @everyone role may not read the category; the tournament's own role
+ * may do everything in it.
  */
 function buildOverwrites(
   guild: Guild,
   modRoleId: string | null,
-): Record<string, PermissionOverwrites> {
-  const overwrites: Record<string, PermissionOverwrites> = {
-    [guild.roles.everyone.id]: new PermissionOverwrites({
-      readMessages: false,
-    }),
-  };
+): OverwriteData[] {
+  const overwrites: OverwriteData[] = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+      ],
+    },
+  ];
 
   if (modRoleId) {
     const modRole = guild.roles.cache.get(modRoleId);
 
     if (modRole) {
-      overwrites[modRole.id] = new PermissionOverwrites({
-        readMessages: true,
-        sendMessages: true,
-        readMessageHistory: true,
-        manageChannels: true,
-        mentionEveryone: true,
+      overwrites.push({
+        id: modRole.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.ManageChannels,
+          PermissionFlagsBits.MentionEveryone,
+        ],
       });
     }
   }
@@ -211,18 +222,20 @@ function buildOverwrites(
  * captain who holds it posts the team's slot number.
  */
 function buildChannelOverwrites(
-  guild: Guild,
-  categoryOverwrites: Record<string, PermissionOverwrites>,
+  categoryOverwrites: readonly OverwriteData[],
   groupRole: Role,
-): Record<string, PermissionOverwrites> {
-  return {
-    [groupRole.id]: new PermissionOverwrites({
-      readMessages: true,
-      sendMessages: false,
-      readMessageHistory: true,
-    }),
+): OverwriteData[] {
+  return [
+    {
+      id: groupRole.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.ReadMessageHistory,
+      ],
+      deny: [PermissionFlagsBits.SendMessages],
+    },
     ...categoryOverwrites,
-  };
+  ];
 }
 
 /**

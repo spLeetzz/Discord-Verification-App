@@ -351,4 +351,4 @@ None of these block the area; the code is written against them.
 | `blocklist.test.ts` | that a user and a guild with the same id do not collide, and that a failed refresh does not unblock anybody |
 | `roles.test.ts` | the mention parsing for the role and member commands |
 
-88 tests in this area; 480 in the repository; all passing.
+98 tests in this area; all passing.

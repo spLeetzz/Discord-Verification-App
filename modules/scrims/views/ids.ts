@@ -36,6 +36,7 @@ export const SCRIMS_ACTIONS = [
   "wizard",
   "manager",
   "editor",
+  "editor_open",
   "editor_nav",
   "ban",
   "reserve",

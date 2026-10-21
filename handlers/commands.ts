@@ -20,6 +20,12 @@ export async function loadCommands(client: Client): Promise<void> {
 
   for (const folder of commandFolders) {
     const commandsPath = path.join(foldersPath, folder);
+
+    // Only folders are command categories. A stray file directly under
+    // commands/ would make readdirSync throw ENOTDIR and take the whole
+    // loader down.
+    if (!fs.statSync(commandsPath).isDirectory()) continue;
+
     const commandFiles = listCommandFiles(commandsPath);
 
     for (const filePath of commandFiles) {

@@ -271,8 +271,11 @@ Two behaviour changes worth knowing about:
 
 | | |
 |---|---|
-| `npm run typecheck` | **My files are clean** — zero errors in `modules/premium/` or `commands/premium/`. The repository as a whole does **not** typecheck: 50 errors in `modules/identity/` (repo, listeners, groups, service, views, commands), `modules/scrims/views/manager.test.ts` and `modules/ssverify/ocr/{http,local}.test.ts`. Other areas, in flight, not touched. |
-| `npm test` | **My 8 test files, 133 tests, all pass.** The whole repository's suite is green as well — 37 files, 538 tests. |
+| `npm run typecheck` | **My files are clean** — zero errors in `modules/premium/` or `commands/premium/`. The repository as a whole does **not** typecheck: 34 errors in `modules/identity/`, `modules/ssverify/ocr/`, `modules/scrims/` and `modules/community/`. Other areas, in flight, not touched. |
+| `npm test` | **My 8 test files, 133 tests, all pass.** The whole repository's suite is green as well — 38 files, 548 tests. |
+
+(The repository-wide numbers are a snapshot: the other areas are moving
+while this work was in progress.)
 
 | File | Tests | What it proves |
 |---|---|---|

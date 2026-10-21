@@ -144,7 +144,7 @@ export function buildScrimPanel(
   const rows: PanelComponents = [
     buttonRow(
       button({
-        customId: scrimsId("editor", scrim.id),
+        customId: scrimsId("editor_open", scrim.id),
         label: "Edit Settings",
         style: ButtonStyle.Primary,
       }),

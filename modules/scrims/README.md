@@ -26,24 +26,30 @@ live in `modules/scrims/commands/`.
 | `/scrims slotinfo` | Shows the slots a user holds. |
 | `/scrims slotlist` | Posts a scrim's slotlist into the current channel. |
 
-Every command is `staffOnly` and passes the scrim mod guard.
+Every command is guarded by the scrim mod guard (`guards:
+[scrimsModGuard]`), **not** by `staffOnly`. The source's `/scrims` asked
+for `manage_guild` or the `scrims-mod` role — not the guild's
+`Moderator` role — and a `staffOnly` command would be refused by the
+dispatcher before the scrim mod guard ever ran.
 
 ### The module's entry points
 
 ```ts
 import {
-  registerScrims,
+  registerScrimsListeners,
   registerScrimsInteractions,
-  dispatchScrimJob,
+  handleScrimsJob,
 } from "./modules/scrims/register.js";
 ```
 
-- `registerScrims(client)` attaches the `MessageCreate` listener and
-  rebuilds the registration-channel cache.
+- `registerScrimsListeners(client)` attaches the `MessageCreate`
+  listener and rebuilds the registration-channel cache.
 - `registerScrimsInteractions()` wires the custom ids into the core
   router. The manager calls it.
-- `dispatchScrimJob(event, payload, client)` is this area's half of the
+- `handleScrimsJob(client, event, payload)` is this area's half of the
   durable scheduler.
+
+Those are the names the manager's area registry looks for.
 
 ### Custom ids
 

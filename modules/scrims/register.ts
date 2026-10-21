@@ -27,11 +27,11 @@ import { scrimChannelCache } from "./channel-cache.js";
 /**
  * Registers the scrims listeners.
  *
- * The manager calls this from `handlers/listeners.ts`. The `MessageCreate`
- * listener is the registration intake; nothing else in this area listens
- * to messages.
+ * The manager's registry looks for `registerScrimsListeners(client)`.
+ * The `MessageCreate` listener is the registration intake; nothing else
+ * in this area listens to messages.
  */
-export function registerScrims(client: Client): void {
+export function registerScrimsListeners(client: Client): void {
   client.on("messageCreate", (message) => {
     if (message.author.bot) return;
 
@@ -53,6 +53,13 @@ export function registerScrims(client: Client): void {
     `[Scrims] Registered. The cache holds ${scrimChannelCache.size} registration channels.`,
   );
 }
+
+/**
+ * Registers the scrims listeners.
+ *
+ * The name the brief used. The manager's registry uses the longer one.
+ */
+export const registerScrims = registerScrimsListeners;
 
 /**
  * Registers the scrims custom ids.
@@ -116,9 +123,19 @@ export function registerScrimsInteractions(): void {
 /**
  * The job handler the scheduler calls.
  *
- * The scheduler is manager-owned; this is the half that belongs to the
- * scrims area.
+ * The manager's registry looks for `handleScrimsJob(client, event,
+ * payload)`; the scheduler is manager-owned and this is the half that
+ * belongs to the scrims area.
  */
+export async function handleScrimsJob(
+  client: Client,
+  event: string,
+  payload: unknown,
+): Promise<void> {
+  await handleScrimJob(event, payload, client);
+}
+
+/** The job handler, in the argument order the brief used. */
 export async function dispatchScrimJob(
   event: string,
   payload: unknown,

@@ -209,9 +209,18 @@ export function readSsDraft(token: string): SsDraft | undefined {
 
 /**
  * Writes a draft back.
+ *
+ * The draft is stored **by reference**, so a change is made by mutating
+ * the object the store holds. `Object.assign` copies the changed fields
+ * onto it, which keeps the token valid — `TokenStore.issue` would hand
+ * out a *new* token and the button would lose its target.
  */
 export function writeSsDraft(token: string, draft: SsDraft): void {
-  drafts.issue(draft);
+  const stored = drafts.get(token);
+
+  if (!stored) return;
+
+  Object.assign(stored, draft);
 }
 
 /**
@@ -881,7 +890,9 @@ export async function handleSsModButton(
       case SSMOD_ACTIONS.edit:
         return await openEditor(interaction, target);
       case SSMOD_ACTIONS.faq:
-        return await respond(interaction, { embeds: [buildSsFaqEmbed()] }, true);
+        await respond(interaction, { embeds: [buildSsFaqEmbed()] }, true);
+
+        return;
       case SSMOD_ACTIONS.allowSame:
         return await toggleAllowSame(interaction, target);
       case SSMOD_ACTIONS.pageDetails:

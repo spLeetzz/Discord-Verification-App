@@ -21,6 +21,7 @@ import { classifyClaim, slotNumbers } from "./slots.js";
 import { nextDailySchedule, nextMatchTime } from "./schedule.js";
 import { canTransitionScrim } from "./state.js";
 import type { RegistrationContext } from "./requirements.js";
+import type { WizardState } from "./views/manager.js";
 import type { BanMode } from "./types.js";
 import type {
   BannedTeamRecord,

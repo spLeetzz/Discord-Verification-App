@@ -183,13 +183,6 @@ export type LockPermission = (typeof LOCK_PERMISSIONS)[number];
  */
 export type PriorPermissionState = LockdownChannelState;
 
-/**
- * What every channel of a lockdown looked like before it was locked.
- *
- * Keyed by channel id. This is what `lockdowns.prior_state` holds.
- */
-export type PriorStateByChannel = LockdownPriorState;
-
 /** One lockdown row, as the state machine sees it. */
 export interface LockRecord {
   readonly id: string;
@@ -206,11 +199,13 @@ export interface LockRecord {
   /**
    * What each channel's permission looked like before the lock.
    *
+   * Keyed by channel id. This is what `lockdowns.prior_state` holds.
+   *
    * `null` when the row was written without it — before the column
    * existed, or by hand. The unlock then resets the permission to
    * inherit rather than guessing what it was.
    */
-  readonly priorState: PriorStateByChannel | null;
+  readonly priorState: LockdownPriorState | null;
   readonly authorId: string;
   /** The channel the lockdown was started from, for the closing message. */
   readonly sourceChannelId: string | null;
