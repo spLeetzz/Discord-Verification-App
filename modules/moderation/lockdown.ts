@@ -39,6 +39,8 @@ import type {
 import { PermissionDeniedError } from "../../core/errors.js";
 import { readOverwriteState, planRestore } from "./permissions.js";
 import { evaluateLock, evaluateUnlock } from "./lock-state.js";
+import { deleteMaintenanceChannels } from "./maintenance.js";
+import type { MaintenanceChannelDeletion } from "./maintenance.js";
 import { createLockdown, listLockdowns, removeLockdown } from "./repo.js";
 import type {
   LockPermission,
@@ -104,6 +106,12 @@ export interface LockReleaseResult {
    * previous permissions was missing.
    */
   readonly withoutRecord: number;
+}
+
+/** What turning maintenance mode off did. */
+export interface MaintenanceReleaseResult extends LockReleaseResult {
+  /** What happened to the maintenance channels the lockdown recorded. */
+  readonly maintenanceChannels: MaintenanceChannelDeletion;
 }
 
 /* ------------------------------------------------------------------ *
@@ -610,7 +618,14 @@ export async function maintenanceOn(input: {
   readonly context: LockContext;
   readonly role: Role;
   readonly expireTime?: Date | null;
-  /** The maintenance channels that were created alongside the lockdown. */
+  /**
+   * The ids of the maintenance channels that were created for this
+   * lockdown.
+   *
+   * They are recorded on the lockdown row, in the same statement that
+   * writes it, so `maintenance off` knows exactly which channels the bot
+   * created — and therefore which ones it may delete.
+   */
   readonly maintenanceChannelIds?: readonly string[];
 }): Promise<LockApplyResult> {
   const { context, role } = input;
@@ -634,7 +649,14 @@ export async function maintenanceOn(input: {
 
   if (!decision.allowed) throw new PermissionDeniedError(decision.reason);
 
-  const channels = channelsToHideForMaintenance(guild, role);
+  // The maintenance channels exist for the role under maintenance to talk
+  // in. They are the one thing that stays visible, so they are not hidden
+  // by the mode that created them.
+  const created = new Set(input.maintenanceChannelIds ?? []);
+
+  const channels = channelsToHideForMaintenance(guild, role).filter(
+    (channel) => !created.has(channel.id),
+  );
 
   if (channels.length === 0) {
     throw new PermissionDeniedError(
@@ -658,13 +680,17 @@ export async function maintenanceOn(input: {
 /**
  * Turns maintenance mode off.
  *
+ * The maintenance channels that are deleted are the ones this lockdown
+ * recorded: the ids of the channels the bot created. A channel that
+ * merely shares the name `maintenance-chat` is not the bot's to delete.
+ *
  * @throws PermissionDeniedError when the server is not under maintenance
  *         for that role.
  */
 export async function maintenanceOff(input: {
   readonly context: LockContext;
   readonly role: Role;
-}): Promise<LockReleaseResult> {
+}): Promise<MaintenanceReleaseResult> {
   const { context, role } = input;
   const { guild } = context;
 
@@ -691,13 +717,25 @@ export async function maintenanceOff(input: {
     );
   }
 
-  return releaseLock({
+  const record = decision.record;
+
+  const result = await releaseLock({
     context,
-    record: decision.record,
+    record,
     permission: "ViewChannel",
     target: role,
     restore: decision.restore,
   });
+
+  // The record is read before it is removed, and the ids are on it: the
+  // channels the bot created, and nothing else.
+  const maintenanceChannels = await deleteMaintenanceChannels(
+    guild,
+    record.maintenanceChannelIds,
+    context.reason,
+  );
+
+  return { ...result, maintenanceChannels };
 }
 
 /**

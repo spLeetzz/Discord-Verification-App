@@ -209,6 +209,20 @@ export interface LockRecord {
   readonly authorId: string;
   /** The channel the lockdown was started from, for the closing message. */
   readonly sourceChannelId: string | null;
+  /**
+   * The ids of the maintenance channels the bot created for this lockdown.
+   *
+   * This is what `lockdowns.maintenance_channel_ids` holds, and it is the
+   * **only** thing that says which channels `maintenance off` may delete:
+   * the ids of the channels the bot itself created. A channel that merely
+   * happens to be called `maintenance-chat` is not in this list and is
+   * never deleted.
+   *
+   * It is empty for every lockdown that is not of type `maintenance`. A
+   * maintenance lockdown has no duration, so it has no job row either, and
+   * this list would have nowhere else to live.
+   */
+  readonly maintenanceChannelIds: readonly string[];
 }
 
 /**
@@ -222,6 +236,12 @@ export interface LockRecord {
  * the `lockdowns` row, in `prior_state`, because it is a property of the
  * lockdown and not of the timer. A lockdown with no duration has no job at
  * all, and its state still survives a restart.
+ *
+ * The ids of the maintenance channels are **not** here either: they live on
+ * the `lockdowns` row, in `maintenance_channel_ids`, for the same reason.
+ * A copy of them in the payload would be a second copy to keep in step,
+ * and the payload does not even exist for a maintenance lockdown — it has
+ * no duration.
  */
 export interface LockdownJobPayload {
   /** The lockdown row this job belongs to. */
@@ -234,6 +254,4 @@ export interface LockdownJobPayload {
   readonly roleId: string | null;
   /** The channel the lockdown was started from, for the closing message. */
   readonly sourceChannelId: string | null;
-  /** The maintenance channels `maintenance on` created. */
-  readonly maintenanceChannelIds: readonly string[];
 }

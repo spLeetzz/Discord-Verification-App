@@ -238,6 +238,19 @@ export const lockdowns = pgTable(
      * survive a restart.
      */
     priorState: jsonb("prior_state").$type<LockdownPriorState | null>(),
+    /**
+     * The maintenance channels the bot created for this lockdown.
+     *
+     * A maintenance lockdown has no duration, so it has no job row, and the
+     * ids of the channels the bot created used to travel in the job
+     * payload. Recording them here means `maintenance off` deletes exactly
+     * the channels it created, rather than every channel named
+     * `maintenance-chat` — which would take a moderator's own channel with
+     * it.
+     */
+    maintenanceChannelIds: discordIdArray("maintenance_channel_ids")
+      .notNull()
+      .default(sql`'{}'::text[]`),
     authorId: discordId("author_id").notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),

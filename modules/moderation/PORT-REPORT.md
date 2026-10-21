@@ -225,8 +225,7 @@ lift and where to say so:
   "guildId": "…",
   "channelIds": ["…"],
   "roleId": null,
-  "sourceChannelId": "…",
-  "maintenanceChannelIds": []
+  "sourceChannelId": "…"
 }
 ```
 
@@ -249,7 +248,7 @@ source while porting it.
 | 1 | `mod/views/role.py:35` | `await _.remove_roles(...) if self.take_role else await _.add_roles(...)` parses as `await (X if cond else Y)`, where `X` is already resolved — so the outer `await` raised `TypeError` and **the revert button never reverted anything**. | The branches are parenthesised. The revert does the opposite of the original action: an "add" is undone with a remove, a "remove" with an add. |
 | 2 | `mod/__init__.py:609` | `await Lockdown.get_or_none(...).first()` — `.first()` on a coroutine. **`unlock server` always raised** `AttributeError`. | The lookup is a query. `findLockdown(guildId, "guild")` returns the row or `null`, and the command says "The server is not locked." |
 | 3 | `mod/__init__.py:568-578` | `Lockdown.create(expire_time=duration.dt)` ran **before** the `if duration is None` check, so `lock server` without a duration crashed on `None.dt`. | The row is written with a null expiry, which the column allows. (See §4 for why the row is written at all.) |
-| 4 | `mod/__init__.py:736` | `discord.utils.get(ctx.guild.channels, name="maintenance-chat")` asks a **list** for an attribute — every channel has a name, so it never matched and **the maintenance channels were never deleted**. | The channels are found by a name **predicate** over the channel cache, and — better — by the ids the bot recorded when it created them. The recorded ids are used when there are any; the name predicate is the fallback for when the record is missing. |
+| 4 | `mod/__init__.py:736` | `discord.utils.get(ctx.guild.channels, name="maintenance-chat")` asks a **list** for an attribute — every channel has a name, so it never matched and **the maintenance channels were never deleted**. | The channels are deleted by the **ids the bot recorded when it created them**, and by nothing else. The ids live on the lockdown row, in `maintenance_channel_ids`, because a maintenance lockdown has no duration and so no job row to carry them. A channel that merely shares the name `maintenance-chat` is a moderator's own and is left alone. |
 | 5 | `mod/__init__.py:598`, `:726` | The unlock set `send_messages = True` / `read_messages = True` **unconditionally**, so a channel that had been write-locked before the lockdown was silently opened by the unlock. | The previous state is **recorded** when the lockdown is applied and restored **exactly** when it is lifted. The record distinguishes "no overwrite at all" from "an explicit allow", "an explicit deny" and "inherit". |
 | 6 | `mod/__init__.py:54` | The `clear` group declared a required positional argument alongside its subcommands — ambiguous, and the `None` fallbacks were dead code. | The group is split: `/clear-amount`, `/clear-user`, and the filter subcommands of `/clear`. |
 | 7 | `mod/utils.py:38` | `ctx.channel.purge(..., filter_old=True)` **swallowed the messages Discord refused to delete** (anything older than fourteen days) and reported a smaller number than it had been asked for. | The old messages are filtered out *before* the delete, counted, and reported: "42 messages were removed. ⚠️ 13 matching messages are older than 14 days and could not be deleted." The same report counts the pinned messages and the ones that failed. |

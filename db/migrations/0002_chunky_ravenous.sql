@@ -1,0 +1,1 @@
+ALTER TABLE "lockdowns" ADD COLUMN "maintenance_channel_ids" text[] DEFAULT '{}'::text[] NOT NULL;

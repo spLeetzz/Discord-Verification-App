@@ -6,8 +6,10 @@
  *  1. `maintenance off` looked the maintenance channels up with
  *     `discord.utils.get(ctx.guild.channels, name="maintenance-chat")`,
  *     which asks a list for an attribute — so it never matched and the
- *     channels were never deleted. The channels are now found by a name
- *     predicate, and by the ids the bot recorded when it created them.
+ *     channels were never deleted. The channels are now deleted by the ids
+ *     the bot recorded when it created them, and by nothing else: a
+ *     moderator's own channel called `maintenance-chat` is not the bot's
+ *     to delete.
  *  2. The unlock set `read_messages = True` unconditionally, which opened
  *     a channel that had been read-locked before the maintenance mode
  *     started. The previous state is recorded and restored exactly.
@@ -18,12 +20,12 @@ import { InputError } from "../../../core/errors.js";
 import { plural } from "../../../core/text.js";
 import { formatActionReason } from "../reason.js";
 import { channelsToHideForMaintenance, maintenanceOff, maintenanceOn } from "../lockdown.js";
-import type { LockContext } from "../lockdown.js";
+import type { LockApplyResult, LockContext } from "../lockdown.js";
 import {
   createMaintenanceChannels,
   deleteMaintenanceChannels,
+  describeMaintenanceChannels,
 } from "../maintenance.js";
-import { findLockdown, findLockdownJob } from "../repo.js";
 import type { ModerationCommand } from "../types.js";
 import { prompt } from "../../../core/prompt.js";
 import {
@@ -108,9 +110,9 @@ const maintenanceCommand: ModerationCommand = {
         }
 
         // The maintenance channels are created first so that their ids can
-        // be recorded with the lockdown. They are not in the list of
-        // channels to hide, because that list was worked out before they
-        // existed.
+        // be recorded with the lockdown row. They are not hidden by the
+        // mode that created them — `maintenanceOn` leaves them out of the
+        // list of channels to hide.
         let maintenanceChannelIds: string[] = [];
 
         const createChannels = await prompt(
@@ -126,11 +128,28 @@ const maintenanceCommand: ModerationCommand = {
           );
         }
 
-        const result = await maintenanceOn({
-          context,
-          role,
-          maintenanceChannelIds,
-        });
+        let result: LockApplyResult;
+
+        try {
+          result = await maintenanceOn({
+            context,
+            role,
+            maintenanceChannelIds,
+          });
+        } catch (error) {
+          // The lockdown was refused, so no row was written and the ids of
+          // the channels are recorded nowhere. They are removed again
+          // rather than left behind as orphans.
+          if (maintenanceChannelIds.length > 0) {
+            await deleteMaintenanceChannels(
+              guild,
+              maintenanceChannelIds,
+              reason,
+            );
+          }
+
+          throw error;
+        }
 
         await channel.send(
           `Maintenance mode is on for **${role.name}**. Updated settings for ${plural(result.locked, "channel")}.` +
@@ -147,29 +166,12 @@ const maintenanceCommand: ModerationCommand = {
         return;
       }
 
-      // The record is read before the lockdown is lifted, because lifting
-      // it deletes the record of the maintenance channels.
-      //
-      // The ids are only there when the lockdown has a duration: a
-      // lockdown with no duration has no timer row, and the timer row is
-      // where the ids live. Without them the channels are found by name,
-      // which is what `deleteMaintenanceChannels` falls back to.
-      const record = await findLockdown(
-        guild.id,
-        "maintenance",
-        null,
-        role.id,
-      );
-      const job = record ? await findLockdownJob(record.id) : null;
-      const maintenanceChannelIds = job?.payload.maintenanceChannelIds ?? [];
-
+      // The maintenance channels that are deleted are the ones the
+      // lockdown recorded: the ids of the channels the bot created. The
+      // record holds them, so they are read from the row and not from a
+      // name — a channel that merely shares the name `maintenance-chat`
+      // belongs to whoever made it.
       const result = await maintenanceOff({ context, role });
-
-      const deleted = await deleteMaintenanceChannels(
-        guild,
-        maintenanceChannelIds,
-        reason,
-      );
 
       await channel.send(
         `Maintenance mode is off for **${role.name}**. Restored ${plural(result.restored, "channel")}.` +
@@ -177,7 +179,7 @@ const maintenanceCommand: ModerationCommand = {
           (result.withoutRecord > 0
             ? ` (${result.withoutRecord} had no record of their previous permissions and were reset to inherit.)`
             : "") +
-          (deleted > 0 ? ` Deleted ${plural(deleted, "maintenance channel")}.` : ""),
+          ` ${describeMaintenanceChannels(result.maintenanceChannels)}`,
       );
 
       await interaction.editReply({

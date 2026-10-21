@@ -10,8 +10,13 @@
  * `discord.utils.get(ctx.guild.channels, name="maintenance-chat")`, which
  * asks a *list* for an attribute called `name` — every channel has a
  * `name`, so the lookup never matched and the channels were never deleted
- * (D44). The fix is a name predicate over the channel cache, and the ids
- * the bot recorded when it created them.
+ * (D44).
+ *
+ * The fix is **not** a name predicate. A name predicate would delete every
+ * channel called `maintenance-chat`, and a moderator's own channel may
+ * well be called that. The bot deletes the channels it created, and it
+ * knows which ones those are: the ids it recorded on the lockdown row when
+ * it made them.
  */
 
 import { ChannelType, OverwriteType, PermissionFlagsBits } from "discord.js";
@@ -22,27 +27,6 @@ export const MAINTENANCE_CHANNEL_NAMES = {
   text: "maintenance-chat",
   voice: "maintenance-vc",
 } as const;
-
-/** Every name maintenance mode claims. */
-export const MAINTENANCE_CHANNEL_NAME_LIST: readonly string[] = [
-  MAINTENANCE_CHANNEL_NAMES.text,
-  MAINTENANCE_CHANNEL_NAMES.voice,
-];
-
-/**
- * The channels of a guild with a given name.
- *
- * The name predicate that replaces `discord.utils.get`.
- */
-export function findChannelsByName(guild: Guild, name: string): string[] {
-  const ids: string[] = [];
-
-  for (const channel of guild.channels.cache.values()) {
-    if (channel.name === name) ids.push(channel.id);
-  }
-
-  return ids;
-}
 
 /**
  * Creates the maintenance channels.
@@ -98,46 +82,89 @@ export async function createMaintenanceChannels(
 }
 
 /**
+ * What happened to the maintenance channels.
+ */
+export interface MaintenanceChannelDeletion {
+  /** How many channels the lockdown recorded. */
+  readonly recorded: number;
+  /** How many were deleted. */
+  readonly deleted: number;
+  /** How many could not be deleted. */
+  readonly failed: number;
+  /** How many were already gone. */
+  readonly missing: number;
+}
+
+/**
  * Deletes the maintenance channels.
  *
- * The recorded ids are used when there are any — those are exactly the
- * channels the bot created. When there is no record, the names are used
- * instead, which is the name predicate that fixes Quotient's bug.
+ * **Only the recorded ids are deleted.** They are the ids of the channels
+ * the bot itself created, and nothing else is touched: a channel that
+ * merely shares the name `maintenance-chat` belongs to whoever made it,
+ * and the bot has no business deleting it.
  *
- * @returns how many channels were deleted.
+ * An empty list deletes nothing. The lockdown recorded no maintenance
+ * channels, so there is nothing of the bot's to remove.
+ *
+ * @returns how many channels were deleted, and what happened to the rest.
  */
 export async function deleteMaintenanceChannels(
   guild: Guild,
   recordedIds: readonly string[],
   reason: string,
-): Promise<number> {
-  const deleted = new Set<string>();
-  let count = 0;
+): Promise<MaintenanceChannelDeletion> {
+  let deleted = 0;
+  let failed = 0;
+  let missing = 0;
 
-  const remove = async (id: string): Promise<void> => {
-    if (deleted.has(id)) return;
+  const done = new Set<string>();
+
+  for (const id of recordedIds) {
+    if (done.has(id)) continue;
+    done.add(id);
 
     const channel = guild.channels.cache.get(id);
-    if (!channel) return;
+
+    if (!channel) {
+      // The channel was already deleted, by hand or otherwise.
+      missing += 1;
+      continue;
+    }
 
     try {
       await channel.delete(reason);
-      deleted.add(id);
-      count += 1;
+      deleted += 1;
     } catch {
       // The channel could not be deleted. It is left alone.
+      failed += 1;
     }
-  };
-
-  if (recordedIds.length > 0) {
-    for (const id of recordedIds) await remove(id);
-
-    return count;
   }
 
-  for (const name of MAINTENANCE_CHANNEL_NAME_LIST) {
-    for (const id of findChannelsByName(guild, name)) await remove(id);
+  return { recorded: recordedIds.length, deleted, failed, missing };
+}
+
+/**
+ * The line the command says about the maintenance channels.
+ *
+ * When the lockdown recorded no channels the moderator is told so, rather
+ * than being left to wonder whether anything was deleted.
+ */
+export function describeMaintenanceChannels(
+  deletion: MaintenanceChannelDeletion,
+): string {
+  if (deletion.recorded === 0) {
+    return "No maintenance channels were recorded for this lockdown, so none were deleted.";
   }
 
-  return count;
+  let text = `Deleted ${deletion.deleted} of ${deletion.recorded} maintenance channels.`;
+
+  if (deletion.failed > 0) {
+    text += ` (${deletion.failed} could not be deleted.)`;
+  }
+
+  if (deletion.missing > 0) {
+    text += ` (${deletion.missing} were already gone.)`;
+  }
+
+  return text;
 }

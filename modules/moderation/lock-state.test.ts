@@ -23,6 +23,7 @@ function record(overrides: Partial<LockRecord> = {}): LockRecord {
     priorState: null,
     authorId: "author-1",
     sourceChannelId: "channel-1",
+    maintenanceChannelIds: [],
     ...overrides,
   };
 }

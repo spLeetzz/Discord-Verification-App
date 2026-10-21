@@ -15,6 +15,13 @@
       "when": 1792577853684,
       "tag": "0001_amused_khan",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792578932999,
+      "tag": "0002_chunky_ravenous",
+      "breakpoints": true
     }
   ]
 }

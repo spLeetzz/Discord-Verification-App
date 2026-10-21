@@ -158,6 +158,10 @@ channels from a role — `@everyone` unless a role is named — by taking
 may create a `maintenance-chat` text channel and a `maintenance-vc`
 voice channel that the role keeps access to.
 
+The ids of the channels it created are recorded on the lockdown row, in
+`maintenance_channel_ids`. `maintenance off` deletes exactly those, and
+nothing else.
+
 ```
      ┌──────────────────────────────┐
      │            visible           │
@@ -364,10 +368,16 @@ tc = discord.utils.get(ctx.guild.channels, name="maintenance-chat")
 `discord.utils.get` asks a *list* for an attribute called `name`. Every
 channel has a name, so the lookup never matched and the channels stayed.
 
-**Now:** the channels are found by a name **predicate** over the channel
-cache (`findChannelsByName`), and — better — by the ids the bot recorded
-when it created them. The recorded ids are used when there are any; the
-name predicate is the fallback for when the record is missing.
+**Now:** the bot deletes the channels it created, and it knows which ones
+those are — the ids it recorded when it made them. The ids live on the
+lockdown row, in the `maintenance_channel_ids` column, and they are written
+with the row in the same statement, so a maintenance lockdown that has no
+duration — and so no job row — still knows what to delete after a restart.
+
+**Nothing is deleted by name.** A name predicate would delete every channel
+called `maintenance-chat`, and a moderator's own channel may well be called
+that. When the lockdown recorded no channels, nothing is deleted and the
+moderator is told so.
 
 ### 5. The unlock opened channels that had been locked on purpose
 

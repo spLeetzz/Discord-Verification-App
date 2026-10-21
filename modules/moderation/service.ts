@@ -74,6 +74,7 @@ export type {
   LockContext,
   LockReleaseResult,
   LockableChannel,
+  MaintenanceReleaseResult,
 } from "./lockdown.js";
 
 /* The maintenance channels */
@@ -81,8 +82,9 @@ export {
   MAINTENANCE_CHANNEL_NAMES,
   createMaintenanceChannels,
   deleteMaintenanceChannels,
-  findChannelsByName,
+  describeMaintenanceChannels,
 } from "./maintenance.js";
+export type { MaintenanceChannelDeletion } from "./maintenance.js";
 
 /* Roles */
 export {

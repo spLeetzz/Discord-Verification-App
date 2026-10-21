@@ -83,6 +83,11 @@ function toLockRecord(
     // A category lockdown records the *category* in `channel_id`, and a
     // category is not a channel anybody can be told about in a message.
     sourceChannelId: type === "category" ? null : row.channelId,
+    // The maintenance channels only mean something for a maintenance
+    // lockdown. Every other type reads as an empty list, whatever the
+    // column happens to say.
+    maintenanceChannelIds:
+      type === "maintenance" ? row.maintenanceChannelIds : [],
   };
 }
 
@@ -159,7 +164,14 @@ export interface NewLockdown {
   readonly priorState: LockdownPriorState | null;
   /** Where the lockdown was started from — the closing message goes there. */
   readonly sourceChannelId: string | null;
-  /** The maintenance channels `maintenance on` created. */
+  /**
+   * The maintenance channels the bot created for this lockdown.
+   *
+   * They are written with the row, in the same statement, so the record of
+   * which channels the bot owns survives a restart. A maintenance lockdown
+   * has no duration, so it has no job row, and the job row was never a
+   * place this could live.
+   */
   readonly maintenanceChannelIds: readonly string[];
 }
 
@@ -187,6 +199,12 @@ export async function createLockdown(input: NewLockdown): Promise<LockRecord> {
         channelIds: [...input.channelIds],
         expireTime: input.expireTime,
         priorState: input.priorState,
+        // The maintenance channels go in with the row, in the same
+        // statement: one write, one row, and the ids of the channels the
+        // bot created are as durable as the lock itself. Only a
+        // maintenance lockdown has any.
+        maintenanceChannelIds:
+          input.type === "maintenance" ? [...input.maintenanceChannelIds] : [],
         authorId: input.authorId,
       })
       .returning();
@@ -205,7 +223,6 @@ export async function createLockdown(input: NewLockdown): Promise<LockRecord> {
         channelIds: [...record.channelIds],
         roleId: record.roleId,
         sourceChannelId: input.sourceChannelId,
-        maintenanceChannelIds: [...input.maintenanceChannelIds],
       };
 
       await tx.insert(jobs).values({
@@ -276,11 +293,6 @@ export function parseLockdownJobPayload(
       typeof candidate.sourceChannelId === "string"
         ? candidate.sourceChannelId
         : null,
-    maintenanceChannelIds: Array.isArray(candidate.maintenanceChannelIds)
-      ? candidate.maintenanceChannelIds.filter(
-          (id): id is string => typeof id === "string",
-        )
-      : [],
   };
 }
 
