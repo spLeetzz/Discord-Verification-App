@@ -347,7 +347,97 @@ queries that ship filter on exactly those.
 | `INT4` tourney id on `media_partners` | `uuid` | the source has an INT4/INT8 mismatch — a latent overflow that uuid makes impossible |
 | `INT` pk on `media_partners.channel_id` | surrogate `id` + unique `channel_id` | same pattern for `tourney_group_lists.message_id` |
 
-## S13. Open items — decided
+## S14. Verified against the live database
+
+The schema is built, migrated and applied to the running Postgres. Verified
+on the live database, not asserted in prose:
+
+**35 tables.** 30 unique constraints, 14 check constraints, 15 foreign keys.
+All five renamed tables present (`autorole_configs`, `autopurge_configs`,
+`blocklist`, `media_partner_slots`, `user_settings`).
+
+`slots` carries `uuid` PK, `text[]` members, `timestamptz` timestamps,
+`UNIQUE (scrim_id, num)`, the state `CHECK`, and one the spec did not ask for
+and that should stay:
+
+```sql
+CHECK (state <> 'claimed' OR owner_user_id IS NOT NULL)
+```
+
+A claimed slot must have an owner. The source had no such rule and could
+leave a claimed slot with nobody attached to it.
+
+**The claim race, run against the live database:**
+
+```
+--- two claims, same slot, one transaction ---
+UPDATE ... WHERE scrim_id=$1 AND num=1 AND state='free'  -- userA
+  result  | userA won
+  UPDATE 1
+UPDATE ... WHERE scrim_id=$1 AND num=1 AND state='free'  -- userB
+  (0 rows)
+  UPDATE 0
+--- final state ---
+ num |  state  | owner_user_id | team_name
+-----+---------+---------------+-----------
+   1 | claimed | userA         | Team A
+```
+
+One row updated, one rejected, one owner. Under the source's design — a
+free-slot array on the scrim plus a row per claimed slot — the same sequence
+produces **two rows claiming slot 1**. The database now enforces the
+invariant; there is no lock to get wrong.
+
+**Three places the spec and the source pulled in different directions**, and
+how they were resolved:
+
+1. **`guild_entitlements` has no `id`.** §S4 says every table has one; §S5
+   says its primary key is `(guild_id, feature)`. Both cannot hold. The
+   specific rule wins: the table has `created_at` and `updated_at` but no
+   `id`, and the composite primary key *is* the invariant. The pair is the
+   key; an `id` would be a second, redundant identity.
+2. **The `open_days` containment `CHECK` does not forbid duplicates.**
+   `open_days <@ ARRAY['monday',...]::text[]` rejects an unknown weekday but
+   accepts `['monday','monday']`. Postgres has no "distinct elements" array
+   constraint. The set semantics come from the read side — as they did in
+   the source.
+3. **`duration_days` and the lifetime plan.** Quotient's lifetime plan is
+   25,185 days, not literally forever. That number was preserved exactly
+   rather than replaced with a "forever" sentinel, because the payment
+   provider wants a finite period.
+
+**Four things the schema cannot express cleanly**, all accepted
+deliberately:
+
+- **The one-active-alert rule is a partial unique *index*, not a
+  constraint.** `CREATE UNIQUE INDEX alerts_active_unique ON alerts (active)
+  WHERE active`. Postgres has no partial constraint, only partial indexes.
+  This is the only correct translation, but an audit that counts
+  `pg_constraint` rows will not see it.
+- **`uuid v4` is the Postgres default's promise, not a schema guarantee.**
+  `gen_random_uuid()` is v4 in Postgres 16 and needs no extension, but the
+  version is not visible in the schema — `pg_typeof` cannot distinguish v4
+  from v7. If v7 ever becomes the default, ids change shape silently.
+- **`plan_snapshot` is `jsonb`, so its shape is not database-enforced.** The
+  `{name, price, duration_days}` shape lives in a TS interface. A malformed
+  snapshot written by raw SQL would not be caught. Same tradeoff as every
+  other enum here: the union lives in TypeScript, the constraint in SQL, and
+  the two are kept in sync by hand.
+- **`jobs.event` is a `CHECK`, not a foreign key to a dispatch table.** An
+  event name that no handler implements satisfies the check and would sit in
+  the table forever. A lookup table with an FK would put the handler registry
+  in the database — and the handler registry is code.
+
+**`command_usage` retention** is `db/retention.ts` — `pruneCommandUsage()`,
+called by the scheduler daily. The 30-day policy is S10.
+
+**The plan seed upserts, it does not reseed.** Quotient's `insert_plans()`
+deleted every row on each startup, which would destroy the paid transactions
+pointing at a plan. `seedPremiumPlans()` upserts on a natural key (`code`);
+a plan removed from the catalogue is left alone, and the receipt reads
+`plan_snapshot` regardless.
+
+## S15. Open items — decided
 
 | # | Question | Decision |
 |---|---|---|
