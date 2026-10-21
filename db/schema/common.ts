@@ -180,6 +180,12 @@ export type TourneyStatus = (typeof TOURNEY_STATUSES)[number];
 /** D15 — the features a guild can be entitled to. */
 export const ENTITLEMENT_FEATURES = [
   "scrim_slots",
+  // The tournament equivalents of `scrim_slots`: the custom reaction
+  // emojis, the registration "required lines", the duplicate-tag
+  // allowance, and the tournament count limit. They are a separate
+  // entitlement because scrims and tournaments are separate features —
+  // one purchase of the other must not unlock these.
+  "tourney_features",
   "slot_reminders",
   "idp_transfer",
   "extra_channels",
@@ -281,5 +287,7 @@ export const JOB_EVENTS = [
   // The community area's daily maintenance pass: the command-usage
   // retention prune, and anything else that runs once a day.
   "community_daily",
+  // The tournament's daily registration-open.
+  "tourney_open",
 ] as const;
 export type JobEvent = (typeof JOB_EVENTS)[number];

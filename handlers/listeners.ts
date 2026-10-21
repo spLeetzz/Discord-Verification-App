@@ -91,8 +91,9 @@ const AREAS: readonly AreaDefinition[] = [
     interactions: "Tourneys",
     listeners: "Tourneys",
     job: "Tourneys",
-    // The room-credential post deletes itself after thirty minutes.
-    jobEvents: ["msg_delete"],
+    // The room-credential post deletes itself after thirty minutes, and the
+    // daily registration-open.
+    jobEvents: ["msg_delete", "tourney_open"],
   },
 ];
 

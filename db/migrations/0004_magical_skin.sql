@@ -1,0 +1,4 @@
+ALTER TABLE "guild_entitlements" DROP CONSTRAINT "guild_entitlements_feature_check";--> statement-breakpoint
+ALTER TABLE "jobs" DROP CONSTRAINT "jobs_event_check";--> statement-breakpoint
+ALTER TABLE "guild_entitlements" ADD CONSTRAINT "guild_entitlements_feature_check" CHECK ("guild_entitlements"."feature" in ('scrim_slots', 'tourney_features', 'slot_reminders', 'idp_transfer', 'extra_channels', 'screenshot_types', 'success_message'));--> statement-breakpoint
+ALTER TABLE "jobs" ADD CONSTRAINT "jobs_event_check" CHECK ("jobs"."event" in ('reminder', 'msg_delete', 'scrim_open', 'autoclean', 'scrim_match', 'scrim_ban', 'scrim_reserve', 'lockdown', 'user_premium', 'guild_premium', 'vote', 'alert', 'autopurge', 'community_daily', 'tourney_open'));

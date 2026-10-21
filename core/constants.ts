@@ -106,6 +106,8 @@ export type ScrimBanType = (typeof ScrimBanType)[keyof typeof ScrimBanType];
  */
 export const PremiumFeature = {
   scrimSlots: "scrim_slots",
+  /** The tournament equivalents of the scrim slot features. */
+  tourneyFeatures: "tourney_features",
   slotReminders: "slot_reminders",
   idpTransfer: "idp_transfer",
   extraChannels: "extra_channels",
