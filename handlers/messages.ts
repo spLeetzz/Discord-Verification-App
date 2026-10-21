@@ -31,6 +31,25 @@ export function selectMembersToAdd(
 }
 
 /**
+ * The answer to a mention.
+ *
+ * Short, and it says the one thing a member who typed at the bot needs:
+ * that it is here, and that its commands are slash commands.
+ */
+async function answerMention(message: Message): Promise<void> {
+  try {
+    await message.reply({
+      content:
+        "I am here. My commands are slash commands — type `/` and pick one. " +
+        "In a verification ticket, mention the players you want added and I will add them.",
+      allowedMentions: { users: [] },
+    });
+  } catch (err) {
+    logger.warn(`[Message] Could not answer the mention: ${errorMessage(err)}`);
+  }
+}
+
+/**
  * Ticket threads are private, so a mention on its own does not let anyone
  * else see the thread. When the captain mentions his players, the bot adds
  * them to the thread so they can post their own IGN, UID and screenshots.
@@ -51,6 +70,24 @@ export async function handleMessage(message: Message): Promise<void> {
   }
 
   const channel = message.channel;
+
+  /**
+   * **A mention is answered.**
+   *
+   * The original bot greeted anyone who mentioned it and told them the
+   * prefix. Ours said nothing at all, so a member who typed at the bot
+   * in the registration channel got silence and no way to tell that it
+   * was even there.
+   *
+   * The answer says what the bot is and how to use it, because the
+   * commands are slash commands and a mention is the one place a member
+   * can ask.
+   */
+  if (message.mentions.users.has(message.client.user.id)) {
+    await answerMention(message);
+
+    return;
+  }
 
   if (channel.type !== ChannelType.PrivateThread) return;
 
