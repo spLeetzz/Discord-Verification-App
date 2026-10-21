@@ -5,13 +5,17 @@
  * the router dispatches on the prefix. The router **never guesses**: an id
  * whose prefix nobody registered is logged and refused politely.
  *
- * Two rules that callers have to know:
+ * Three rules that callers have to know:
  *
  *  - **Registration order matters.** The first registered prefix that
  *    matches an id wins, so a specific prefix has to be registered before
  *    a general one. `scrims:editor` before `scrims`.
  *  - **A prefix matches on a segment boundary.** `scrims` matches
  *    `scrims:claim:42`, and does *not* match `scrims_extra:claim:42`.
+ *  - **A prefix must not be a segment-prefix of another prefix.** If an
+ *    area registers `identity:ssmod` and `identity:ssmod:setup`, one of
+ *    the two can never be reached. The router says so — loudly, and by
+ *    name — when the second one is registered.
  *
  * There is one explicit exception: the frozen `verify_btn:<eventKey>` id
  * of the existing verification flow. `verify_btn` is not a module name —
@@ -71,6 +75,15 @@ interface Registration<H> {
   handler: H;
 }
 
+/**
+ * The kind of component a registration owns.
+ *
+ * Buttons, select menus and modals are separate namespaces: the router
+ * dispatches each kind on its own list, so a button prefix never shadows
+ * a modal prefix.
+ */
+type RouterCategory = "button" | "select menu" | "modal";
+
 const buttonHandlers: Registration<ButtonHandler>[] = [];
 const selectHandlers: Registration<SelectHandler>[] = [];
 const modalHandlers: Registration<ModalHandler>[] = [];
@@ -102,18 +115,103 @@ function payloadOf(prefix: string, customId: string): string | null {
 }
 
 /**
+ * The area a prefix belongs to.
+ *
+ * The first segment of a custom id names its owner (`custom-id.ts`), so
+ * the first segment of a prefix names the area that registered it. The
+ * warning names it, because "somebody registered a prefix" is not
+ * actionable and "the identity area registered two of them" is.
+ */
+function areaOf(prefix: string): string {
+  const cut = prefix.indexOf(CUSTOM_ID_SEPARATOR);
+
+  return cut === -1 ? prefix : prefix.slice(0, cut);
+}
+
+/**
+ * Does `shadow` own every id that `covered` owns?
+ *
+ * The router matches on a segment boundary, so `shadow` owns every id
+ * `covered` owns exactly when `shadow` is a **proper segment-prefix** of
+ * `covered`:
+ *
+ *  - `identity:ssmod` owns every id `identity:ssmod:setup:42` owns;
+ *  - `identity:ssmod:wizard` owns none of them.
+ *
+ * Two equal prefixes are a duplicate rather than a shadow, so this is
+ * false for them.
+ */
+function shadows(shadow: string, covered: string): boolean {
+  if (shadow === covered) return false;
+
+  return matches(shadow, covered);
+}
+
+/**
  * Adds a registration, replacing a duplicate prefix in place.
  *
  * Replacing in place keeps the registration order stable when a module
  * registers itself twice — which happens when a module is reloaded.
+ *
+ * Two things go wrong here, and both of them are invisible to the type
+ * system and to the tests, so both are logged:
+ *
+ *  - a **duplicate** prefix — two areas claiming the same id space, or
+ *    an area registering twice. The last registration wins, and the other
+ *    one is a feature that silently does nothing.
+ *  - a **shadowing pair** — two prefixes where one is a segment-prefix
+ *    of the other. The router takes the first matching prefix, so one of
+ *    the two can never be reached. Which one depends on the order, and
+ *    the warning says which.
  */
-function add<H>(registry: Registration<H>[], prefix: string, handler: H): void {
+function add<H>(
+  registry: Registration<H>[],
+  prefix: string,
+  handler: H,
+  category: RouterCategory,
+): void {
+  const area = areaOf(prefix);
   const existing = registry.find((entry) => entry.prefix === prefix);
 
   if (existing) {
-    logger.warn(`[Router] Replacing the handler for "${prefix}".`);
+    logger.warn(
+      `[Router] Duplicate ${category} prefix "${prefix}" in area "${area}". ` +
+        `The earlier handler is replaced and the last registration wins. ` +
+        `Two areas claiming the same id space, or an area registering twice, ` +
+        `is a bug: the loser of it is a feature that silently does nothing.`,
+    );
+
     existing.handler = handler;
+
     return;
+  }
+
+  for (const entry of registry) {
+    if (shadows(entry.prefix, prefix)) {
+      // The earlier prefix is the broader one, so it owns the new prefix
+      // outright and the new prefix can never be reached.
+      logger.warn(
+        `[Router] Prefix shadowing in area "${area}": the ${category} prefix ` +
+          `"${entry.prefix}" (registered first) shadows "${prefix}" (registered now). ` +
+          `Every id that matches "${prefix}" also matches "${entry.prefix}", and the ` +
+          `router takes the first matching prefix, so "${prefix}" is unreachable — ` +
+          `the handler behind it never runs. Register the more specific prefix first, ` +
+          `or give the two prefixes their own namespaces.`,
+      );
+    } else if (shadows(prefix, entry.prefix)) {
+      // The new prefix is the broader one, so it would own the earlier
+      // prefix — but the earlier prefix is first in the list and keeps
+      // its own ids. The pair works only because of the order.
+      logger.warn(
+        `[Router] Prefix shadowing in area "${area}": the ${category} prefix ` +
+          `"${entry.prefix}" (registered first) wins over "${prefix}" (registered now) — ` +
+          `the router takes the first matching prefix. "${prefix}" owns every id ` +
+          `"${entry.prefix}" owns, so the pair works only because of the registration ` +
+          `order: registering "${prefix}" first would make "${entry.prefix}" unreachable. ` +
+          `Register one prefix and dispatch on the second segment, or namespace the two ` +
+          `so that neither can shadow the other.`,
+      );
+    }
   }
 
   registry.push({ prefix, handler });
@@ -126,21 +224,21 @@ function add<H>(registry: Registration<H>[], prefix: string, handler: H): void {
  * @param handler called with the interaction and the rest of the id.
  */
 export function registerButton(prefix: string, handler: ButtonHandler): void {
-  add(buttonHandlers, prefix, handler);
+  add(buttonHandlers, prefix, handler, "button");
 }
 
 /**
  * Registers the handler for a select-menu prefix.
  */
 export function registerSelect(prefix: string, handler: SelectHandler): void {
-  add(selectHandlers, prefix, handler);
+  add(selectHandlers, prefix, handler, "select menu");
 }
 
 /**
  * Registers the handler for a modal prefix.
  */
 export function registerModal(prefix: string, handler: ModalHandler): void {
-  add(modalHandlers, prefix, handler);
+  add(modalHandlers, prefix, handler, "modal");
 }
 
 /**

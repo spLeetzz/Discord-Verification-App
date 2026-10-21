@@ -20,15 +20,16 @@ import {
   FREE_TIER_FEATURES,
   freeTierLimit,
 } from "./premium.js";
-import type { CappedFreeTierKey, FreeTierKey } from "./premium.js";
+import type { FreeTierKey } from "./premium.js";
 
 /**
  * The features the table caps.
  *
- * Typed as {@link CappedFreeTierKey}, so a name that is not a capped
- * feature would not compile — the list cannot drift from the type.
+ * `satisfies` checks that every name is a gated feature, so a typo
+ * would not compile; the test below pins which of them the table
+ * actually has an entry for.
  */
-const CAPPED: CappedFreeTierKey[] = [
+const CAPPED = [
   "scrims",
   "tourneys",
   "tagcheckChannels",
@@ -37,7 +38,7 @@ const CAPPED: CappedFreeTierKey[] = [
   "ssverifyConfigs",
   "mediaPartners",
   "autopurgeChannels",
-];
+] as const satisfies readonly FreeTierKey[];
 
 /**
  * The gated features the table says nothing about.
@@ -46,12 +47,12 @@ const CAPPED: CappedFreeTierKey[] = [
  * not typos: "unlimited" is a property of a feature, not of a missing
  * name.
  */
-const UNLIMITED: FreeTierKey[] = [
+const UNLIMITED = [
   "slotReminders",
   "idpTransfer",
   "screenshotTypes",
   "successMessage",
-];
+] as const satisfies readonly FreeTierKey[];
 
 describe("core/premium — the free-tier table", () => {
   it("holds the limits the code enforces", () => {

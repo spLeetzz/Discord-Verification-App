@@ -101,7 +101,8 @@ safe on its own.
 ## `premium.ts`
 
 `EntitlementLookup`, `Entitlement`, `EntitlementSource`, `FREE_TIER`,
-`freeTierLimit`, and a re-export of `PremiumFeature`.
+`FREE_TIER_FEATURES`, `FreeTierKey`, `FreeTierLimits`, `freeTierLimit`,
+and a re-export of `PremiumFeature`.
 
 The seam between `core/` and the premium module. `EntitlementLookup` is the
 interface `guards.ts` depends on; the premium engineer implements it
@@ -112,7 +113,16 @@ against `guild_entitlements`.
   lives here because `core/` is the lower layer: `modules/premium/
   limits.ts` re-exports it, and the perk list is generated from it, so
   there is one table and not two that have to agree.
-- A gate with no entry in the table is unlimited.
+- `FreeTierKey` names the *gated features*, not the table's keys:
+  `FREE_TIER` is a partial record over it. A feature the table has no
+  entry for is unlimited, and `freeTierLimit` answers `null` for it.
+  Read a limit with `freeTierLimit`, not with `FREE_TIER[key]` — the
+  table only has an entry for the features it caps.
+- `FreeTierLimits` is the table's own type. The features it caps keep
+  their exact number (`3`, not `number | undefined`), so a reader that
+  knows the feature is capped reads a definite value. The capped half
+  is derivable from the type, so a caller that wants it does not have
+  to keep its own list.
 - `core/guards.ts` never reads a number from the table: `countLimitGuard`
   takes the limit as a parameter, so no allowance is hard-coded in the
   runtime layer.

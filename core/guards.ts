@@ -266,9 +266,10 @@ export interface CountLimitOptions {
  * The guild may not create one more of something.
  *
  * The limit comes from the free-tier allowance table (D45) — the canonical
- * one lives in `modules/premium/limits.ts` — so the number in the code and
- * the number in the perk list cannot drift apart. It is passed in rather
- * than read here, so no allowance is hard-coded in the runtime layer.
+ * one lives in `core/premium.ts`, and the premium area re-exports it — so the
+ * number in the code and the number in the perk list cannot drift apart. It
+ * is passed in rather than read here, so no allowance is hard-coded in the
+ * runtime layer.
  */
 export function countLimitGuard(options: CountLimitOptions): Guard {
   const { limit, label, count, entitlements, feature } = options;

@@ -526,7 +526,7 @@ it and therefore needs it before the transaction is created.
 | | |
 |---|---|
 | `npm run typecheck` | **My files are clean** — zero errors in `modules/premium/` or `commands/premium/`. The repository typechecks as a whole as well. |
-| `npm test` | **My 8 test files, 161 tests, all pass.** The repository's suite is green as well — 82 files, 1199 tests. |
+| `npm test` | **My 8 test files, 161 tests, all pass.** The repository's suite is green as well — 83 files, 1205 tests. |
 | `npm run smoke` | Not re-run for this change; my two command files load and serialise correctly on their own. |
 | `deploy.ts` | No change needed — it scans `commands/<folder>/*.ts` one level deep and picks up both premium commands. |
 

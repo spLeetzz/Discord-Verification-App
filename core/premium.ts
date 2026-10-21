@@ -164,15 +164,6 @@ const FREE_TIER_VALUES = {
 } as const;
 
 /**
- * The features the table has an entry for.
- *
- * The capped half of {@link FreeTierKey}. A record that names the
- * *allowances* — a label per allowance, say — wants this set and not
- * the whole union: a feature with no entry is not an allowance.
- */
-export type CappedFreeTierKey = keyof typeof FREE_TIER_VALUES;
-
-/**
  * The type of {@link FREE_TIER}.
  *
  * A partial record over {@link FreeTierKey}: the features the table
@@ -180,11 +171,18 @@ export type CappedFreeTierKey = keyof typeof FREE_TIER_VALUES;
  * capped reads a definite value; the features it does not cap have no
  * entry and read as `undefined`. That absence is the "unlimited" case,
  * and it is what makes it expressible.
+ *
+ * The set of features that do carry a number is derivable from this
+ * type, so a caller that wants the capped half — a label per
+ * allowance, say — does not have to keep its own list.
  */
 export type FreeTierLimits = {
-  readonly [K in CappedFreeTierKey]: (typeof FREE_TIER_VALUES)[K];
+  readonly [K in keyof typeof FREE_TIER_VALUES]: (typeof FREE_TIER_VALUES)[K];
 } & {
-  readonly [K in Exclude<FreeTierKey, CappedFreeTierKey>]?: undefined;
+  readonly [K in Exclude<
+    FreeTierKey,
+    keyof typeof FREE_TIER_VALUES
+  >]?: undefined;
 };
 
 /**
