@@ -68,6 +68,13 @@ import { isForeignPartnerChannel } from "./views/partner.js";
  */
 const DENIAL_MESSAGES: Record<string, string> = {
   botmention: "Don't mention bots. Mention your real teammates.",
+  /**
+   * The tournament is open but nobody can register in it, because the
+   * success role has not been set. The refusal used to be silent, so a
+   * member who typed in the registration channel got nothing at all.
+   */
+  notready:
+    "This tournament is not ready for registrations yet — the success role has not been set. A moderator has to set it in the tournament's settings.",
   nomention: "You did not mention enough teammates.",
   banned: "You are banned from the tournaments. You cannot register.",
   multiregister:
@@ -105,7 +112,21 @@ export async function handleRegistrationMessage(
   }
 
   if (tourney.status !== "open") return false;
-  if (!tourney.roleId) return false;
+
+  /**
+   * **A tournament with no success role cannot register anybody.**
+   *
+   * There is nothing to give a member when they register, so the
+   * intake refused every message in the registration channel — and it
+   * refused them *silently*, so a member who typed there got no reply
+   * and no clue that the bot was even listening. It is answered now,
+   * through the same refusal the other refusals use.
+   */
+  if (!tourney.roleId) {
+    await refuseRegistration(message, tourney, "notready");
+
+    return false;
+  }
 
   const member = message.guild.members.cache.get(message.author.id);
 
