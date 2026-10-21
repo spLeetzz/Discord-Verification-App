@@ -337,10 +337,10 @@ It writes one embed per event:
 | Event | Where |
 |---|---|
 | A ban | the ban panel's modal (`handleBanModal`) |
-| A punish | the slotlist's punish modal (`handlePunishModal`) |
 | An unban | the ban panel's "Unban Users" and "Unban All" buttons |
 | An unban | `/scrims unban` |
 | A ban that ran out | the `scrim_ban` job |
+| A punish | the slot area's flow (`modules/slots/ban-log.ts`) — the slot area owns the published slot list, and with it the Punish button |
 
 **The write never fails the ban.** The ban is already in the database
 by the time the log is written, and every failure in the log path is

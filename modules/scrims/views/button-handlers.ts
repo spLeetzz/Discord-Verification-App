@@ -14,7 +14,11 @@
 
 import { ChannelType, MessageFlags } from "discord.js";
 import type { ButtonInteraction, EmbedBuilder } from "discord.js";
-import { awaitSelect } from "../../../core/select.js";
+import {
+  awaitChannelSelect,
+  awaitRoleSelect,
+  awaitSelect,
+} from "../../../core/select.js";
 import { prompt } from "../../../core/prompt.js";
 import { parseNaturalTime } from "../../../core/time.js";
 import { Day, PremiumFeature } from "../../../core/constants.js";
@@ -54,9 +58,15 @@ import { buildSlotlistPanel } from "./slotlist.js";
 import { publishSlotList } from "../../slots/index.js";
 import { writeBanLog } from "./ban-log.js";
 import { openRegistrationFlow, closeRegistrationFlow } from "./lifecycle.js";
-import { punishSelection } from "./modal-handlers.js";
-import { awaitChannelSelect, awaitRoleSelect } from "./select-flow.js";
 import { openSlotPicker } from "./slot-pick.js";
+
+/**
+ * How long a channel or a role menu stays open.
+ *
+ * The menu waits for a moderator who may have to go and look a channel
+ * up first, so it waits longer than the core default of one minute.
+ */
+const PICKER_TIMEOUT_MS = 120_000;
 
 /**
  * May the guild have one more scrim?
@@ -250,8 +260,9 @@ async function handleWizardButton(
     }
 
     case "set_reg_channel": {
-      const channelId = await awaitChannelSelect(interaction, {
+      const [channelId] = await awaitChannelSelect(interaction, {
         placeholder: "Where do the teams register?",
+        timeoutMs: PICKER_TIMEOUT_MS,
       });
 
       if (!channelId) return;
@@ -268,8 +279,9 @@ async function handleWizardButton(
     }
 
     case "set_slot_channel": {
-      const channelId = await awaitChannelSelect(interaction, {
+      const [channelId] = await awaitChannelSelect(interaction, {
         placeholder: "Where is the slotlist posted?",
+        timeoutMs: PICKER_TIMEOUT_MS,
       });
 
       if (!channelId) return;
@@ -282,8 +294,9 @@ async function handleWizardButton(
     }
 
     case "set_role": {
-      const roleId = await awaitRoleSelect(interaction, {
+      const [roleId] = await awaitRoleSelect(interaction, {
         placeholder: "The role a team gets when it registers",
+        timeoutMs: PICKER_TIMEOUT_MS,
       });
 
       if (!roleId) return;
@@ -474,11 +487,12 @@ async function handleEditorButton(
 
   if (field.kind === "channel") {
     // D17: a channel is a select menu, never a typed mention.
-    const channelId = await awaitChannelSelect(interaction, {
+    const [channelId] = await awaitChannelSelect(interaction, {
       placeholder:
         field.key === "set_reg_channel"
           ? "Where do the teams register?"
           : "Where is the slotlist posted?",
+      timeoutMs: PICKER_TIMEOUT_MS,
     });
 
     if (!channelId) return;
@@ -501,8 +515,9 @@ async function handleEditorButton(
 
   if (field.kind === "role") {
     // D17: a role is a select menu, never a typed mention.
-    const roleId = await awaitRoleSelect(interaction, {
+    const [roleId] = await awaitRoleSelect(interaction, {
       placeholder: rolePlaceholder(field.key),
+      timeoutMs: PICKER_TIMEOUT_MS,
     });
 
     if (!roleId) return;
@@ -1417,12 +1432,6 @@ async function handleSlotlistButton(
     return;
   }
 
-  if (action === "punish") {
-    await punishSlot(interaction, scrim);
-
-    return;
-  }
-
   if (action === "info") {
     await showSlotInfo(interaction, scrim);
 
@@ -1581,61 +1590,6 @@ async function repostSlotlist(
     content: `Slotlist sent: ${link}`,
     flags: MessageFlags.Ephemeral,
   });
-}
-
-/** The slotlist's "Punish" button: ban the teams of the chosen slots. */
-async function punishSlot(
-  interaction: ButtonInteraction,
-  scrim: Awaited<ReturnType<typeof repo.getScrim>> & object,
-): Promise<void> {
-  const slots = await repo.listSlots(scrim.id);
-  const claimed = slots.filter((slot) => slot.state === "claimed");
-
-  if (claimed.length === 0) {
-    await fail(interaction, "No slot in the scrim to punish.");
-
-    return;
-  }
-
-  const chosen = await awaitSelect(
-    interaction,
-    claimed.slice(0, 25).map((slot) => ({
-      label: `Slot ${slot.num}`.slice(0, 100),
-      value: slot.id,
-      description: (slot.teamName ?? "—").slice(0, 100),
-    })),
-    {
-      maxValues: Math.min(claimed.length, 25),
-      placeholder: "Select the slots to ban",
-      question: "Select the slots to ban.",
-      ephemeral: true,
-    },
-  );
-
-  if (chosen.length === 0) return;
-
-  punishSelection.set(scrim.id, chosen);
-
-  await interaction.showModal(
-    buildModal({
-      customId: scrimsId("modal", "punish", scrim.id),
-      title: "Ban time and reason",
-      texts: [
-        {
-          id: "duration",
-          label: "Ban duration (optional)",
-          placeholder: "7 days, 24h, Friday at 6pm",
-          maxLength: 64,
-        },
-        {
-          id: "reason",
-          label: "Reason (optional)",
-          placeholder: "Why are they banned?",
-          maxLength: 200,
-        },
-      ],
-    }),
-  );
 }
 
 /** The slotlist's "Info" button. */

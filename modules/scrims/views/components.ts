@@ -241,7 +241,7 @@ export interface ModalSpec {
  * Discord allows five inputs per modal. A channel or a role is **not**
  * a modal input — D17 wants a select menu for those, and a select menu
  * is a message component, so those flows open an ephemeral menu
- * instead (see `select-flow.ts`).
+ * instead (see `core/select.ts`).
  */
 export function buildModal(spec: ModalSpec): ModalBuilder {
   if (spec.title.length > 45) {

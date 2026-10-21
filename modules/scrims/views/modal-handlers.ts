@@ -63,9 +63,6 @@ export async function handleScrimsModal(
     case "ban":
       await handleBanModal(interaction, parts);
       return;
-    case "punish":
-      await handlePunishModal(interaction, parts);
-      return;
     case "slot_team":
       await handleSlotTeamModal(interaction, parts);
       return;
@@ -546,78 +543,6 @@ async function handleBanModal(
 
   await acknowledgeAndRender(interaction, buildBanPanel(scrim, bans));
 }
-
-/** The punish form: for how long, and why. */
-async function handlePunishModal(
-  interaction: ModalSubmitInteraction,
-  parts: readonly string[],
-): Promise<void> {
-  const [scrimId] = parts;
-
-  if (!scrimId) {
-    await fail(interaction, "That form is no longer active.");
-
-    return;
-  }
-
-  const scrim = await repo.getScrim(scrimId);
-
-  if (!scrim) {
-    await fail(interaction, "This scrim no longer exists.");
-
-    return;
-  }
-
-  const duration = modalText(interaction, "duration");
-  const reason = modalText(interaction, "reason");
-
-  const expires = duration ? parseNaturalTime(`in ${duration}`) : null;
-
-  const slotIds = punishSelection.get(scrimId) ?? [];
-  punishSelection.delete(scrimId);
-
-  const guild = interaction.guild;
-
-  for (const slotId of slotIds) {
-    const slot = await repo.getSlot(slotId);
-
-    if (!slot) continue;
-
-    await service.banUsers({
-      scrimId: scrim.id,
-      mode: 1,
-      leaderId: slot.ownerUserId ?? "",
-      memberIds: slot.members,
-      teamName: slot.teamName,
-      reason: reason.length > 0 ? reason : null,
-      expires,
-    });
-
-    if (guild && slot.ownerUserId) {
-      await writeBanLog(guild, {
-        action: "banned",
-        userId: slot.ownerUserId,
-        scrimName: scrim.name,
-        reason: reason.length > 0 ? reason : null,
-        expires,
-        moderatorId: interaction.user.id,
-      });
-    }
-  }
-
-  const bans = await repo.listBans(scrim.id);
-
-  await acknowledgeAndRender(interaction, buildBanPanel(scrim, bans));
-}
-
-/**
- * The slots a punish is waiting on.
- *
- * A multi-select's values cannot travel in a custom id — twenty-five
- * uuids do not fit in a hundred characters — so the selection is kept
- * in a token store, keyed by the scrim (D18).
- */
-export const punishSelection = new Map<string, string[]>();
 
 /* ------------------------------------------------------------------ *
  * The slotlist editor

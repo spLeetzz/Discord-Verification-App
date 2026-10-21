@@ -423,11 +423,17 @@ channel again replaces the row.
 | `/scrims banlog channel:#scrim-logs` | Sets it. The bot must be able to see the channel and send messages in it. |
 
 The channel is written to by `views/ban-log.ts`, on every ban and every
-unban: a ban from the ban panel, a punish from the slotlist, an unban
-from the ban panel, an unban from `/scrims unban`, and a ban whose time
-was up. **The write never fails the ban** — the ban is already in the
-database by the time the log is written, and every failure in the log
-path is swallowed.
+unban: a ban from the ban panel, an unban from the ban panel, an unban
+from `/scrims unban`, and a ban whose time was up. **The write never
+fails the ban** — the ban is already in the database by the time the log
+is written, and every failure in the log path is swallowed.
+
+**A punish is the slot area's.** The published slot list — and with it
+the **Punish** button — belongs to the slot area, so the punish flow and
+its ban log entries live there (`modules/slots/ban-log.ts`). Both areas
+write to the same `ban_logs` channel, so the trail is one trail. This
+area used to carry a second, unreachable copy of the punish flow; it is
+gone.
 
 The source wrote the same entries to the same kind of channel; what it
 did not have is a way to *choose* the channel per guild without a
