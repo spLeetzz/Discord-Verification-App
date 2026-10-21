@@ -40,6 +40,7 @@ export const PREMIUM_FEATURES: readonly PremiumFeature[] = ENTITLEMENT_FEATURES;
  */
 export const FEATURE_LABELS: Record<PremiumFeature, string> = {
   scrim_slots: "Extra scrim slots",
+  tourney_features: "Extra tournament features",
   slot_reminders: "Slot reminders",
   idp_transfer: "IDP transfer",
   extra_channels: "Extra tag-check and easy-tag channels",
