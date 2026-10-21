@@ -100,7 +100,25 @@ export async function handleRegistrationMessage(
 
   const channelId = message.channelId;
 
-  if (!tourneyChannelCache.has(channelId)) return false;
+  /**
+   * **Every way out of here is logged.**
+   *
+   * A registration that is not taken used to be a silent return, so a
+   * member who typed in the registration channel got no reply and no
+   * clue why. There are six ways out of this function and each one is a
+   * different reason, so the log says which one it was.
+   */
+  const skip = (reason: string): false => {
+    logger.info(
+      `[Tourneys] A message in ${channelId} was not a registration: ${reason}.`,
+    );
+
+    return false;
+  };
+
+  if (!tourneyChannelCache.has(channelId)) {
+    return skip("the channel is not a registration channel of any tournament");
+  }
 
   const tourney = await repo.getTourneyByRegistrationChannel(channelId);
 
@@ -108,10 +126,12 @@ export async function handleRegistrationMessage(
     // The tournament was deleted. The cache is stale.
     tourneyChannelCache.remove(channelId);
 
-    return false;
+    return skip("the cached tournament no longer exists");
   }
 
-  if (tourney.status !== "open") return false;
+  if (tourney.status !== "open") {
+    return skip(`the tournament ${tourney.id} is ${tourney.status}, not open`);
+  }
 
   /**
    * **A tournament with no success role cannot register anybody.**
@@ -130,7 +150,9 @@ export async function handleRegistrationMessage(
 
   const member = message.guild.members.cache.get(message.author.id);
 
-  if (member && (await isTourneyMod(member))) return false;
+  if (member && (await isTourneyMod(member))) {
+    return skip("the author is a tournament moderator");
+  }
 
   if (!canRegister(message, tourney)) {
     logger.warn(
