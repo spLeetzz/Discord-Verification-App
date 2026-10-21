@@ -14,7 +14,8 @@ import type { SlashCommandIntegerOption } from "discord.js";
 import { InputError } from "../../../core/errors.js";
 import { PURGE_SEARCH_LIMIT, validateContains } from "../purge.js";
 import { clearReactions, purgeMessages } from "../purge-service.js";
-import type { ModerationCommand, PurgeFilter, PurgeOutcome } from "../types.js";
+import type { ModerationCommand, PurgeFilter } from "../types.js";
+import { outcomePanel, purgePanel, replyPanel } from "../views/panels.js";
 import {
   MODERATION_PERMISSIONS,
   missingPermission,
@@ -35,43 +36,6 @@ function searchOption(
     .setDescription("How many messages to look at.")
     .setMinValue(1)
     .setMaxValue(PURGE_SEARCH_LIMIT);
-}
-
-/**
- * What the purge did, in words.
- *
- * The point of this command is that it is honest: Discord refuses to
- * delete anything older than fourteen days, and Quotient's purge swallowed
- * that. The numbers that could not be deleted are reported.
- */
-function describeOutcome(outcome: PurgeOutcome): string {
-  const lines = [
-    `${outcome.deleted} message${outcome.deleted === 1 ? " was" : "s were"} removed.`,
-  ];
-
-  if (outcome.tooOld > 0) {
-    lines.push(
-      `⚠️ ${outcome.tooOld} matching message${outcome.tooOld === 1 ? " is" : "s are"} older than 14 days and could not be deleted.`,
-    );
-  }
-
-  if (outcome.pinned > 0) {
-    lines.push(
-      `📌 ${outcome.pinned} pinned message${outcome.pinned === 1 ? "" : "s"} could not be deleted.`,
-    );
-  }
-
-  if (outcome.failed > 0) {
-    lines.push(
-      `❌ ${outcome.failed} message${outcome.failed === 1 ? "" : "s"} could not be deleted.`,
-    );
-  }
-
-  if (outcome.matched === 0) {
-    lines.push("No messages matched.");
-  }
-
-  return lines.join("\n");
 }
 
 const clearCommand: ModerationCommand = {
@@ -170,9 +134,26 @@ const clearCommand: ModerationCommand = {
       if (subcommand === "reactions") {
         const outcome = await clearReactions({ channel, search });
 
-        await interaction.editReply({
-          content: `Removed ${outcome.removed} reaction${outcome.removed === 1 ? "" : "s"} from ${outcome.withReactions} message${outcome.withReactions === 1 ? "" : "s"}.`,
-        });
+        await replyPanel(
+          interaction,
+          outcomePanel({
+            kind: "neutral",
+            title: "Reactions cleared",
+            description: `Removed ${outcome.removed} reaction${
+              outcome.removed === 1 ? "" : "s"
+            } from ${outcome.withReactions} message${
+              outcome.withReactions === 1 ? "" : "s"
+            }.`,
+            fields: [
+              {
+                name: "Messages looked at",
+                value: String(outcome.scanned),
+                inline: true,
+              },
+            ],
+            footer: "The messages themselves stay where they are.",
+          }),
+        );
 
         return;
       }
@@ -180,7 +161,16 @@ const clearCommand: ModerationCommand = {
       const filter = buildFilter(subcommand, interaction);
       const outcome = await purgeMessages({ channel, filter, search });
 
-      await interaction.editReply({ content: describeOutcome(outcome) });
+      await replyPanel(
+        interaction,
+        purgePanel(outcome, {
+          title: "Messages purged",
+          description: `${outcome.deleted} message${
+            outcome.deleted === 1 ? " was" : "s were"
+          } removed.`,
+          emptyDescription: "No messages matched the filter.",
+        }),
+      );
     });
   },
 };

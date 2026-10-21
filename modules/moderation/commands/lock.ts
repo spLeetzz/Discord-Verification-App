@@ -16,7 +16,8 @@ import {
 } from "../lockdown.js";
 import type { LockContext } from "../lockdown.js";
 import type { ModerationCommand } from "../types.js";
-import { prompt } from "../../../core/prompt.js";
+import { confirmAction } from "../views/confirm.js";
+import { announcePanel, outcomePanel, replyPanel } from "../views/panels.js";
 import {
   MODERATION_PERMISSIONS,
   missingPermission,
@@ -116,28 +117,60 @@ const lockCommand: ModerationCommand = {
           );
         }
 
-        const confirmed = await prompt(
-          interaction,
-          `**Do you want me to continue?**\n\`${channels.length}\` channel${channels.length === 1 ? "" : "s"} have send messages enabled for @everyone, and I can edit ${channels.length} of them.`,
-        );
+        const confirmed = await confirmAction(interaction, {
+          title: "Lock server",
+          question: `\`${channels.length}\` channel${
+            channels.length === 1 ? "" : "s"
+          } have send messages enabled for @everyone, and I can edit ${
+            channels.length
+          } of them.`,
+          kind: "destructive",
+          confirmLabel: "Lock server",
+          footer: "The channels stay locked until `/unlock server` or the expiry.",
+        });
 
         if (!confirmed) {
-          await interaction.editReply({ content: "Alright, aborting." });
+          await replyPanel(
+            interaction,
+            outcomePanel({
+              kind: "neutral",
+              title: "Lock server cancelled",
+              description: "Nothing was locked.",
+              footer: "Run the command again when you are ready.",
+            }),
+          );
           return;
         }
 
         const result = await lockServer({ context, duration });
 
-        await channel.send(
-          `Locked down \`${result.locked} channel${result.locked === 1 ? "" : "s"}\`` +
-            (result.failed > 0 ? ` (Failed: ${result.failed})` : "") +
-            (duration ? ` for ${duration.toISOString()}` : "") +
-            ".",
-        );
-
-        await interaction.editReply({
-          content: `Locked down ${result.locked} channel${result.locked === 1 ? "" : "s"}.`,
+        const panel = outcomePanel({
+          kind: "destructive",
+          title: "Server locked",
+          description: `Locked down ${result.locked} channel${
+            result.locked === 1 ? "" : "s"
+          }.`,
+          fields: [
+            { name: "Channels", value: String(result.locked), inline: true },
+            ...(result.failed > 0
+              ? [{ name: "Failed", value: String(result.failed), inline: true }]
+              : []),
+            ...(duration
+              ? [
+                  {
+                    name: "Until",
+                    value: `<t:${Math.floor(duration.getTime() / 1000)}:F>`,
+                    inline: true,
+                  },
+                ]
+              : []),
+          ],
+          footer: "Run `/unlock server` to lift the lockdown.",
         });
+
+        await announcePanel(channel, panel);
+
+        await replyPanel(interaction, panel);
 
         return;
       }
@@ -145,16 +178,30 @@ const lockCommand: ModerationCommand = {
       const target = await resolveLockableChannel(interaction, "channel");
       const result = await lockChannel({ context, channel: target, duration });
 
-      await channel.send(
-        `Locked down **${target.name}**` +
-          (duration ? ` until <t:${Math.floor(duration.getTime() / 1000)}:R>` : "") +
-          (result.failed > 0 ? ` (Failed: ${result.failed})` : "") +
-          ".",
-      );
-
-      await interaction.editReply({
-        content: `Locked down **${target.name}**.`,
+      const panel = outcomePanel({
+        kind: "destructive",
+        title: "Channel locked",
+        description: `Locked down **${target.name}**.`,
+        fields: [
+          ...(duration
+            ? [
+                {
+                  name: "Until",
+                  value: `<t:${Math.floor(duration.getTime() / 1000)}:F>`,
+                  inline: true,
+                },
+              ]
+            : []),
+          ...(result.failed > 0
+            ? [{ name: "Failed", value: String(result.failed), inline: true }]
+            : []),
+        ],
+        footer: "Run `/unlock` to lift the lockdown.",
       });
+
+      await announcePanel(channel, panel);
+
+      await replyPanel(interaction, panel);
     });
   },
 };

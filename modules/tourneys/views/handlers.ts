@@ -33,7 +33,7 @@ import type {
   ModalSubmitInteraction,
   StringSelectMenuBuilder,
 } from "discord.js";
-import { EMBED_COLOR, ERROR_COLOR } from "../../../core/constants.js";
+import { DANGER_COLOR, SUCCESS_COLOR } from "../../../core/ui.js";
 import { canUseTourneyMod } from "../guards.js";
 import type { TourneysInteraction } from "../guards.js";
 import * as repo from "../repo.js";
@@ -181,6 +181,9 @@ export async function updatePanel(
  * The message is a **follow-up**, never an edit of the panel. A panel is
  * a persistent thing that other moderators are looking at; a refusal
  * that replaced it would take the panel away from them.
+ *
+ * The colour carries the news: red for a refusal, green for a good
+ * outcome.
  */
 export async function fail(
   interaction: PanelInteraction,
@@ -189,7 +192,7 @@ export async function fail(
 ): Promise<void> {
   const embed = new EmbedBuilder()
     .setDescription(message)
-    .setColor(options.ok ? EMBED_COLOR : ERROR_COLOR);
+    .setColor(options.ok ? SUCCESS_COLOR : DANGER_COLOR);
 
   const ephemeral = options.ephemeral ?? true;
 

@@ -176,6 +176,43 @@ export function linkButton(options: {
 }
 
 /**
+ * Checks a message's components against Discord's budget.
+ *
+ * **Why this is checked centrally.** Discord allows five rows of
+ * components per message, and five components in a row. A panel that
+ * goes over is refused by the API with an opaque 400, and the panel
+ * simply does not appear — the moderator presses a button and *nothing
+ * happens*. That is exactly the kind of failure that reaches a user as
+ * "the bot is broken".
+ *
+ * A panel over the row limit once shipped, so the check is made where
+ * the message is sent rather than in each area's own builder: an area
+ * that forgets it gets a clear error instead of a silent failure.
+ *
+ * @throws RangeError when the message is over budget.
+ */
+export function assertComponentBudget(rows: readonly unknown[]): void {
+  if (rows.length > MAX_COMPONENT_ROWS) {
+    throw new RangeError(
+      `a message may hold at most ${MAX_COMPONENT_ROWS} rows, got ${rows.length}`,
+    );
+  }
+
+  for (const [index, row] of rows.entries()) {
+    const components = (row as { components?: unknown }).components;
+
+    // A row that is not a row of components is not ours to count.
+    if (!Array.isArray(components)) continue;
+
+    if (components.length > MAX_BUTTONS_PER_ROW) {
+      throw new RangeError(
+        `row ${index + 1} may hold at most ${MAX_BUTTONS_PER_ROW} components, got ${components.length}`,
+      );
+    }
+  }
+}
+
+/**
  * A row of any component.
  *
  * `actionRow` is for buttons. A select menu cannot go in a button row —

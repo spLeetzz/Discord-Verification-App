@@ -20,6 +20,7 @@ import { denialMessage, InputError } from "../../../core/errors.js";
 import { hasGuildPermissions } from "../../../core/guards.js";
 import type { Guard } from "../../../core/guards.js";
 import { getGuildMember } from "../../../utils/member.js";
+import { refusalPanel, replyPanel } from "../views/panels.js";
 import type { LockableChannel } from "../lockdown.js";
 import { isLockableChannel } from "../lockdown.js";
 
@@ -184,6 +185,10 @@ export async function requireRole(
  * A refusal is an answer, not a crash: the user is shown the message and
  * the command stops. Anything else is re-thrown, so the dispatcher reports
  * it as a crash.
+ *
+ * The refusal is shown in the bot's refusal panel — the red one every
+ * other area uses — so a moderator sees the same thing wherever the
+ * command lives.
  */
 export async function runCommand(
   interaction: ChatInputCommandInteraction,
@@ -195,7 +200,10 @@ export async function runCommand(
     const message = denialMessage(error);
 
     if (message !== null) {
-      await interaction.editReply({ content: message });
+      await replyPanel(
+        interaction,
+        refusalPanel(interaction.commandName, message),
+      );
       return;
     }
 

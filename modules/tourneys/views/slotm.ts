@@ -2,8 +2,8 @@
  * The tournament slot manager.
  *
  * The public panel a team uses to manage its own registration:
- * **Cancel My Slot**, **My Groups**, **Change Team Name** and **Swap
- * Groups**.
+ * **Cancel my slot**, **My groups**, **Change team name** and **Swap
+ * groups**.
  *
  * The panel is **persistent**: it lives in its own channel and the
  * tournament's row carries the channel and the message id, so the panel
@@ -16,18 +16,19 @@
  * chat message (`slotm.py:169-193`) — a chat-message collector, which is
  * the class of flow D17 bans. A modal is a native Discord primitive: it
  * is addressed to the person who opened it, it cannot be hijacked by
- * somebody else typing in the channel, and it cannot be swallowed by the
- * bot's own message handler.
+ * somebody else typing in the channel, and it cannot be swallowed by
+ * the bot's own message handler.
  */
 
-import { ButtonStyle, EmbedBuilder } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
-import type { TourneyRecord } from "../types.js";
 import {
+  actionRow,
   assertComponentBudget,
-  button,
-  buttonRow,
-} from "./components.js";
+  dangerButton,
+  panelEmbed,
+  primaryButton,
+  secondaryButton,
+} from "../../../core/ui.js";
+import type { TourneyRecord } from "../types.js";
 import { tourneysId } from "./ids.js";
 import type { Panel, PanelComponents } from "./handlers.js";
 
@@ -35,45 +36,55 @@ import type { Panel, PanelComponents } from "./handlers.js";
  * The slot-manager panel.
  */
 export function buildSlotManagerPanel(tourney: TourneyRecord): Panel {
-  const embed = new EmbedBuilder()
-    .setTitle("Tournament Slot Manager")
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      [
-        `**${tourney.name}**`,
-        "",
-        "• Click **Cancel My Slot** below to cancel your slot.",
-        "• Click **My Groups** to see the slots you hold.",
-        "• Click **Change Team Name** to rename your team.",
-        "",
-        "*Note that cancelling a slot is irreversible.*",
-      ].join("\n"),
-    );
+  const embed = panelEmbed({
+    title: "Tournament slot manager",
+    description: `Your slot in **${tourney.name}**.`,
+    fields: [
+      { name: "Tournament", value: `\`${tourney.name}\``, inline: true },
+      { name: "Slots", value: `\`${tourney.totalSlots}\``, inline: true },
+      {
+        name: "Registration",
+        value: tourney.status === "open" ? "`Open`" : "`Closed`",
+        inline: true,
+      },
+    ],
+    footer: "Cancelling a slot cannot be undone.",
+  });
 
-  const rows: PanelComponents = [
-    buttonRow(
-      button({
-        customId: tourneysId("slotm_cancel", tourney.id),
-        label: "Cancel My Slot",
-        style: ButtonStyle.Danger,
-      }),
-      button({
-        customId: tourneysId("slotm", tourney.id, "info"),
-        label: "My Groups",
-        style: ButtonStyle.Success,
-      }),
-      button({
+  const rows: PanelComponents = [];
+
+  // The first row holds the one thing to do next.
+  rows.push(
+    actionRow(
+      primaryButton({
         customId: tourneysId("slotm_rename", tourney.id),
-        label: "Change Team Name",
-        style: ButtonStyle.Primary,
-      }),
-      button({
-        customId: tourneysId("slotm_swap", tourney.id),
-        label: "Swap Groups",
-        style: ButtonStyle.Primary,
+        label: "Change team name",
       }),
     ),
-  ];
+  );
+
+  rows.push(
+    actionRow(
+      secondaryButton({
+        customId: tourneysId("slotm", tourney.id, "info"),
+        label: "My groups",
+      }),
+      secondaryButton({
+        customId: tourneysId("slotm_swap", tourney.id),
+        label: "Swap groups",
+      }),
+    ),
+  );
+
+  // Cancelling a slot destroys it, and it cannot be undone.
+  rows.push(
+    actionRow(
+      dangerButton({
+        customId: tourneysId("slotm_cancel", tourney.id),
+        label: "Cancel my slot",
+      }),
+    ),
+  );
 
   assertComponentBudget(rows);
 

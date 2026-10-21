@@ -1,31 +1,17 @@
 /**
  * The shared building blocks of the tournaments panels.
  *
- * Everything the panels have in common lives here: the editor's field
- * table, the row builders and the modals.
+ * **The design language lives in `core/ui.ts`.** The buttons, the rows,
+ * the modals, the embeds and the component budget are all built there,
+ * so the tournaments area looks like the rest of the bot and there is
+ * one way to build a panel.
  *
- * **The component budget is real.** Discord allows 25 components per
- * message, five rows, and five buttons per row. The panel is laid out in
- * rows of five and counted at build time, so a panel that would break
- * Discord's limits fails in development rather than in production.
+ * What is left here is what `core/ui.ts` does not have:
+ *
+ *  - the editor's field table, which is a domain fact and not a design
+ *    decision;
+ *  - the id the modal handlers read a value from.
  */
-
-import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  EmbedBuilder,
-  ModalBuilder,
-  StringSelectMenuBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-} from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
-
-/** Discord's own limits. */
-export const MAX_ROWS = 5;
-export const MAX_COMPONENTS_PER_ROW = 5;
-export const MAX_COMPONENTS_PER_MESSAGE = 25;
 
 /**
  * How a field is edited.
@@ -74,104 +60,73 @@ export interface EditorField {
  * The order matters: the buttons carry a letter from `a` onwards and the
  * embed lists the fields in the same order, so a moderator learns one
  * layout instead of two.
+ *
+ * The labels are **sentence case**, like every other label in the bot.
  */
 export const EDITOR_FIELDS: readonly EditorField[] = [
   { key: "set_name", label: "Name", kind: "text" },
-  { key: "set_reg_channel", label: "Registration Channel", kind: "channel" },
-  { key: "set_confirm_channel", label: "Confirm Channel", kind: "channel" },
-  { key: "set_role", label: "Success Role", kind: "role" },
-  { key: "set_mentions", label: "Mentions", kind: "number" },
-  { key: "set_slots", label: "Slots", kind: "number" },
-  { key: "set_group_size", label: "Teams per Group", kind: "number" },
+  { key: "set_reg_channel", label: "Registration channel", kind: "channel" },
+  { key: "set_confirm_channel", label: "Confirm channel", kind: "channel" },
+  { key: "set_role", label: "Success role", kind: "role" },
+  { key: "set_mentions", label: "Required mentions", kind: "number" },
+  { key: "set_slots", label: "Total slots", kind: "number" },
+  { key: "set_group_size", label: "Teams per group", kind: "number" },
   { key: "set_emojis", label: "Reactions", kind: "emojis", premium: true },
-  { key: "set_ping_role", label: "Ping Role", kind: "role" },
-  { key: "set_open_role", label: "Open Role", kind: "role" },
+  { key: "set_ping_role", label: "Ping role", kind: "role" },
+  { key: "set_open_role", label: "Open role", kind: "role" },
   {
     key: "toggle_multireg",
-    label: "Multi-Register",
+    label: "Multi-register",
     kind: "toggle",
     column: "multiregister",
   },
   {
     key: "toggle_teamname",
-    label: "Team Compulsion",
+    label: "Team compulsion",
     kind: "toggle",
     column: "teamnameCompulsion",
   },
   {
     key: "toggle_dup_name",
-    label: "Duplicate Team Name",
+    label: "Duplicate team name",
     kind: "toggle",
     column: "noDuplicateName",
   },
   {
     key: "toggle_del_reject",
-    label: "Autodelete Rejected",
+    label: "Autodelete rejected",
     kind: "toggle",
     column: "autodeleteRejects",
   },
   {
     key: "set_lines",
-    label: "Required Lines",
+    label: "Required lines",
     kind: "number",
     premium: true,
   },
   {
     key: "toggle_dup_tags",
-    label: "Duplicate / Fake Tags",
+    label: "Duplicate / fake tags",
     kind: "toggle",
     column: "allowDuplicateTags",
     premium: true,
   },
-  { key: "set_start_from", label: "Slotlist Start From", kind: "number" },
-  { key: "set_open_days", label: "Open Days", kind: "days" },
-  { key: "set_open_time", label: "Open Time", kind: "schedule" },
-  { key: "set_success_message", label: "Success Message", kind: "text" },
+  { key: "set_start_from", label: "Slotlist start from", kind: "number" },
+  { key: "set_open_days", label: "Open days", kind: "days" },
+  { key: "set_open_time", label: "Open time", kind: "schedule" },
+  { key: "set_success_message", label: "Success message", kind: "text" },
 ];
 
-/** The letter a field's button carries. */
+/**
+ * The letter a field's button carries.
+ *
+ * A table of twenty fields does not fit twenty long labels into five
+ * rows — Discord truncates them. The letter does not truncate, and the
+ * embed lists the fields in the same order with the same letters, so
+ * one layout is learned instead of two.
+ */
 export function fieldLetter(index: number): string {
   return String.fromCharCode(97 + index);
-}
-
-/** A row of buttons. */
-export function buttonRow(
-  ...buttons: readonly ButtonBuilder[]
-): ActionRowBuilder<ButtonBuilder> {
-  if (buttons.length > MAX_COMPONENTS_PER_ROW) {
-    throw new RangeError(
-      `a row may hold at most ${MAX_COMPONENTS_PER_ROW} buttons, got ${buttons.length}`,
-    );
-  }
-
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons);
-}
-
-/** One button. */
-export function button(options: {
-  readonly customId: string;
-  readonly label?: string;
-  readonly emoji?: string;
-  readonly style?: ButtonStyle;
-  readonly disabled?: boolean;
-}): ButtonBuilder {
-  const builder = new ButtonBuilder()
-    .setCustomId(options.customId)
-    .setStyle(options.style ?? ButtonStyle.Secondary);
-
-  if (options.label) builder.setLabel(options.label);
-  if (options.emoji) builder.setEmoji(options.emoji);
-
-  if (options.disabled !== undefined) builder.setDisabled(options.disabled);
-
-  return builder;
-}
-
-/** A row that holds one select menu. */
-export function selectRow(
-  menu: StringSelectMenuBuilder,
-): ActionRowBuilder<StringSelectMenuBuilder> {
-  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
 }
 
 /* ------------------------------------------------------------------ *
@@ -180,72 +135,6 @@ export function selectRow(
 
 /** The custom id of the input inside a modal. */
 export const MODAL_VALUE_ID = "value";
-
-/** One text input of a modal. */
-export interface ModalText {
-  readonly id?: string;
-  readonly label: string;
-  readonly placeholder?: string;
-  readonly value?: string;
-  readonly required?: boolean;
-  readonly maxLength?: number;
-}
-
-/** How a modal is shaped. */
-export interface ModalSpec {
-  readonly customId: string;
-  readonly title: string;
-  /** A text input. */
-  readonly text?: ModalText;
-  /** Several text inputs. */
-  readonly texts?: readonly ModalText[];
-}
-
-/**
- * Builds a modal.
- *
- * Discord allows five inputs per modal. A channel or a role is **not** a
- * modal input — D17 wants a select menu for those, and a select menu is a
- * message component, so those flows open an ephemeral menu instead.
- */
-export function buildModal(spec: ModalSpec): ModalBuilder {
-  if (spec.title.length > 45) {
-    throw new RangeError("a modal title may be at most 45 characters");
-  }
-
-  const modal = new ModalBuilder()
-    .setCustomId(spec.customId)
-    .setTitle(spec.title);
-
-  const texts: ModalText[] = [
-    ...(spec.text ? [spec.text] : []),
-    ...(spec.texts ?? []),
-  ];
-
-  if (texts.length > 5) {
-    throw new RangeError("a modal may hold at most five inputs");
-  }
-
-  for (const text of texts) {
-    const input = new TextInputBuilder()
-      .setCustomId(text.id ?? MODAL_VALUE_ID)
-      .setLabel(text.label)
-      .setStyle(TextInputStyle.Short);
-
-    if (text.placeholder) input.setPlaceholder(text.placeholder);
-    if (text.value) input.setValue(text.value);
-    if (text.required !== undefined) input.setRequired(text.required);
-    if (text.maxLength !== undefined) {
-      input.setMaxLength(Math.min(text.maxLength, 4000));
-    }
-
-    modal.addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(input),
-    );
-  }
-
-  return modal;
-}
 
 /** A text input's value, or an empty string. */
 export function modalText(
@@ -261,37 +150,6 @@ export function modalText(
   }
 }
 
-/** The embed a panel shows. */
-export function panelEmbed(
-  title: string,
-  description: string,
-): EmbedBuilder {
-  return new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(description)
-    .setColor(EMBED_COLOR);
-}
-
-/**
- * Counts the components of a set of rows.
- *
- * The layout is checked at build time, so a panel that would break
- * Discord's limits fails in development rather than in production.
- */
-export function assertComponentBudget(
-  rows: readonly { readonly components: readonly unknown[] }[],
-): void {
-  if (rows.length > MAX_ROWS) {
-    throw new RangeError(
-      `a message may hold at most ${MAX_ROWS} rows, got ${rows.length}`,
-    );
-  }
-
-  const total = rows.reduce((sum, row) => sum + row.components.length, 0);
-
-  if (total > MAX_COMPONENTS_PER_MESSAGE) {
-    throw new RangeError(
-      `a message may hold at most ${MAX_COMPONENTS_PER_MESSAGE} components, got ${total}`,
-    );
-  }
-}
+/* ------------------------------------------------------------------ *
+ * Modals
+ * ------------------------------------------------------------------ */

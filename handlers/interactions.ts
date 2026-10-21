@@ -79,6 +79,9 @@ async function runGuards(
 
 export async function handleInteraction(interaction: Interaction): Promise<void> {
   await handleCommand(interaction, async () => {
+    const started = Date.now();
+    const firstResponse = markFirstResponse(interaction);
+
     try {
       // The block list is consulted for **every** interaction type, not
       // just chat-input commands. A blocked member who cannot type a
@@ -124,8 +127,174 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
       }
 
       await reportError(interaction, err);
+    } finally {
+      reportSlowInteraction(interaction, started, firstResponse());
+      await ensureAnswered(interaction, firstResponse());
     }
   });
+}
+
+/**
+ * How long an interaction may go without an answer before it is worth
+ * shouting about.
+ *
+ * Discord's limit is three seconds. The alarm goes off a little before
+ * that, so the log says what was slow while there is still something to
+ * be done about it.
+ */
+const RESPONSE_ALARM_MS = 2_500;
+
+/**
+ * Makes sure an interaction is never left unanswered.
+ *
+ * Discord expires an interaction after three seconds, and the user is
+ * shown "the bot didn't respond in time" — which says nothing about what
+ * actually happened, and looks like the bot is broken. A handler that
+ * returns without answering is a bug, but the user should still get an
+ * answer.
+ *
+ * So: if the handler finished and nothing was sent, something is sent
+ * now. If the handler was *slow* the interaction has already expired and
+ * there is nothing to send — that case is logged, because it is the one
+ * that needs a fix rather than a message.
+ */
+async function ensureAnswered(
+  interaction: Interaction,
+  firstResponse: number | null,
+): Promise<void> {
+  if (firstResponse !== null) return;
+
+  const what =
+    interaction.isChatInputCommand()
+      ? `command /${interaction.commandName}`
+      : "customId" in interaction && interaction.customId
+        ? `custom id "${interaction.customId}"`
+        : "interaction";
+
+  logger.error(
+    `[Interaction] ${what} was never answered. Discord expires an interaction after three seconds, so the user saw 'didn't respond in time'.`,
+  );
+
+  if (!interaction.isRepliable()) return;
+  if (interaction.replied || interaction.deferred) return;
+
+  await interaction
+    .reply({
+      content: "Something went wrong handling that. Please try again.",
+      flags: MessageFlags.Ephemeral,
+    })
+    .catch(() => undefined);
+}
+
+/**
+ * Discord gives an interaction **three seconds** to be answered. A
+ * handler that takes longer is expired by Discord, and the user is shown
+ * "the bot didn't respond in time" — which says nothing about what was
+ * slow or why.
+ *
+ * So the time to the *first* response is measured, and a slow one is
+ * logged with the interaction it was. The first response is what the
+ * clock is about: a handler that opens a select menu answers the button
+ * immediately and then waits for the user, which is not slow.
+ *
+ * @returns a function that gives the moment of the first response, or
+ *          `null` if there has not been one.
+ */
+function markFirstResponse(interaction: Interaction): () => number | null {
+  let at: number | null = null;
+
+  const mark = (): void => {
+    if (at === null) at = Date.now();
+  };
+
+  // The methods are on the prototype, so an own property shadows them.
+  // `showModal` is in the list: opening a modal *is* the answer to an
+  // interaction, and leaving it out would report a perfectly good
+  // handler as unanswered.
+  const methods = [
+    "reply",
+    "editReply",
+    "update",
+    "deferReply",
+    "deferUpdate",
+    "followUp",
+    "respond",
+    "showModal",
+  ] as const;
+
+  for (const method of methods) {
+    const original = (interaction as unknown as Record<string, unknown>)[method];
+
+    if (typeof original !== "function") continue;
+
+    (interaction as unknown as Record<string, unknown>)[method] = function (
+      ...args: unknown[]
+    ) {
+      mark();
+
+      return (original as (...a: unknown[]) => unknown).apply(this, args);
+    };
+  }
+
+  /**
+   * The alarm.
+   *
+   * It fires while the handler is *still running*, because a handler
+   * that never returns never reaches the `finally` block — and a handler
+   * that never returns is exactly the one that expires the
+   * interaction. Waiting for it to finish would mean waiting forever.
+   */
+  const timer = setTimeout(() => {
+    if (at !== null) return;
+
+    const what =
+      interaction.isChatInputCommand()
+        ? `command /${interaction.commandName}`
+        : "customId" in interaction && interaction.customId
+          ? `custom id "${interaction.customId}"`
+          : "interaction";
+
+    logger.error(
+      `[Interaction] ${what} had not been answered after ${RESPONSE_ALARM_MS}ms. Discord expires an interaction after 3000ms, so the user saw 'didn't respond in time'.`,
+    );
+  }, RESPONSE_ALARM_MS);
+
+  timer.unref();
+
+  return () => {
+    clearTimeout(timer);
+
+    return at;
+  };
+}
+
+/**
+ * How long an interaction took to be answered.
+ *
+ * A warning for a slow one — over a second and a half — because Discord's
+ * limit is three seconds and a slow answer is a bug waiting to happen.
+ */
+function reportSlowInteraction(
+  interaction: Interaction,
+  started: number,
+  firstResponse: number | null,
+): void {
+  if (firstResponse === null) return;
+
+  const elapsed = firstResponse - started;
+
+  if (elapsed <= 1_500) return;
+
+  const what =
+    interaction.isChatInputCommand()
+      ? `command /${interaction.commandName}`
+      : "customId" in interaction && interaction.customId
+        ? `custom id "${interaction.customId}"`
+        : "interaction";
+
+  logger.warn(
+    `[Interaction] ${what} took ${elapsed}ms to answer. Discord's limit is 3000ms.`,
+  );
 }
 
 async function handleChatInput(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -133,6 +302,18 @@ async function handleChatInput(interaction: ChatInputCommandInteraction): Promis
 
   if (!command) {
     logger.error(`No command matching ${interaction.commandName}.`);
+
+    // The interaction still has to be answered. Leaving it unanswered
+    // means Discord expires it, and the user is shown "the bot didn't
+    // respond in time" — which says nothing about what actually
+    // happened.
+    await interaction
+      .reply({
+        content: `I do not have a \`/${interaction.commandName}\` command. It may have been renamed or removed — type \`/\` to see what there is.`,
+        flags: MessageFlags.Ephemeral,
+      })
+      .catch(() => undefined);
+
     return;
   }
 

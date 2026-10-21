@@ -19,8 +19,8 @@
 
 import { ChannelType, PermissionFlagsBits } from "discord.js";
 import type { Guild, TextChannel } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
 import { EmbedBuilder } from "discord.js";
+import { DANGER_COLOR, PANEL_COLOR, panelEmbed } from "../../../core/ui.js";
 import { run } from "../../../core/fire-and-forget.js";
 import { logger } from "../../../utils/logger.js";
 import * as repo from "../repo.js";
@@ -163,17 +163,16 @@ export async function openTourneyInGuild(
   const fresh = result.tourney;
   const channel = registrationChannel(guild, fresh);
 
-  const embed = new EmbedBuilder()
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      [
-        `**Registration Open for ${fresh.name}**`,
-        "```",
-        `📣 ${fresh.requiredMentions} mentions required.`,
-        `📣 Total slots: ${fresh.totalSlots} [${fresh.totalSlots - result.slotCount} slots left]`,
-        "```",
-      ].join("\n"),
-    );
+  const embed = panelEmbed({
+    title: `Registration open — ${fresh.name}`,
+    description: [
+      "```",
+      `📣 ${fresh.requiredMentions} mentions required.`,
+      `📣 Total slots: ${fresh.totalSlots} [${fresh.totalSlots - result.slotCount} slots left]`,
+      "```",
+    ].join("\n"),
+    footer: "Register in the registration channel to take a slot.",
+  });
 
   if (channel) {
     const pingRole = fresh.pingRoleId
@@ -223,9 +222,11 @@ export async function closeTourneyInGuild(
   const channel = registrationChannel(guild, updated);
 
   if (channel) {
-    const embed = new EmbedBuilder()
-      .setColor(EMBED_COLOR)
-      .setDescription("**Registration is now closed!**");
+    const embed = panelEmbed({
+      title: "Registration closed",
+      description: `**${updated.name}** is closed for registration.`,
+      footer: "The tournament panel can open it again.",
+    });
 
     await channel.send({ embeds: [embed] }).catch(() => undefined);
   }
@@ -266,9 +267,11 @@ export async function pauseTourneyInGuild(
   const channel = registrationChannel(guild, updated);
 
   if (channel) {
-    const embed = new EmbedBuilder()
-      .setColor(EMBED_COLOR)
-      .setDescription(`**${updated.name} registration paused.**`);
+    const embed = panelEmbed({
+      title: "Registration paused",
+      description: `**${updated.name}** is paused.`,
+      footer: "Open the registration again to let the teams register.",
+    });
 
     await channel.send({ embeds: [embed] }).catch(() => undefined);
   }
@@ -314,9 +317,9 @@ export async function strikeConfirmMessage(
     .edit({
       embeds: [
         new EmbedBuilder()
-          .setTitle("Cancelled Slot")
+          .setTitle("Cancelled slot")
           .setDescription(`~~${embed.description ?? ""}~~`)
-          .setColor(0xff4e4a),
+          .setColor(DANGER_COLOR),
       ],
     })
     .catch(() => undefined);
@@ -404,7 +407,7 @@ export async function sendSuccessMessage(
   if (!user) return;
 
   const embed = new EmbedBuilder()
-    .setColor(EMBED_COLOR)
+    .setColor(PANEL_COLOR)
     .setTitle("Message from the server")
     .setDescription(tourney.successMessage);
 

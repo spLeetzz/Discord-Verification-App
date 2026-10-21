@@ -16,7 +16,7 @@ import type { AnySelectMenuInteraction } from "discord.js";
 import { run } from "../../../core/fire-and-forget.js";
 import * as repo from "../repo.js";
 import { buildTourneyPanel } from "./manager.js";
-import { buildFieldModal } from "./modals.js";
+import { buildFieldModal, MODAL_COPY } from "./modals.js";
 import { fail, refuseUnlessMod } from "./handlers.js";
 import { tourneysId } from "./ids.js";
 
@@ -139,12 +139,16 @@ async function onSlotPick(
     return;
   }
 
+  const copy = MODAL_COPY.rename;
+
   await interaction.showModal(
     buildFieldModal({
       customId: tourneysId("modal", "rename", tourney.id, slot.id),
-      title: "Change the team name",
-      label: "The new team name",
-      placeholder: "Team Awesome",
+      title: copy.title,
+      label: copy.label,
+      placeholder: copy.placeholder,
+      required: copy.required,
+      maxLength: copy.maxLength,
     }),
   );
 }

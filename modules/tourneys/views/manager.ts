@@ -17,17 +17,25 @@
  *
  * **The panel is public** (D43): other moderators have to be able to see
  * it.
+ *
+ * **The empty state is the first thing a new server sees**, so it says
+ * what to do rather than only reporting that there is nothing there.
  */
 
-import { ButtonStyle, EmbedBuilder, StringSelectMenuBuilder } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
-import type { TourneyRecord } from "../types.js";
+import { StringSelectMenuBuilder } from "discord.js";
 import {
+  actionRow,
   assertComponentBudget,
-  button,
-  buttonRow,
-  selectRow,
-} from "./components.js";
+  componentRow,
+  emptyPanel,
+  navigationRow,
+  panelEmbed,
+  primaryButton,
+  secondaryButton,
+  successButton,
+  dangerButton,
+} from "../../../core/ui.js";
+import type { TourneyRecord, TourneyStatus } from "../types.js";
 import { tourneysId } from "./ids.js";
 import type { Panel, PanelComponents } from "./handlers.js";
 
@@ -40,59 +48,72 @@ const MAX_MENU_OPTIONS = 25;
 export function buildManagerPanel(
   tourneys: readonly TourneyRecord[],
 ): Panel {
-  const embed = new EmbedBuilder()
-    .setTitle("Tournament Manager")
-    .setColor(EMBED_COLOR);
+  const create = successButton({
+    customId: tourneysId("wizard", "new"),
+    label: "Create tournament",
+  });
+
+  const refresh = secondaryButton({
+    customId: tourneysId("manager", "refresh"),
+    label: "Refresh",
+  });
 
   if (tourneys.length === 0) {
-    embed.setDescription(
-      "There is no tournament in this server yet. Use **Create Tournament** to make one.",
-    );
-  } else {
-    embed.setDescription(
-      tourneys
-        .map(
-          (tourney, index) =>
-            `\`${String(index + 1).padStart(2, "0")}.\` **${tourney.name}** — \`${tourney.status}\` — Slots: \`${tourney.totalSlots}\``,
-        )
-        .join("\n"),
-    );
+    // The empty state: it says what to do, and the button that does it
+    // is right there.
+    const empty = emptyPanel({
+      title: "Tournament manager",
+      description:
+        "This server has no tournaments yet. Create one to start collecting registrations.",
+      footer:
+        "A tournament needs a registration channel, a confirm channel, a success role and a number of slots.",
+      action: create,
+    });
+
+    const rows: PanelComponents = [...empty.components, navigationRow(refresh)];
+
+    assertComponentBudget(rows);
+
+    return { embeds: [...empty.embeds], components: rows };
   }
+
+  const embed = panelEmbed({
+    title: "Tournament manager",
+    description: tourneys
+      .map(
+        (tourney, index) =>
+          `\`${String(index + 1).padStart(2, "0")}.\` **${tourney.name}** — ${statusLabel(tourney.status)} — Slots: \`${tourney.totalSlots}\``,
+      )
+      .join("\n"),
+    footer: "Pick a tournament to manage it, or create another one.",
+  });
 
   const rows: PanelComponents = [];
 
-  if (tourneys.length > 0) {
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId(tourneysId("select", "pick"))
-      .setPlaceholder("Choose a tournament to manage")
-      .setMinValues(1)
-      .setMaxValues(1);
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(tourneysId("select", "pick"))
+    .setPlaceholder("Choose a tournament to manage")
+    .setMinValues(1)
+    .setMaxValues(1);
 
-    for (const tourney of tourneys.slice(0, MAX_MENU_OPTIONS)) {
-      menu.addOptions({
-        label: tourney.name.slice(0, 100),
-        value: tourney.id,
-        description: `${tourney.status} — ${tourney.totalSlots} slots`.slice(0, 100),
-      });
-    }
-
-    rows.push(selectRow(menu));
+  for (const tourney of tourneys.slice(0, MAX_MENU_OPTIONS)) {
+    menu.addOptions({
+      label: tourney.name.slice(0, 100),
+      value: tourney.id,
+      description: `${statusLabel(tourney.status)} — ${tourney.totalSlots} slots`.slice(
+        0,
+        100,
+      ),
+    });
   }
 
-  rows.push(
-    buttonRow(
-      button({
-        customId: tourneysId("wizard", "new"),
-        label: "Create Tournament",
-        style: ButtonStyle.Success,
-      }),
-      button({
-        customId: tourneysId("manager", "refresh"),
-        label: "Refresh",
-        style: ButtonStyle.Secondary,
-      }),
-    ),
-  );
+  rows.push(componentRow(menu));
+
+  // Creating is green: it adds a tournament.
+  rows.push(actionRow(create));
+
+  // The navigation is grey and last.
+  rows.push(navigationRow(refresh));
 
   assertComponentBudget(rows);
 
@@ -106,82 +127,138 @@ export function buildManagerPanel(
  * restart and two moderators can work on the same tournament.
  */
 export function buildTourneyPanel(tourney: TourneyRecord): Panel {
-  const embed = new EmbedBuilder()
-    .setTitle(`Tournament — ${tourney.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      [
-        `**Status:** \`${tourney.status}\``,
-        `**Slots:** \`${tourney.totalSlots}\``,
-        `**Teams per group:** \`${tourney.groupSize ?? "not set"}\``,
-        `**Registration channel:** <#${tourney.registrationChannelId}>`,
-        `**Confirm channel:** <#${tourney.confirmChannelId}>`,
-        `**Success role:** <@&${tourney.roleId}>`,
-        `**Mentions required:** \`${tourney.requiredMentions}\``,
-        `**Reactions:** ${tourney.emojis.tick},${tourney.emojis.cross}`,
-      ].join("\n"),
-    );
+  const isOpen = tourney.status === "open";
 
-  const rows: PanelComponents = [
-    buttonRow(
-      button({
-        customId: tourneysId("lifecycle", "toggle", tourney.id),
-        label: tourney.status === "open" ? "Pause Reg" : "Start Reg",
-        style:
-          tourney.status === "open" ? ButtonStyle.Secondary : ButtonStyle.Success,
-      }),
-      button({
-        customId: tourneysId("lifecycle", "close", tourney.id),
-        label: "Close Reg",
-        style: ButtonStyle.Danger,
-        disabled: tourney.status === "closed",
-      }),
-      button({
+  const embed = panelEmbed({
+    title: `Tournament — ${tourney.name}`,
+    description:
+      "The tournament's registration, groups, slots and partners, in one place.",
+    fields: [
+      { name: "Status", value: statusLabel(tourney.status), inline: true },
+      { name: "Slots", value: `\`${tourney.totalSlots}\``, inline: true },
+      {
+        name: "Teams per group",
+        value: `\`${tourney.groupSize ?? "not set"}\``,
+        inline: true,
+      },
+      {
+        name: "Registration channel",
+        value: `<#${tourney.registrationChannelId}>`,
+        inline: true,
+      },
+      {
+        name: "Confirm channel",
+        value: `<#${tourney.confirmChannelId}>`,
+        inline: true,
+      },
+      { name: "Success role", value: `<@&${tourney.roleId}>`, inline: true },
+      {
+        name: "Mentions required",
+        value: `\`${tourney.requiredMentions}\``,
+        inline: true,
+      },
+      {
+        name: "Reactions",
+        value: `${tourney.emojis.tick},${tourney.emojis.cross}`,
+        inline: true,
+      },
+    ],
+    footer: isOpen
+      ? "Pick what to do next. The teams can register now."
+      : "Pick what to do next. Open the registration to let the teams register.",
+  });
+
+  const rows: PanelComponents = [];
+
+  // The first row holds the one thing to do next.
+  rows.push(
+    actionRow(
+      primaryButton({
         customId: tourneysId("editor", tourney.id),
-        label: "Edit Settings",
-        style: ButtonStyle.Primary,
-      }),
-      button({
-        customId: tourneysId("groups", tourney.id),
-        label: "Manage Groups",
-        style: ButtonStyle.Primary,
-      }),
-      button({
-        customId: tourneysId("ban", tourney.id),
-        label: "Ban/Unban",
-        style: ButtonStyle.Secondary,
+        label: "Edit settings",
       }),
     ),
-    buttonRow(
-      button({
+  );
+
+  // Opening the registration is green — it opens something. Pausing it
+  // is neither green nor red: it is reversible.
+  rows.push(
+    actionRow(
+      isOpen
+        ? secondaryButton({
+            customId: tourneysId("lifecycle", "toggle", tourney.id),
+            label: "Pause registration",
+          })
+        : successButton({
+            customId: tourneysId("lifecycle", "toggle", tourney.id),
+            label: "Start registration",
+          }),
+      secondaryButton({
+        customId: tourneysId("groups", tourney.id),
+        label: "Manage groups",
+      }),
+      secondaryButton({
         customId: tourneysId("slotm", tourney.id),
-        label: "Slot-Manager",
-        style: ButtonStyle.Primary,
+        label: "Slot manager",
       }),
-      button({
+      secondaryButton({
         customId: tourneysId("partner", tourney.id),
-        label: "Media-Partner",
-        style: ButtonStyle.Primary,
+        label: "Media partners",
       }),
-      button({
-        customId: tourneysId("modal", "add_slot", tourney.id),
-        label: "Add Slot",
-        style: ButtonStyle.Success,
-      }),
-      button({
-        customId: tourneysId("modal", "remove_slot", tourney.id),
-        label: "Cancel Slots",
-        style: ButtonStyle.Danger,
-      }),
-      button({
+      secondaryButton({
         customId: tourneysId("modal", "export", tourney.id),
         label: "Export CSV",
-        style: ButtonStyle.Secondary,
       }),
     ),
-  ];
+  );
+
+  // The third row: the slot that can be added, and the three buttons
+  // that destroy something. Adding a slot is green while the
+  // registration is closed, because the green button is the one that
+  // adds something — and once the registration is open, "Start
+  // registration" is gone and this one takes the green.
+  rows.push(
+    actionRow(
+      isOpen
+        ? successButton({
+            customId: tourneysId("modal", "add_slot", tourney.id),
+            label: "Add slot",
+          })
+        : secondaryButton({
+            customId: tourneysId("modal", "add_slot", tourney.id),
+            label: "Add slot",
+          }),
+      dangerButton({
+        customId: tourneysId("modal", "remove_slot", tourney.id),
+        label: "Cancel a slot",
+      }),
+      dangerButton({
+        customId: tourneysId("lifecycle", "close", tourney.id),
+        label: "Close registration",
+        disabled: tourney.status === "closed",
+      }),
+      dangerButton({
+        customId: tourneysId("ban", tourney.id),
+        label: "Ban or unban",
+      }),
+    ),
+  );
 
   assertComponentBudget(rows);
 
   return { embeds: [embed], components: rows };
+}
+
+/** The status, as a panel shows it. */
+function statusLabel(status: TourneyStatus): string {
+  switch (status) {
+    case "draft":
+      return "Draft";
+    case "open":
+      return "Open";
+    case "paused":
+      return "Paused";
+    case "closed":
+      return "Closed";
+  }
 }

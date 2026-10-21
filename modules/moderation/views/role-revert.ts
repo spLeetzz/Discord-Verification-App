@@ -28,10 +28,25 @@
  * in-memory store.
  */
 
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } from "discord.js";
-import type { ButtonInteraction, Guild } from "discord.js";
+import { MessageFlags } from "discord.js";
+import type {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonInteraction,
+  Guild,
+  Role,
+} from "discord.js";
 import { makeCustomId, parseCustomId, TokenStore } from "../../../core/custom-id.js";
 import { canManageRole, isStaff, STAFF_DENIAL_MESSAGE } from "../../../core/guards.js";
+import { actionRow, secondaryButton, successButton } from "../../../core/ui.js";
+import {
+  outcomePanel,
+  refusalPanel,
+  replyPanel,
+  replyPanelEphemeral,
+} from "./panels.js";
+import type { Panel } from "../../../core/ui.js";
+import type { RoleAction, RoleApplyResult } from "../roles.js";
 
 /** The prefix every custom id of this module carries. */
 export const MODERATION_CUSTOM_ID_PREFIX = "moderation";
@@ -43,7 +58,7 @@ export interface RoleRevertState {
   /** Everybody the action touched. */
   readonly memberIds: readonly string[];
   /** What the original action did. The revert does the opposite. */
-  readonly action: "add" | "remove";
+  readonly action: RoleAction;
   /** The moderator who ran the command, for the audit-log reason. */
   readonly authorId: string;
   readonly authorLabel: string;
@@ -62,7 +77,7 @@ const revertStore = new TokenStore<RoleRevertState>({ ttlMs: ROLE_REVERT_TTL_MS 
  * anybody having to look it up.
  */
 export function roleRevertCustomId(
-  action: "add" | "remove",
+  action: RoleAction,
   token: string,
 ): string {
   return makeCustomId(
@@ -77,17 +92,63 @@ export function issueRoleRevert(state: RoleRevertState): string {
   return revertStore.issue(state);
 }
 
-/** The button row that carries the revert. */
+/**
+ * The button row that carries the revert.
+ *
+ * The button undoes the change: "Take back" removes the role that was
+ * just given, "Give back" puts back the role that was just taken. The
+ * first is a plain undo and stays grey; the second gives something back
+ * and is green. Neither is red — the button puts the server back the way
+ * it was, it does not destroy a record.
+ */
 export function roleRevertButton(
-  action: "add" | "remove",
+  action: RoleAction,
   token: string,
 ): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(roleRevertCustomId(action, token))
-      .setLabel(action === "add" ? "Take Back" : "Give Back")
-      .setStyle(action === "add" ? ButtonStyle.Danger : ButtonStyle.Success),
+  const customId = roleRevertCustomId(action, token);
+
+  return actionRow(
+    action === "add"
+      ? secondaryButton({ customId, label: "Take back" })
+      : successButton({ customId, label: "Give back" }),
   );
+}
+
+/**
+ * The panel that carries the revert.
+ *
+ * It is the report of the change — what was done, to how many members,
+ * and what went wrong — with the hint about the button in the footer, so
+ * the description does not have to explain it.
+ */
+export function roleRevertPanel(
+  action: RoleAction,
+  role: Role,
+  result: RoleApplyResult,
+): Panel {
+  const given = action === "add";
+
+  return outcomePanel({
+    kind: given ? "constructive" : "destructive",
+    title: given ? "Role added" : "Role removed",
+    description: given
+      ? `${role.toString()} was given to ${result.changed} member${
+          result.changed === 1 ? "" : "s"
+        }.`
+      : `${role.toString()} was taken from ${result.changed} member${
+          result.changed === 1 ? "" : "s"
+        }.`,
+    fields: [
+      { name: "Changed", value: String(result.changed), inline: true },
+      ...(result.failed > 0
+        ? [{ name: "Failed", value: String(result.failed), inline: true }]
+        : []),
+      ...(result.skipped > 0
+        ? [{ name: "Skipped", value: String(result.skipped), inline: true }]
+        : []),
+    ],
+    footer: "The button below undoes this. It works for one hour.",
+  });
 }
 
 /**
@@ -120,40 +181,46 @@ export async function handleRoleRevertButton(
   // The staff check comes first: a click by somebody who cannot use the
   // button must not consume it.
   if (!(await isStaff(interaction))) {
-    await interaction.reply({
-      content: STAFF_DENIAL_MESSAGE,
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelEphemeral(
+      interaction,
+      refusalPanel("revert", STAFF_DENIAL_MESSAGE),
+    );
     return true;
   }
 
   const state = revertStore.take(token);
 
   if (!state) {
-    await interaction.reply({
-      content: "This button has expired. Please run the command again.",
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelEphemeral(
+      interaction,
+      refusalPanel(
+        "revert",
+        "This button has expired. Please run the command again.",
+      ),
+    );
     return true;
   }
 
   const guild: Guild | null = interaction.guild;
 
   if (!guild || guild.id !== state.guildId) {
-    await interaction.reply({
-      content: "This button belongs to another server.",
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelEphemeral(
+      interaction,
+      refusalPanel("revert", "This button belongs to another server."),
+    );
     return true;
   }
 
   const role = guild.roles.cache.get(state.roleId);
 
   if (!role) {
-    await interaction.reply({
-      content: "That role no longer exists, so there is nothing to revert.",
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelEphemeral(
+      interaction,
+      refusalPanel(
+        "revert",
+        "That role no longer exists, so there is nothing to revert.",
+      ),
+    );
     return true;
   }
 
@@ -161,10 +228,7 @@ export async function handleRoleRevertButton(
   const refusal = await canManageRole(interaction, role);
 
   if (refusal) {
-    await interaction.reply({
-      content: refusal,
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelEphemeral(interaction, refusalPanel("revert", refusal));
     return true;
   }
 
@@ -201,11 +265,21 @@ export async function handleRoleRevertButton(
 
   const verb = state.action === "add" ? "removed" : "given back";
 
-  await interaction.editReply({
-    content: `Reverted the role: ${verb} ${role.toString()} ${
-      changed === 1 ? "from 1 member" : `from ${changed} members`
-    }. (Failed: ${failed})`,
-  });
+  await replyPanel(
+    interaction,
+    outcomePanel({
+      kind: state.action === "add" ? "destructive" : "constructive",
+      title: "Reverted",
+      description: `Reverted the role: ${verb} ${role.toString()} ${
+        changed === 1 ? "from 1 member" : `from ${changed} members`
+      }.`,
+      fields:
+        failed > 0
+          ? [{ name: "Failed", value: String(failed), inline: true }]
+          : [],
+      footer: "The button was used, so it cannot be pressed again.",
+    }),
+  );
 
   return true;
 }

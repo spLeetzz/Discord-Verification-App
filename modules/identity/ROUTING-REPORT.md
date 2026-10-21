@@ -36,14 +36,14 @@ identity:ssmod:<surface>:<action>[:<target>]
 
 | Id | What it does |
 |---|---|
-| `identity:ssmod:list:setup` | The list panel's **Setup** button. |
+| `identity:ssmod:list:setup` | The list panel's **Create setup** button. |
 | `identity:ssmod:list:faq` | The list panel's **FAQ** button. |
 | `identity:ssmod:list:edit:<configId>` | The list panel's **Edit** button. |
 | `identity:ssmod:edit:set_channel:<configId>` | One field of the editor. |
 | `identity:ssmod:edit:delete:<configId>` | The editor's **Delete setup** button. |
 | `identity:ssmod:edit:close:<configId>` | The editor's **Close** button. |
 | `identity:ssmod:wizard:set_channel:<token>` | One field of the wizard. |
-| `identity:ssmod:wizard:save:<token>` | The wizard's **Save & setup** button. |
+| `identity:ssmod:wizard:save:<token>` | The wizard's **Save setup** button. |
 | `identity:ssmod:wizard:close:<token>` | The wizard's **Cancel** button. |
 
 `registerIdentityInteractions` now registers `identity:ssmod` **once** per
@@ -63,9 +63,9 @@ Two things fell out of it:
 - The surface says whether the target is a token or a row id, so the
   handler resolves **one** target instead of trying the wizard first and
   falling back to the editor.
-- The wizard's **Save** and the list panel's **Setup** are actions of
-  different surfaces, and neither can be mistaken for the other. The
-  parser refuses `identity:ssmod:edit:save:<token>`.
+- The wizard's **Save setup** and the list panel's **Create setup** are
+  actions of different surfaces, and neither can be mistaken for the
+  other. The parser refuses `identity:ssmod:edit:save:<token>`.
 
 ## The tests
 

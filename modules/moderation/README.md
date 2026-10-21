@@ -64,8 +64,8 @@ subcommand, and again when the revert button is pressed.
 The moderation commands set `ephemeral: false` (D43). The public parts
 are:
 
-- the **Confirm / Cancel prompt** — it is a public message, because an
-  ephemeral prompt disappears when the moderator navigates away;
+- the **confirmation panel** — it is a public message, because an
+  ephemeral question disappears when the moderator navigates away;
 - the **role-revert button** — it is a public message, because a second
   moderator may need to undo the action;
 - the outcome message of a lock, an unlock, a maintenance change and a
@@ -75,9 +75,52 @@ are:
 Everything else answers in the interaction's reply.
 
 > The dispatcher currently defers **every** command ephemerally
-> (`handlers/interactions.ts:55`), so the Confirm / Cancel prompt is
+> (`handlers/interactions.ts:55`), so the confirmation panel is
 > ephemeral until the dispatcher honours `Command.ephemeral`. That is a
 > central change; see the area report.
+
+---
+
+## The look
+
+Every panel and every question the area shows is built on
+`core/ui.ts` — the shared design language. The area adds two files of
+its own, and they hold the rules rather than the plumbing:
+
+| File | What it holds |
+|---|---|
+| `views/panels.ts` | the outcome panels, the empty states, and the two rules: the colour of a panel and its footer |
+| `views/confirm.ts` | the confirmation panel of the area |
+
+**The colour rule.** A panel that reports something destructive is red,
+a panel that reports something given back or opened again is green, and
+everything else is the ordinary panel colour. It is the same rule the
+buttons follow: red means "this destroyed something".
+
+**The footer rule.** Every panel says what to do next in its footer, so
+the description can stay short and the panel does not have to shout it.
+
+**The empty states.** A purge that matched nothing and a role action
+with nobody to change are empty states, not one-liners: they say what
+to do next.
+
+**The confirmation panel.** `core/prompt.ts` asks a yes/no question with
+a green **Confirm** and a grey **Cancel** on one row. That is right for
+a question whose answer creates something, and it is wrong here, where
+most of the questions are asked *before* something is destroyed. The
+area therefore asks its own questions:
+
+- the **Confirm** button is alone on the first row, and its colour says
+  what the answer does — red when it destroys, green when it gives
+  something back;
+- the **Cancel** button is grey and has the last row to itself, so a
+  destructive button never shares a row with something harmless.
+
+The mechanics are the ones of `core/prompt.ts`: only the member who ran
+the command may answer, the buttons go away once the question has been
+answered, and a question nobody answers is a refusal. The custom id
+keeps the same shape — `core:collect:prompt:<token>:<answer>` — so the
+router leaves the interaction alone and the collector owns it.
 
 ---
 
@@ -250,7 +293,7 @@ pressed, so a second press is refused with "This button has expired."
 | `blocklist.ts` | the block list: the model, the check and the cache |
 | `jobs.ts` | the lockdown expiry handler |
 | `commands/` | the command definitions |
-| `views/` | the role-revert button and the router registration |
+| `views/` | the panels, the confirmation panel, the role-revert button and the router registration |
 | `register.ts` | what the manager wires in |
 
 ### What the manager has to wire
@@ -266,8 +309,9 @@ await startModeration();
 ```
 
 `registerModerationInteractions()` registers the `moderation:role_revert`
-button prefix with `core/router.ts`. The Confirm / Cancel prompt belongs
-to `core/prompt.ts` and is not registered here.
+button prefix with `core/router.ts`. The confirmation panel belongs to
+`views/confirm.ts` and is not registered here: its buttons carry the
+collector's prefix, so the router leaves them alone.
 
 `startModeration()` loads the block list and starts keeping it fresh.
 
@@ -460,8 +504,10 @@ for.
 **Now:** the old messages are filtered out *before* the delete, they are
 counted, and the report says so:
 
+> **Messages purged**
 > 42 messages were removed.
-> ⚠️ 13 matching messages are older than 14 days and could not be deleted.
+> `Deleted` 42 · `Too old` 13
+> Discord cannot delete messages that are more than 14 days old.
 
 The same report counts the pinned messages (which bulk delete refuses)
 and the ones that failed.

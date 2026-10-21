@@ -10,6 +10,7 @@ import { SlashCommandBuilder } from "discord.js";
 import { PURGE_SEARCH_LIMIT } from "../purge.js";
 import { purgeMessages } from "../purge-service.js";
 import type { ModerationCommand } from "../types.js";
+import { purgePanel, refusalPanel, replyPanel } from "../views/panels.js";
 import {
   MODERATION_PERMISSIONS,
   missingPermission,
@@ -53,7 +54,10 @@ const clearUserCommand: ModerationCommand = {
       const user = interaction.options.getUser("user");
 
       if (!user) {
-        await interaction.editReply({ content: "Please pick a member." });
+        await replyPanel(
+          interaction,
+          refusalPanel(interaction.commandName, "Please pick a member."),
+        );
         return;
       }
 
@@ -65,29 +69,16 @@ const clearUserCommand: ModerationCommand = {
         search,
       });
 
-      const lines = [
-        `${outcome.deleted} message${outcome.deleted === 1 ? "" : "s"} by ${user.username} removed.`,
-      ];
-
-      if (outcome.tooOld > 0) {
-        lines.push(
-          `⚠️ ${outcome.tooOld} matching message${outcome.tooOld === 1 ? " is" : "s are"} older than 14 days and could not be deleted.`,
-        );
-      }
-
-      if (outcome.pinned > 0) {
-        lines.push(
-          `📌 ${outcome.pinned} pinned message${outcome.pinned === 1 ? "" : "s"} could not be deleted.`,
-        );
-      }
-
-      if (outcome.failed > 0) {
-        lines.push(
-          `❌ ${outcome.failed} message${outcome.failed === 1 ? "" : "s"} could not be deleted.`,
-        );
-      }
-
-      await interaction.editReply({ content: lines.join("\n") });
+      await replyPanel(
+        interaction,
+        purgePanel(outcome, {
+          title: "Messages purged",
+          description: `${outcome.deleted} message${
+            outcome.deleted === 1 ? "" : "s"
+          } by ${user.username} removed.`,
+          emptyDescription: `${user.username} has no messages in the last ${search} messages.`,
+        }),
+      );
     });
   },
 };

@@ -43,6 +43,7 @@ import {
   ChannelSelectMenuBuilder,
   ChannelType,
   ComponentType,
+  MessageFlags,
   RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
@@ -567,7 +568,27 @@ async function collectAutoSelect(
 
         if (!menu.accepts) return true;
 
-        return menu.accepts(candidate);
+        if (await menu.accepts(candidate)) return true;
+
+        // The choice was refused, and the user has to be told — a pick
+        // that is silently ignored is a pick that goes unanswered, and
+        // Discord expires an unanswered interaction after three seconds.
+        // The user is shown "the bot didn't respond in time" for a
+        // channel they were told they could pick.
+        try {
+          await candidate.reply({
+            content:
+              menu.componentType === ComponentType.ChannelSelect
+                ? "That channel is not one this server can use. Pick another one."
+                : "That choice is not one this server can use. Pick another one.",
+            flags: MessageFlags.Ephemeral,
+          });
+        } catch {
+          // The answer could not be sent. The collector still keeps
+          // waiting, which is the behaviour that matters.
+        }
+
+        return false;
       },
     });
 

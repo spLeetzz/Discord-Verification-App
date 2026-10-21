@@ -17,7 +17,6 @@
 
 import { SlashCommandBuilder } from "discord.js";
 import { InputError } from "../../../core/errors.js";
-import { plural } from "../../../core/text.js";
 import { formatActionReason } from "../reason.js";
 import { channelsToHideForMaintenance, maintenanceOff, maintenanceOn } from "../lockdown.js";
 import type { LockApplyResult, LockContext } from "../lockdown.js";
@@ -27,7 +26,8 @@ import {
   describeMaintenanceChannels,
 } from "../maintenance.js";
 import type { ModerationCommand } from "../types.js";
-import { prompt } from "../../../core/prompt.js";
+import { confirmAction } from "../views/confirm.js";
+import { announcePanel, outcomePanel, replyPanel } from "../views/panels.js";
 import {
   MODERATION_PERMISSIONS,
   missingPermission,
@@ -99,13 +99,28 @@ const maintenanceCommand: ModerationCommand = {
           );
         }
 
-        const confirmed = await prompt(
-          interaction,
-          `**Do you want me to continue?**\n\`${channels.length}\` channel${channels.length === 1 ? "" : "s"} have read messages enabled for **${role.name}**, and I can edit ${channels.length} of them.`,
-        );
+        const confirmed = await confirmAction(interaction, {
+          title: "Start maintenance",
+          question: `\`${channels.length}\` channel${
+            channels.length === 1 ? "" : "s"
+          } have read messages enabled for **${role.name}**, and I can edit ${
+            channels.length
+          } of them.`,
+          kind: "destructive",
+          confirmLabel: "Start maintenance",
+          footer: "The channels stay hidden until `/maintenance off`.",
+        });
 
         if (!confirmed) {
-          await interaction.editReply({ content: "Alright, aborting." });
+          await replyPanel(
+            interaction,
+            outcomePanel({
+              kind: "neutral",
+              title: "Maintenance cancelled",
+              description: "Nothing was hidden.",
+              footer: "Run the command again when you are ready.",
+            }),
+          );
           return;
         }
 
@@ -115,10 +130,16 @@ const maintenanceCommand: ModerationCommand = {
         // list of channels to hide.
         let maintenanceChannelIds: string[] = [];
 
-        const createChannels = await prompt(
-          interaction,
-          "**Maintenance channels**\nDo you want me to make the maintenance channels as well?",
-        );
+        const createChannels = await confirmAction(interaction, {
+          title: "Maintenance channels",
+          question:
+            "Do you want me to make the maintenance channels as well?",
+          kind: "constructive",
+          confirmLabel: "Create channels",
+          footer:
+            "The bot makes a `maintenance-chat` text channel and a " +
+            "`maintenance-vc` voice channel.",
+        });
 
         if (createChannels) {
           maintenanceChannelIds = await createMaintenanceChannels(
@@ -151,17 +172,31 @@ const maintenanceCommand: ModerationCommand = {
           throw error;
         }
 
-        await channel.send(
-          `Maintenance mode is on for **${role.name}**. Updated settings for ${plural(result.locked, "channel")}.` +
-            (result.failed > 0 ? ` (Failed: ${result.failed})` : "") +
-            (maintenanceChannelIds.length > 0
-              ? ` Created ${plural(maintenanceChannelIds.length, "maintenance channel")}.`
-              : ""),
-        );
-
-        await interaction.editReply({
-          content: `Maintenance mode is on for **${role.name}**.`,
+        const panel = outcomePanel({
+          kind: "destructive",
+          title: "Maintenance mode on",
+          description: `Maintenance mode is on for **${role.name}**.`,
+          fields: [
+            { name: "Channels", value: String(result.locked), inline: true },
+            ...(result.failed > 0
+              ? [{ name: "Failed", value: String(result.failed), inline: true }]
+              : []),
+            ...(maintenanceChannelIds.length > 0
+              ? [
+                  {
+                    name: "Maintenance channels",
+                    value: String(maintenanceChannelIds.length),
+                    inline: true,
+                  },
+                ]
+              : []),
+          ],
+          footer: "Run `/maintenance off` to show the channels again.",
         });
+
+        await announcePanel(channel, panel);
+
+        await replyPanel(interaction, panel);
 
         return;
       }
@@ -173,18 +208,33 @@ const maintenanceCommand: ModerationCommand = {
       // belongs to whoever made it.
       const result = await maintenanceOff({ context, role });
 
-      await channel.send(
-        `Maintenance mode is off for **${role.name}**. Restored ${plural(result.restored, "channel")}.` +
-          (result.failed > 0 ? ` (Failed: ${result.failed})` : "") +
-          (result.withoutRecord > 0
-            ? ` (${result.withoutRecord} had no record of their previous permissions and were reset to inherit.)`
-            : "") +
-          ` ${describeMaintenanceChannels(result.maintenanceChannels)}`,
-      );
-
-      await interaction.editReply({
-        content: `Maintenance mode is off for **${role.name}**.`,
+      const panel = outcomePanel({
+        kind: "constructive",
+        title: "Maintenance mode off",
+        description: `Maintenance mode is off for **${role.name}**.`,
+        fields: [
+          { name: "Restored", value: String(result.restored), inline: true },
+          ...(result.failed > 0
+            ? [{ name: "Failed", value: String(result.failed), inline: true }]
+            : []),
+          ...(result.withoutRecord > 0
+            ? [
+                {
+                  name: "Reset to inherit",
+                  value: String(result.withoutRecord),
+                  inline: true,
+                },
+              ]
+            : []),
+        ],
+        footer: `The maintenance channels are gone. ${
+          describeMaintenanceChannels(result.maintenanceChannels)
+        }`,
       });
+
+      await announcePanel(channel, panel);
+
+      await replyPanel(interaction, panel);
     });
   },
 };

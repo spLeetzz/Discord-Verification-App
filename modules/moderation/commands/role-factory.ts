@@ -24,8 +24,18 @@ import {
 } from "../roles.js";
 import type { RoleAction, RoleScope } from "../roles.js";
 import type { ModerationCommand } from "../types.js";
-import { prompt } from "../../../core/prompt.js";
-import { issueRoleRevert, roleRevertButton } from "../views/role-revert.js";
+import { confirmAction } from "../views/confirm.js";
+import {
+  announcePanel,
+  emptyState,
+  outcomePanel,
+  replyPanel,
+} from "../views/panels.js";
+import {
+  issueRoleRevert,
+  roleRevertButton,
+  roleRevertPanel,
+} from "../views/role-revert.js";
 import {
   MODERATION_PERMISSIONS,
   missingPermission,
@@ -183,23 +193,44 @@ export function buildRoleCommand(config: RoleCommandConfig): ModerationCommand {
         }
 
         if (bulk) {
-          const confirmed = await prompt(
-            interaction,
-            `**Are you sure you want to continue?**\n${role.toString()} will be ${
-              config.verb === "add" ? "given to" : "taken from"
+          const adding = config.verb === "add";
+
+          const confirmed = await confirmAction(interaction, {
+            title: adding ? "Give role" : "Take role",
+            question: `${role.toString()} will be ${
+              adding ? "given to" : "taken from"
             } ${plural(memberIds.length, "member")} in this server.`,
-          );
+            kind: adding ? "constructive" : "destructive",
+            confirmLabel: adding ? "Give role" : "Take role",
+            footer: adding
+              ? "The button in the channel below undoes it."
+              : "The button in the channel below gives the role back.",
+          });
 
           if (!confirmed) {
-            await interaction.editReply({ content: "Alright, aborting." });
+            await replyPanel(
+              interaction,
+              outcomePanel({
+                kind: "neutral",
+                title: adding ? "Give role cancelled" : "Take role cancelled",
+                description: "Nobody was changed.",
+                footer: "Run the command again when you are ready.",
+              }),
+            );
             return;
           }
         }
 
         if (memberIds.length === 0) {
-          await interaction.editReply({
-            content: "There was nobody to change.",
-          });
+          await replyPanel(
+            interaction,
+            emptyState({
+              title: "Nobody to change",
+              description: "No member matched, so nobody was changed.",
+              footer:
+                "Pick the members to change, or use the `apply_to_all` option.",
+            }),
+          );
           return;
         }
 
@@ -220,22 +251,17 @@ export function buildRoleCommand(config: RoleCommandConfig): ModerationCommand {
           authorLabel: author.displayName,
         });
 
-        const summary =
-          `${config.verb === "add" ? "Added" : "Removed"} ${role.toString()} ${
-            config.verb === "add" ? "to" : "from"
-          } ${plural(result.changed, "member")}.` +
-          (result.failed > 0 ? ` (Failed: ${result.failed})` : "") +
-          (result.skipped > 0 ? ` (Skipped: ${result.skipped})` : "");
+        const panel = roleRevertPanel(action, role, result);
 
         // The success message carries the revert button, and it is
         // **public**: a second moderator may need to undo it, and an
         // ephemeral message with a button in it is a button nobody sees.
-        await channel.send({
-          content: summary,
+        await announcePanel(channel, {
+          embeds: panel.embeds,
           components: [roleRevertButton(action, token)],
         });
 
-        await interaction.editReply({ content: `Done. ${summary}` });
+        await replyPanel(interaction, panel);
       });
     },
   };

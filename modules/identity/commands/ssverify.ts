@@ -58,7 +58,7 @@ export const ssVerifyCommand: Command = {
       const panel = buildSsListPanel(configs);
 
       await interaction.editReply({
-        embeds: [panel.embed],
+        embeds: panel.embeds,
         components: panel.components,
       });
     } catch (error) {

@@ -18,6 +18,7 @@ import {
   resolveMemberTarget,
 } from "../members.js";
 import type { ModerationCommand } from "../types.js";
+import { outcomePanel, replyPanel } from "../views/panels.js";
 import {
   MODERATION_PERMISSIONS,
   missingPermission,
@@ -73,17 +74,24 @@ const banCommand: ModerationCommand = {
 
       assertTargetHierarchy(guild, author, target);
 
-      const reason = formatActionReason(
-        author.displayName,
-        author.id,
-        interaction.options.getString("reason"),
-      );
+      const given = interaction.options.getString("reason");
+
+      const reason = formatActionReason(author.displayName, author.id, given);
 
       await banTarget(guild, target, reason);
 
-      await interaction.editReply({
-        content: `${describeTarget(target)} has been banned.`,
-      });
+      await replyPanel(
+        interaction,
+        outcomePanel({
+          kind: "destructive",
+          title: "Member banned",
+          description: `${describeTarget(target)} has been banned.`,
+          fields: given
+            ? [{ name: "Reason", value: given, inline: true }]
+            : [],
+          footer: "Run `/unban` with the member's id to lift the ban.",
+        }),
+      );
     });
   },
 };

@@ -20,16 +20,19 @@
  * column, so the cooldown depended on the last write of any kind.
  */
 
-import { ButtonStyle, EmbedBuilder } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
+import type { EmbedBuilder } from "discord.js";
+import {
+  actionRow,
+  assertComponentBudget,
+  navigationRow,
+  panelEmbed,
+  primaryButton,
+  secondaryButton,
+  successButton,
+} from "../../../core/ui.js";
 import { renderGroupList } from "../groups.js";
 import type { TourneyRecord, TourneySlotRecord } from "../types.js";
 import type { Group } from "../groups.js";
-import {
-  assertComponentBudget,
-  button,
-  buttonRow,
-} from "./components.js";
 import { tourneysId } from "./ids.js";
 import type { Panel, PanelComponents } from "./handlers.js";
 
@@ -46,83 +49,102 @@ export function buildGroupManagerPanel(options: {
 
   const group = groups[current - 1] ?? null;
 
-  const embed = new EmbedBuilder()
-    .setTitle(`Group Management — ${tourney.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription(
+  const embed = panelEmbed({
+    title: `Group management — ${tourney.name}`,
+    description:
       group === null
         ? "Nobody has registered yet, so there are no groups to draw."
-        : `**Group ${current} of ${groups.length}**\n\n${renderGroupList(group, tourney.startFrom)}`,
-    );
+        : "The teams of each group, and what to do with them.",
+    fields: [
+      {
+        name: "Group",
+        value: group === null ? "`None`" : `**${current}** of ${groups.length}`,
+        inline: true,
+      },
+      {
+        name: "Teams per group",
+        value: `\`${tourney.groupSize ?? "not set"}\``,
+        inline: true,
+      },
+      {
+        name: "Slotlist start",
+        value: `\`${tourney.startFrom}\``,
+        inline: true,
+      },
+      {
+        name: "Category",
+        value: categoryId ? `<#${categoryId}>` : "`Not created`",
+        inline: true,
+      },
+      ...(group === null
+        ? []
+        : [
+            {
+              name: `Group ${current}`,
+              value: renderGroupList(group, tourney.startFrom),
+              inline: false,
+            },
+          ]),
+    ],
+    footer:
+      "Publish the list to put it in a channel. Set the number of teams per group in the editor.",
+  });
 
-  embed.addFields(
-    {
-      name: "Teams per group",
-      value: `\`${tourney.groupSize ?? "not set"}\``,
-      inline: true,
-    },
-    {
-      name: "Slotlist start from",
-      value: `\`${tourney.startFrom}\``,
-      inline: true,
-    },
-    {
-      name: "Category",
-      value: categoryId ? `<#${categoryId}>` : "`Not created`",
-      inline: true,
-    },
+  const rows: PanelComponents = [];
+
+  // The first row holds the one thing to do next.
+  rows.push(
+    actionRow(
+      primaryButton({
+        customId: tourneysId("group_publish", tourney.id, current),
+        label: "Publish group list",
+        disabled: group === null,
+      }),
+    ),
   );
 
-  const rows: PanelComponents = [
-    buttonRow(
-      button({
+  // Creating the channels and the roles is green: it creates them.
+  rows.push(
+    actionRow(
+      successButton({
+        customId: tourneysId("modal", "group_format", tourney.id),
+        label: "Create channels and roles",
+      }),
+      secondaryButton({
+        customId: tourneysId("groups", tourney.id, current, "role"),
+        label: "Give group role",
+        disabled: group === null,
+      }),
+      secondaryButton({
+        customId: tourneysId("modal", "set_start_from", tourney.id),
+        label: "Set slotlist start",
+      }),
+    ),
+  );
+
+  // The navigation is grey and last.
+  rows.push(
+    navigationRow(
+      secondaryButton({
         customId: tourneysId("groups", tourney.id, current - 1),
         label: "Previous",
-        style: ButtonStyle.Secondary,
         disabled: current <= 1,
       }),
-      button({
+      secondaryButton({
         customId: tourneysId("groups", tourney.id, current + 1),
         label: "Next",
-        style: ButtonStyle.Secondary,
         disabled: current >= groups.length,
       }),
-      button({
-        customId: tourneysId("group_publish", tourney.id, current),
-        label: "Publish Group List",
-        style: ButtonStyle.Success,
-        disabled: group === null,
-      }),
-      button({
-        customId: tourneysId("modal", "group_format", tourney.id),
-        label: "Create Channels & Roles",
-        style: ButtonStyle.Primary,
-      }),
-      button({
-        customId: tourneysId("groups", tourney.id, current, "role"),
-        label: "Give Group Role",
-        style: ButtonStyle.Primary,
-        disabled: group === null,
-      }),
-    ),
-    buttonRow(
-      button({
-        customId: tourneysId("modal", "set_start_from", tourney.id),
-        label: "Slotlist Start",
-        style: ButtonStyle.Secondary,
-      }),
-      button({
+      secondaryButton({
         customId: tourneysId("groups", tourney.id, current, "refresh"),
         label: "Refresh",
-        style: ButtonStyle.Secondary,
       }),
-      button({
+      secondaryButton({
         customId: tourneysId("manager", tourney.id),
-        label: "Main Menu",
-        style: ButtonStyle.Secondary,
+        label: "Back",
       }),
     ),
-  ];
+  );
 
   assertComponentBudget(rows);
 
@@ -143,23 +165,26 @@ export function buildPublishedGroupList(options: {
 }): { embeds: EmbedBuilder[]; components: PanelComponents } {
   const { tourney, group, guildName } = options;
 
-  const embed = new EmbedBuilder()
-    .setTitle(`${tourney.name} — Group ${group.number}`)
-    .setColor(EMBED_COLOR)
-    .setDescription(renderGroupList(group, tourney.startFrom))
-    .setFooter({ text: guildName });
+  const embed = panelEmbed({
+    title: `${tourney.name} — Group ${group.number}`,
+    description: renderGroupList(group, tourney.startFrom),
+    footer: `${guildName} — press Info to see a slot's details.`,
+  });
 
   const rows: PanelComponents = [
-    buttonRow(
-      button({
-        customId: tourneysId("group_refresh", tourney.id, group.number),
-        label: "Refresh",
-        style: ButtonStyle.Success,
-      }),
-      button({
+    // The one thing a reader of the board can do.
+    actionRow(
+      primaryButton({
         customId: tourneysId("group_refresh", tourney.id, group.number, "info"),
         label: "Info",
-        style: ButtonStyle.Secondary,
+      }),
+    ),
+
+    // The navigation is grey and last.
+    navigationRow(
+      secondaryButton({
+        customId: tourneysId("group_refresh", tourney.id, group.number),
+        label: "Refresh",
       }),
     ),
   ];

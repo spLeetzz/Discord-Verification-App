@@ -16,6 +16,7 @@ import { recordForPayload, releaseLock } from "./lockdown.js";
 import type { LockContext } from "./lockdown.js";
 import { parseLockdownJobPayload } from "./repo.js";
 import type { LockPermission } from "./types.js";
+import { announcePanel, outcomePanel } from "./views/panels.js";
 
 /**
  * The permission a lockdown of this type changed.
@@ -135,17 +136,33 @@ async function announceUnlock(
 
   const channel = guild.channels.cache.get(sourceChannelId);
 
-  if (!channel || !channel.isTextBased()) return;
+  if (!channel || !channel.isTextBased() || channel.isDMBased()) return;
 
-  const message =
+  const panel =
     type === "guild"
-      ? "Unlocked the server."
+      ? outcomePanel({
+          kind: "constructive",
+          title: "Server unlocked",
+          description: "The lockdown is over and the server is open again.",
+          footer: "Members can post in the locked channels again.",
+        })
       : type === "maintenance"
-        ? "Maintenance mode is over."
-        : "Unlocked the channel.";
+        ? outcomePanel({
+            kind: "constructive",
+            title: "Maintenance mode over",
+            description:
+              "The maintenance mode is over and the channels are open again.",
+            footer: "The members the mode was hiding can see the channels again.",
+          })
+        : outcomePanel({
+            kind: "constructive",
+            title: "Channel unlocked",
+            description: "The lockdown is over and the channel is open again.",
+            footer: "Members can post in the channel again.",
+          });
 
   try {
-    await channel.send(message);
+    await announcePanel(channel, panel);
   } catch {
     // The channel may be gone. The unlock still happened.
   }

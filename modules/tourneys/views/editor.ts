@@ -20,18 +20,23 @@
  * The custom id carries the field *and* the tournament's id, so a
  * moderator can open the editor, set three fields over an hour, and come
  * back to it.
+ *
+ * **The editor is a table of settings.** The twenty fields are peers,
+ * so their buttons are the twenty letters and they are all grey — a
+ * table has no "most likely" field. The embed lists the fields in the
+ * same order with the same letters, and the destructive button is red
+ * and sits in the last row, next to the grey way back.
  */
 
-import { ButtonStyle, EmbedBuilder } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
-import type { TourneyRecord, TourneySchedule } from "../types.js";
 import {
-  EDITOR_FIELDS,
+  actionRow,
   assertComponentBudget,
-  button,
-  buttonRow,
-  fieldLetter,
-} from "./components.js";
+  dangerButton,
+  panelEmbed,
+  secondaryButton,
+} from "../../../core/ui.js";
+import type { TourneyRecord, TourneySchedule } from "../types.js";
+import { EDITOR_FIELDS, fieldLetter } from "./components.js";
 import { tourneysId } from "./ids.js";
 import type { Panel, PanelComponents } from "./handlers.js";
 
@@ -45,135 +50,69 @@ export function buildEditorPanel(
   tourney: TourneyRecord,
   schedule: TourneySchedule | null,
 ): Panel {
-  const embed = new EmbedBuilder()
-    .setTitle(`Tournament Editor — ${tourney.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription("Choose a field below to change it. One press changes one field.");
+  const values: Record<string, string> = {
+    set_name: `\`${tourney.name}\``,
+    set_reg_channel: `<#${tourney.registrationChannelId}>`,
+    set_confirm_channel: `<#${tourney.confirmChannelId}>`,
+    set_role: `<@&${tourney.roleId}>`,
+    set_mentions: `\`${tourney.requiredMentions}\``,
+    set_slots: `\`${tourney.totalSlots}\``,
+    set_group_size: `\`${tourney.groupSize ?? "not set"}\``,
+    set_emojis: `${tourney.emojis.tick},${tourney.emojis.cross}`,
+    set_ping_role: tourney.pingRoleId ? `<@&${tourney.pingRoleId}>` : "`Not set`",
+    set_open_role: tourney.openRoleId ? `<@&${tourney.openRoleId}>` : "`Not set`",
+    toggle_multireg: tourney.multiregister ? "`Allowed`" : "`Not allowed`",
+    toggle_teamname: tourney.teamnameCompulsion ? "`Yes`" : "`No`",
+    toggle_dup_name: tourney.noDuplicateName ? "`Not allowed`" : "`Allowed`",
+    toggle_del_reject: tourney.autodeleteRejects ? "`Yes`" : "`No`",
+    set_lines: `\`${tourney.requiredLines}\``,
+    toggle_dup_tags: tourney.allowDuplicateTags ? "`Allowed`" : "`Not allowed`",
+    set_start_from: `\`${tourney.startFrom}\``,
+    set_open_days:
+      schedule && schedule.openDays.length > 0
+        ? schedule.openDays.map((day) => `\`${day}\``).join(", ")
+        : "`Every day`",
+    set_open_time: `\`${schedule?.openTime ?? "18:00"}\``,
+    set_success_message: tourney.successMessage ? "`Set`" : "`Not set`",
+  };
 
-  embed.addFields(
-    { name: "Name", value: `\`${tourney.name}\``, inline: true },
-    {
-      name: "Registration Channel",
-      value: `<#${tourney.registrationChannelId}>`,
+  const embed = panelEmbed({
+    title: `Edit tournament — ${tourney.name}`,
+    description: `\`${tourney.id}\``,
+    fields: EDITOR_FIELDS.map((field, index) => ({
+      name: `${fieldLetter(index).toUpperCase()} · ${field.label}`,
+      value: values[field.key] ?? "`—`",
       inline: true,
-    },
-    {
-      name: "Confirm Channel",
-      value: `<#${tourney.confirmChannelId}>`,
-      inline: true,
-    },
-    { name: "Success Role", value: `<@&${tourney.roleId}>`, inline: true },
-    {
-      name: "Mentions",
-      value: `\`${tourney.requiredMentions}\``,
-      inline: true,
-    },
-    {
-      name: "Slots",
-      value: `\`${tourney.totalSlots}\``,
-      inline: true,
-    },
-    {
-      name: "Teams per Group",
-      value: `\`${tourney.groupSize ?? "not set"}\``,
-      inline: true,
-    },
-    {
-      name: "Reactions",
-      value: `${tourney.emojis.tick},${tourney.emojis.cross}`,
-      inline: true,
-    },
-    {
-      name: "Ping Role",
-      value: tourney.pingRoleId ? `<@&${tourney.pingRoleId}>` : "`Not set`",
-      inline: true,
-    },
-    {
-      name: "Open Role",
-      value: tourney.openRoleId ? `<@&${tourney.openRoleId}>` : "`Not set`",
-      inline: true,
-    },
-    {
-      name: "Multi-Register",
-      value: tourney.multiregister ? "`Allowed`" : "`Not allowed!`",
-      inline: true,
-    },
-    {
-      name: "Team-Name Compulsion",
-      value: tourney.teamnameCompulsion ? "`Yes!`" : "`No!`",
-      inline: true,
-    },
-    {
-      name: "Duplicate Team Name",
-      value: tourney.noDuplicateName ? "`Not allowed!`" : "`Allowed`",
-      inline: true,
-    },
-    {
-      name: "Autodelete Rejected",
-      value: tourney.autodeleteRejects ? "`Yes!`" : "`No!`",
-      inline: true,
-    },
-    {
-      name: "Required Lines",
-      value: `\`${tourney.requiredLines}\``,
-      inline: true,
-    },
-    {
-      name: "Duplicate / Fake Tags",
-      value: tourney.allowDuplicateTags ? "`Allowed`" : "`Not allowed!`",
-      inline: true,
-    },
-    {
-      name: "Slotlist Start From",
-      value: `\`${tourney.startFrom}\``,
-      inline: true,
-    },
-    {
-      name: "Open Days",
-      value:
-        schedule && schedule.openDays.length > 0
-          ? schedule.openDays.map((day) => `\`${day}\``).join(", ")
-          : "`Every day`",
-      inline: true,
-    },
-    {
-      name: "Open Time",
-      value: `\`${schedule?.openTime ?? "18:00"}\``,
-      inline: true,
-    },
-    {
-      name: "Success Message",
-      value: tourney.successMessage ? "`Set`" : "`Not set`",
-      inline: true,
-    },
-  );
-
-  const buttons = EDITOR_FIELDS.map((field, index) =>
-    button({
-      customId: tourneysId("editor", field.key, tourney.id),
-      label: `${fieldLetter(index)} ${field.label}`,
-      emoji: field.premium ? "💎" : undefined,
-      style: field.kind === "toggle" ? ButtonStyle.Secondary : ButtonStyle.Primary,
-    }),
-  );
+    })),
+    footer: "Press a letter to change that field. One press changes one field.",
+  });
 
   const rows: PanelComponents = [];
 
+  // The field buttons, in rows of five. A premium field keeps its
+  // diamond: a mark that carries a meaning on its own.
+  const buttons = EDITOR_FIELDS.map((field, index) =>
+    secondaryButton({
+      customId: tourneysId("editor", field.key, tourney.id),
+      label: fieldLetter(index).toUpperCase(),
+      emoji: field.premium ? "💎" : undefined,
+    }),
+  );
+
   for (let index = 0; index < buttons.length; index += 5) {
-    rows.push(buttonRow(...buttons.slice(index, index + 5)));
+    rows.push(actionRow(...buttons.slice(index, index + 5)));
   }
 
+  // The last row: the destructive button, and the way back.
   rows.push(
-    buttonRow(
-      button({
-        customId: tourneysId("manager", tourney.id),
-        label: "Main Menu",
-        style: ButtonStyle.Secondary,
-      }),
-      button({
+    actionRow(
+      dangerButton({
         customId: tourneysId("editor", "delete", tourney.id),
-        label: "Delete Tournament",
-        style: ButtonStyle.Danger,
+        label: "Delete tournament",
+      }),
+      secondaryButton({
+        customId: tourneysId("manager", tourney.id),
+        label: "Back",
       }),
     ),
   );

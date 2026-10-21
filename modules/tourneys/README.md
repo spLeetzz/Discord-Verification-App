@@ -57,7 +57,7 @@ rejected: the command would be useless while the bot was down, and the
 button would have nothing to show.
 
 **The message is what the button reads.** The embed's description *is*
-the copy block, so the "Get in Copy Format" button reads the three
+the copy block, so the "Copy details" button reads the three
 values back out of the message it is attached to. Nothing is held in
 memory between the command and the click, and the copy survives a
 restart.
@@ -151,7 +151,7 @@ tourneys:<action>[:<part>[:<part>…]]
 | `slotm_pick` | a tourney id, a user id | The "which slot do you want to rename?" menu |
 | `slotm_swap` | a tourney id | Swaps two slots' groups |
 | `partner` | a tourney id | The media-partner panel |
-| `idp_copy` | — | The "Get in Copy Format" button of the room-credential post |
+| `idp_copy` | — | The "Copy details" button of the room-credential post |
 | `modal` | the modal kind + the record | Every modal submit |
 | `select` | `pick` | The manager panel's tournament menu |
 
@@ -178,10 +178,10 @@ menu (`tourneys:slotm_pick:<tourneyId>:<userId>`), handled in
 `views/pick.ts`.
 
 Everything else uses the core helpers: `core/prompt.ts`'s `prompt`
-(for the "are you sure?" in **Cancel My Slot**, with `asFollowUp:
+(for the "are you sure?" in **Cancel my slot**, with `asFollowUp:
 true`, because the button press has already been answered by the menu
 before it) and `core/select.ts`'s `awaitSelect` (for the slot picker
-in **Cancel My Slot**).
+in **Cancel my slot**).
 
 `views/select-flow.ts` still holds `awaitChannelSelect` and
 `awaitRoleSelect`: Discord has dedicated component types for a channel
@@ -331,7 +331,7 @@ the publish path only inserts.
 
 ### Creating the group channels and roles
 
-"Create Channels & Roles" creates a category, a role and a channel per
+"Create channels and roles" creates a category, a role and a channel per
 group, and then publishes each group's list into the channel it just
 created.
 
@@ -406,8 +406,8 @@ guards changes (D15).
 | Gate | Entitlement | Where |
 |---|---|---|
 | The custom reaction emojis | `tourney_features` | The editor's **Reactions** field and the wizard's |
-| The registration "required lines" | `tourney_features` | The editor's **Required Lines** field |
-| The duplicate-tag allowance | `tourney_features` | The editor's **Duplicate / Fake Tags** toggle |
+| The registration "required lines" | `tourney_features` | The editor's **Required lines** field |
+| The duplicate-tag allowance | `tourney_features` | The editor's **Duplicate / fake tags** toggle |
 | More than one tournament | `tourney_features` | `/tourney create` |
 
 > **Why `tourney_features` and not `scrim_slots`?** Scrims and

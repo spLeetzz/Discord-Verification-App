@@ -16,6 +16,7 @@ import {
   resolveMemberTarget,
 } from "../members.js";
 import type { ModerationCommand } from "../types.js";
+import { outcomePanel, replyPanel } from "../views/panels.js";
 import {
   MODERATION_PERMISSIONS,
   missingPermission,
@@ -71,17 +72,24 @@ const kickCommand: ModerationCommand = {
 
       assertTargetHierarchy(guild, author, target);
 
-      const reason = formatActionReason(
-        author.displayName,
-        author.id,
-        interaction.options.getString("reason"),
-      );
+      const given = interaction.options.getString("reason");
+
+      const reason = formatActionReason(author.displayName, author.id, given);
 
       await kickTarget(guild, target, reason);
 
-      await interaction.editReply({
-        content: `${describeTarget(target)} has been kicked.`,
-      });
+      await replyPanel(
+        interaction,
+        outcomePanel({
+          kind: "destructive",
+          title: "Member kicked",
+          description: `${describeTarget(target)} has been kicked.`,
+          fields: given
+            ? [{ name: "Reason", value: given, inline: true }]
+            : [],
+          footer: "They can join again with an invite.",
+        }),
+      );
     });
   },
 };

@@ -281,10 +281,46 @@ the moderator gives none, is Quotient's "Action done by `<author> (ID:
 | 8 | A category hide is recorded as a `category` lockdown. | So that `/category unhide` restores the previous permissions exactly, the same as the other lockdowns, instead of forcing `read_messages = True`. |
 | 9 | The bulk role actions read the members from the guild cache. | A bulk action over a thousand members must not be a thousand API calls. The bot has the GuildMembers intent. |
 | 10 | The reason option accepts 400 characters; the real cap is 512 minus the prefix. | The prefix depends on the moderator's display name, which is not known when the command is registered. `formatActionReason` refuses rather than truncating, and says the real number. |
-| 11 | The confirm prompt uses `core/prompt.ts`; the brief's `moderation:lock_confirm` example was generalised into it. | `core/prompt.ts` exists and owns the Confirm / Cancel buttons under the `core:prompt` prefix. A second implementation in this area would be the "second copy" the wave-3 brief warns against. This module owns exactly one custom id: `moderation:role_revert`. |
+| 11 | The confirm prompt uses `core/prompt.ts`; the brief's `moderation:lock_confirm` example was generalised into it. | `core/prompt.ts` exists and owns the Confirm / Cancel buttons under the `core:prompt` prefix. A second implementation in this area would be the "second copy" the wave-3 brief warns against. This module owns exactly one custom id: `moderation:role_revert`. **Amended by the restyle — see §4a.** |
 | 12 | The role-revert custom id is `moderation:role_revert:<action>:<token>`. | The area prefix (D7) plus the action and the token the brief asked for. The router dispatches on the prefix and never guesses an id's owner from its shape. |
 | 13 | The `contains` minimum is enforced twice: by the option (`setMinLength(3)`) and by `validateContains`. | Discord's own limit gives a better error than a runtime check; the runtime check is the one under test. |
 | 14 | A lockdown row carries the **key of its subject** in `lockdowns.lock_key`, and the insert is `ON CONFLICT (lock_key) DO NOTHING`. | The key is `<kind>:<subject>` — `channel:<channelId>`, `category:<categoryId>`, `maintenance:<roleId>`, `guild:<guildId>` — so a channel id can never collide with a role id, and the ids are snowflakes, which are unique across Discord. The unique constraint on the column (added by the schema owner) is what says "one lockdown per subject": two moderators who lock the same subject at the same time cannot both get their way, because the second insert is refused **by the database**. The double-lock guard stays — it is the explanation, the constraint is the backstop. |
+
+---
+
+## 4a. The restyle amendment (decision 11)
+
+The area was restyled onto `core/ui.ts` after the port. The panels, the
+empty states and the role-revert button are built on the shared design
+language, and the area's own `views/panels.ts` holds the two rules the
+design system leaves to the area: the colour of a panel and its footer.
+
+**Decision 11 changed.** The questions this area asks are no longer asked
+through `core/prompt.ts`. They are asked through `views/confirm.ts`, a
+panel of the area's own, because the shared prompt cannot be right for
+them:
+
+- the shared prompt puts a **green** Confirm next to a grey Cancel on
+  one row, and this area asks its questions *before* something is
+  destroyed — a lockdown, a category delete, a nuke. A green Confirm on
+  "Delete this category?" tells the moderator the wrong thing;
+- the shared prompt puts both buttons on one row, and the design system
+  says the main action is alone on the first row and the navigation
+  shares the last one.
+
+**What did not change.** The mechanics are the ones of
+`core/prompt.ts`: only the member who ran the command may answer, the
+buttons go away once the question has been answered, a question nobody
+answers is a refusal, and the custom id keeps the same shape —
+`core:collect:prompt:<token>:<answer>` — so the router leaves the
+interaction alone. **The area still owns exactly one custom id:
+`moderation:role_revert`.** The question's buttons live in the
+collector's namespace, where they always lived.
+
+The alternative was to leave the shared prompt alone and accept a green
+Confirm on every question the area asks. That was not done, because the
+restyle brief for this area asks for the opposite: red for what
+destroys, and nothing destructive on a row with something harmless.
 
 ---
 

@@ -10,6 +10,7 @@ import { InputError } from "../../../core/errors.js";
 import { formatActionReason } from "../reason.js";
 import { parseUserId, unbanTarget } from "../members.js";
 import type { ModerationCommand } from "../types.js";
+import { outcomePanel, replyPanel } from "../views/panels.js";
 import {
   MODERATION_PERMISSIONS,
   missingPermission,
@@ -70,11 +71,24 @@ const unbanCommand: ModerationCommand = {
 
       const result = await unbanTarget(guild, id, reason);
 
-      await interaction.editReply({
-        content: result.previousReason
-          ? `Unbanned ${id}, previously banned for ${result.previousReason}.`
-          : `Unbanned ${id}.`,
-      });
+      await replyPanel(
+        interaction,
+        outcomePanel({
+          kind: "constructive",
+          title: "Ban lifted",
+          description: `${id} has been unbanned.`,
+          fields: result.previousReason
+            ? [
+                {
+                  name: "Previous reason",
+                  value: result.previousReason,
+                  inline: true,
+                },
+              ]
+            : [],
+          footer: "The member can join again with an invite.",
+        }),
+      );
     });
   },
 };

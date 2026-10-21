@@ -12,6 +12,7 @@ import { formatActionReason } from "../reason.js";
 import { unlockChannel, unlockServer } from "../lockdown.js";
 import type { LockContext } from "../lockdown.js";
 import type { ModerationCommand } from "../types.js";
+import { announcePanel, outcomePanel, replyPanel } from "../views/panels.js";
 import {
   MODERATION_PERMISSIONS,
   missingPermission,
@@ -66,17 +67,36 @@ const unlockCommand: ModerationCommand = {
       if (subcommand === "server") {
         const result = await unlockServer(context);
 
-        await channel.send(
-          `Unlocked ${result.restored} channel${result.restored === 1 ? "" : "s"}.` +
-            (result.failed > 0 ? ` (Failed: ${result.failed})` : "") +
-            (result.withoutRecord > 0
-              ? ` (${result.withoutRecord} had no record of their previous permissions and were reset to inherit.)`
-              : ""),
-        );
-
-        await interaction.editReply({
-          content: `Unlocked ${result.restored} channel${result.restored === 1 ? "" : "s"}.`,
+        const panel = outcomePanel({
+          kind: "constructive",
+          title: "Server unlocked",
+          description: `Unlocked ${result.restored} channel${
+            result.restored === 1 ? "" : "s"
+          }.`,
+          fields: [
+            { name: "Restored", value: String(result.restored), inline: true },
+            ...(result.failed > 0
+              ? [{ name: "Failed", value: String(result.failed), inline: true }]
+              : []),
+            ...(result.withoutRecord > 0
+              ? [
+                  {
+                    name: "Reset to inherit",
+                    value: String(result.withoutRecord),
+                    inline: true,
+                  },
+                ]
+              : []),
+          ],
+          footer:
+            result.withoutRecord > 0
+              ? "The channels without a record were reset to inherit."
+              : "The channels are back the way they were before the lockdown.",
         });
+
+        await announcePanel(channel, panel);
+
+        await replyPanel(interaction, panel);
 
         return;
       }
@@ -84,16 +104,29 @@ const unlockCommand: ModerationCommand = {
       const target = await resolveLockableChannel(interaction, "channel");
       const result = await unlockChannel({ context, channel: target });
 
-      await channel.send(
-        `Unlocked **${target.name}**.` +
-          (result.withoutRecord > 0
-            ? " (Its previous permissions were not recorded, so it was reset to inherit.)"
-            : ""),
-      );
-
-      await interaction.editReply({
-        content: `Unlocked **${target.name}**.`,
+      const panel = outcomePanel({
+        kind: "constructive",
+        title: "Channel unlocked",
+        description: `Unlocked **${target.name}**.`,
+        fields:
+          result.withoutRecord > 0
+            ? [
+                {
+                  name: "Reset to inherit",
+                  value: String(result.withoutRecord),
+                  inline: true,
+                },
+              ]
+            : [],
+        footer:
+          result.withoutRecord > 0
+            ? "Its previous permissions were not recorded, so it was reset to inherit."
+            : "The channel is back the way it was before the lockdown.",
       });
+
+      await announcePanel(channel, panel);
+
+      await replyPanel(interaction, panel);
     });
   },
 };

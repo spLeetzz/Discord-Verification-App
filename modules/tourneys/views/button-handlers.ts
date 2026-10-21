@@ -11,18 +11,19 @@
 
 import { ChannelType, PermissionFlagsBits } from "discord.js";
 import type { ButtonInteraction, Guild } from "discord.js";
-import { EmbedBuilder, StringSelectMenuBuilder } from "discord.js";
+import { StringSelectMenuBuilder } from "discord.js";
 import { prompt } from "../../../core/prompt.js";
 import { awaitSelect } from "../../../core/select.js";
 import { respond } from "../../../core/context.js";
 import { PremiumFeature } from "../../../core/constants.js";
 import { run } from "../../../core/fire-and-forget.js";
+import { panelEmbed, componentRow } from "../../../core/ui.js";
 import { logger } from "../../../utils/logger.js";
 import { assertEntitled } from "../../premium/entitlements.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
 import type { TourneyRecord } from "../types.js";
-import { EDITOR_FIELDS, selectRow } from "./components.js";
+import { EDITOR_FIELDS } from "./components.js";
 import { buildEditorPanel } from "./editor.js";
 import { buildGroupManagerPanel, buildPublishedGroupList } from "./groups.js";
 import { handleIdpCopy } from "./idp.js";
@@ -35,7 +36,14 @@ import {
   strikeConfirmMessage,
 } from "./lifecycle.js";
 import { buildManagerPanel, buildTourneyPanel } from "./manager.js";
-import { buildFieldModal, buildTwoInputModal } from "./modals.js";
+import {
+  buildFieldModal,
+  buildTwoInputModal,
+  copyFor,
+  FIELD_MODAL_COPY,
+  MODAL_COPY,
+  TWO_INPUT_COPY,
+} from "./modals.js";
 import { buildPartnerPanel } from "./partner.js";
 import { awaitChannelSelect, awaitRoleSelect } from "../../../core/select.js";
 import { buildSlotManagerPanel } from "./slotm.js";
@@ -140,19 +148,21 @@ async function onModalButton(
   }
 
   if (kind === "add_slot") {
+    const copy = TWO_INPUT_COPY.add_slot;
+
     await interaction.showModal(
       buildTwoInputModal({
         customId: tourneysId("modal", "add_slot", tourney.id),
-        title: "Add a slot",
+        title: copy.title,
         first: {
           id: "leader",
-          label: "The team leader",
-          placeholder: "@leader",
+          label: copy.first.label,
+          placeholder: copy.first.placeholder,
         },
         second: {
           id: "name",
-          label: "The team name",
-          placeholder: "Team Awesome",
+          label: copy.second.label,
+          placeholder: copy.second.placeholder,
         },
       }),
     );
@@ -161,19 +171,21 @@ async function onModalButton(
   }
 
   if (kind === "remove_slot") {
+    const copy = TWO_INPUT_COPY.remove_slot;
+
     await interaction.showModal(
       buildTwoInputModal({
         customId: tourneysId("modal", "remove_slot", tourney.id),
-        title: "Cancel a slot",
+        title: copy.title,
         first: {
           id: "member",
-          label: "The member whose slot you want to cancel",
-          placeholder: "@someone",
+          label: copy.first.label,
+          placeholder: copy.first.placeholder,
         },
         second: {
           id: "num",
-          label: "The slot number",
-          placeholder: "3",
+          label: copy.second.label,
+          placeholder: copy.second.placeholder,
         },
       }),
     );
@@ -182,13 +194,15 @@ async function onModalButton(
   }
 
   if (kind === "export") {
+    const copy = MODAL_COPY.export;
+
     await interaction.showModal(
       buildFieldModal({
         customId: tourneysId("modal", "export", tourney.id),
-        title: "Export the registrations",
-        label: "Type anything to confirm",
-        placeholder: "export",
-        required: false,
+        title: copy.title,
+        label: copy.label,
+        placeholder: copy.placeholder,
+        required: copy.required,
       }),
     );
 
@@ -196,19 +210,21 @@ async function onModalButton(
   }
 
   if (kind === "group_format") {
+    const copy = TWO_INPUT_COPY.group_format;
+
     await interaction.showModal(
       buildTwoInputModal({
         customId: tourneysId("modal", "group_format", tourney.id),
-        title: "Create the group channels",
+        title: copy.title,
         first: {
           id: "format",
-          label: "The name format, with {0} for the number",
-          placeholder: "Group {0}",
+          label: copy.first.label,
+          placeholder: copy.first.placeholder,
         },
         second: {
           id: "range",
-          label: "The range of group numbers",
-          placeholder: "1-5",
+          label: copy.second.label,
+          placeholder: copy.second.placeholder,
         },
       }),
     );
@@ -217,12 +233,16 @@ async function onModalButton(
   }
 
   if (kind === "set_start_from") {
+    const copy = MODAL_COPY.set_start_from;
+
     await interaction.showModal(
       buildFieldModal({
         customId: tourneysId("modal", "set_start_from", tourney.id),
-        title: "Slotlist start",
-        label: "The slot the group list starts from",
-        placeholder: "2",
+        title: copy.title,
+        label: copy.label,
+        placeholder: copy.placeholder,
+        required: copy.required,
+        maxLength: copy.maxLength,
       }),
     );
 
@@ -387,11 +407,23 @@ async function onWizard(
     return;
   }
 
+  const copy = copyFor(FIELD_MODAL_COPY, key);
+
+  if (!copy) {
+    await fail(interaction, "That button is no longer active.");
+
+    return;
+  }
+
   await interaction.showModal(
     buildFieldModal({
       customId: tourneysId("modal", "wizard_field", token, key),
-      title: field.label,
-      label: field.label,
+      title: copy.title,
+      label: copy.label,
+      placeholder: copy.placeholder,
+      required: copy.required,
+      maxLength: copy.maxLength,
+      style: copy.style,
       value: wizardValue(draft, key),
     }),
   );
@@ -493,6 +525,27 @@ async function onEditor(
 
   const key = parts[0];
   const tourneyId = parts[1];
+
+  // The hub's "Edit settings" button carries only the tournament id —
+  // it opens the editor rather than setting a field. So a one-part id
+  // is the editor, and a two-part id is a field of it. It used to fall
+  // through to the field branch, which read the tournament id as a
+  // field name and refused the press: the panel's primary button was
+  // dead.
+  if (key && !tourneyId) {
+    const tourney = await repo.getTourney(key);
+
+    if (!tourney) {
+      await fail(interaction, "This tournament no longer exists.");
+
+      return;
+    }
+
+    await acknowledge(interaction);
+    await renderPanel(interaction, await buildEditor(tourney));
+
+    return;
+  }
 
   if (!key || !tourneyId) {
     await fail(interaction, "That button is no longer active.");
@@ -610,11 +663,23 @@ async function onEditor(
     return;
   }
 
+  const copy = copyFor(FIELD_MODAL_COPY, key);
+
+  if (!copy) {
+    await fail(interaction, "That button is no longer active.");
+
+    return;
+  }
+
   await interaction.showModal(
     buildFieldModal({
       customId: tourneysId("modal", "editor_field", tourney.id, key),
-      title: field.label,
-      label: field.label,
+      title: copy.title,
+      label: copy.label,
+      placeholder: copy.placeholder,
+      required: copy.required,
+      maxLength: copy.maxLength,
+      style: copy.style,
       value: currentFieldValue(tourney, key),
     }),
   );
@@ -848,12 +913,16 @@ async function onBan(
     return;
   }
 
+  const copy = MODAL_COPY.ban;
+
   await interaction.showModal(
     buildFieldModal({
       customId: tourneysId("modal", "ban", tourney.id),
-      title: "Ban or unban users",
-      label: "Mention the users to ban or unban",
-      placeholder: "@someone @someone-else",
+      title: copy.title,
+      label: copy.label,
+      placeholder: copy.placeholder,
+      required: copy.required,
+      maxLength: copy.maxLength,
     }),
   );
 }
@@ -1173,14 +1242,15 @@ async function onGroupRefresh(
       return;
     }
 
-    const embed = new EmbedBuilder().setColor(0x00ffb3).setDescription(
-      [
-        `> Team Name: \`${slot.teamName}\``,
-        `> Team Leader: <@${slot.leaderId}>`,
-        `> Registration Message: [Click here](${slot.jumpUrl ?? "—"})`,
-        `> Confirm Message: [Click here](${slot.confirmJumpUrl ?? "—"})`,
+    const embed = panelEmbed({
+      title: "Slot details",
+      description: [
+        `> Team name: \`${slot.teamName}\``,
+        `> Team leader: <@${slot.leaderId}>`,
+        `> Registration message: [Click here](${slot.jumpUrl ?? "—"})`,
+        `> Confirm message: [Click here](${slot.confirmJumpUrl ?? "—"})`,
       ].join("\n"),
-    );
+    });
 
     await interaction.followUp({ embeds: [embed], ephemeral: true });
 
@@ -1288,16 +1358,15 @@ async function onSlotManager(
     return 0;
   });
 
-  const embed = new EmbedBuilder()
-    .setColor(0x00ffb3)
-    .setDescription(
-      `You have the following slots in **${tourney.name}**:\n\n${slots
-        .map(
-          (slot, index) =>
-            `\`${index + 1}.\` **${slot.teamName}** (Slot ${slot.num}, Group ${groupNumbers[index] ?? "?"})`,
-        )
-        .join("\n")}`,
-    );
+  const embed = panelEmbed({
+    title: "Your slots",
+    description: `You have the following slots in **${tourney.name}**:\n\n${slots
+      .map(
+        (slot, index) =>
+          `\`${index + 1}.\` **${slot.teamName}** (Slot ${slot.num}, Group ${groupNumbers[index] ?? "?"})`,
+      )
+      .join("\n")}`,
+  });
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }
@@ -1473,7 +1542,7 @@ async function onSlotRename(
       });
     }
 
-    await respond(interaction, { components: [selectRow(menu)] }, true);
+    await respond(interaction, { components: [componentRow(menu)] }, true);
 
     return;
   }
@@ -1493,12 +1562,16 @@ async function openRenameModal(
   tourney: TourneyRecord,
   slotId: string,
 ): Promise<void> {
+  const copy = MODAL_COPY.rename;
+
   await interaction.showModal(
     buildFieldModal({
       customId: tourneysId("modal", "rename", tourney.id, slotId),
-      title: "Change the team name",
-      label: "The new team name",
-      placeholder: "Team Awesome",
+      title: copy.title,
+      label: copy.label,
+      placeholder: copy.placeholder,
+      required: copy.required,
+      maxLength: copy.maxLength,
     }),
   );
 }
@@ -1549,19 +1622,21 @@ async function onSlotSwap(
   // A **modal**, not two select menus: `awaitSelect` opens a component
   // collector on the reply, and a reply can only carry one. The second
   // menu would have had nothing to wait on.
+  const copy = TWO_INPUT_COPY.swap;
+
   await interaction.showModal(
     buildTwoInputModal({
       customId: tourneysId("modal", "swap", tourney.id),
-      title: "Swap two slots",
+      title: copy.title,
       first: {
         id: "first",
-        label: "The first slot's team leader",
-        placeholder: "@first",
+        label: copy.first.label,
+        placeholder: copy.first.placeholder,
       },
       second: {
         id: "second",
-        label: "The second slot's team leader",
-        placeholder: "@second",
+        label: copy.second.label,
+        placeholder: copy.second.placeholder,
       },
     }),
   );
@@ -1631,12 +1706,16 @@ async function onPartnerAdd(
     return;
   }
 
+  const copy = MODAL_COPY.partner_add;
+
   await interaction.showModal(
     buildFieldModal({
       customId: tourneysId("modal", "partner_add", tourney.id),
-      title: "Add a media partner",
-      label: "The partner channel id",
-      placeholder: "123456789012345678",
+      title: copy.title,
+      label: copy.label,
+      placeholder: copy.placeholder,
+      required: copy.required,
+      maxLength: copy.maxLength,
     }),
   );
 }

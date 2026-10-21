@@ -356,7 +356,18 @@ export async function dispatch(interaction: RepliableInteraction): Promise<boole
         logger.warn(
           `[Router] No legacy handler registered for "${customId}"; leaving it to the existing flow.`,
         );
-        return false;
+
+        // The interaction still has to be answered. Returning without
+        // answering means Discord expires it, and the user is shown
+        // "the bot didn't respond in time" — which says nothing about
+        // what happened.
+        await replyError(
+          interaction,
+          "This button is no longer active. Please run the command again.",
+          { ephemeral: true },
+        );
+
+        return true;
       }
 
       const eventKey = payloadOf(LEGACY_VERIFY_PREFIX, customId);

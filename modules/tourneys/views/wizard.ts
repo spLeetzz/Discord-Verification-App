@@ -12,22 +12,34 @@
  * database row, so it lives in a **token** (D18) — a random id into an
  * in-memory map with a time to live.
  *
+ * **The wizard is a step-by-step flow, and the panel says so.** The
+ * steps are the letters, the embed shows what every step holds right
+ * now, and the step that is next — the first one that is not filled in
+ * yet — is the panel's primary button and is named in the description.
+ * **Cancel** is the way back: it is grey, because a draft that has not
+ * been saved is not a record and nothing is destroyed by throwing it
+ * away. **Save tournament** is green, because saving is what creates
+ * the tournament.
+ *
  * The wizard's fields: registration channel, confirm channel, success
  * role, required mentions, total slots, teams per group, the two
  * reaction emojis, the days the tournament opens on and the time it
  * opens at.
  */
 
-import { ButtonStyle, EmbedBuilder } from "discord.js";
 import { TokenStore } from "../../../core/custom-id.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
+import {
+  actionRow,
+  assertComponentBudget,
+  navigationRow,
+  panelEmbed,
+  primaryButton,
+  secondaryButton,
+  successButton,
+} from "../../../core/ui.js";
 import { OPEN_DAYS } from "../schedule.js";
 import type { WizardDraft } from "../types.js";
-import {
-  assertComponentBudget,
-  button,
-  buttonRow,
-} from "./components.js";
+import { fieldLetter } from "./components.js";
 import { tourneysId } from "./ids.js";
 import type { Panel, PanelComponents } from "./handlers.js";
 
@@ -49,18 +61,30 @@ export interface WizardField {
   readonly kind: "channel" | "role" | "number" | "emojis" | "text" | "days";
 }
 
-/** The wizard's fields, in the order they are shown. */
+/**
+ * The wizard's fields, in the order they are shown.
+ *
+ * The order is the order of the steps, and the panel numbers them the
+ * same way, so the button and the embed field always agree.
+ */
 export const WIZARD_FIELDS: readonly WizardField[] = [
-  { key: "set_reg_channel", label: "Registration Channel", kind: "channel" },
-  { key: "set_confirm_channel", label: "Confirm Channel", kind: "channel" },
-  { key: "set_role", label: "Success Role", kind: "role" },
-  { key: "set_mentions", label: "Mentions", kind: "number" },
-  { key: "set_slots", label: "Total Slots", kind: "number" },
-  { key: "set_group_size", label: "Teams per Group", kind: "number" },
+  { key: "set_reg_channel", label: "Registration channel", kind: "channel" },
+  { key: "set_confirm_channel", label: "Confirm channel", kind: "channel" },
+  { key: "set_role", label: "Success role", kind: "role" },
+  { key: "set_mentions", label: "Required mentions", kind: "number" },
+  { key: "set_slots", label: "Total slots", kind: "number" },
+  { key: "set_group_size", label: "Teams per group", kind: "number" },
   { key: "set_emojis", label: "Reactions", kind: "emojis" },
-  { key: "set_open_days", label: "Open Days", kind: "days" },
-  { key: "set_open_time", label: "Open Time", kind: "text" },
+  { key: "set_open_days", label: "Open days", kind: "days" },
+  { key: "set_open_time", label: "Open time", kind: "text" },
 ];
+
+/** One step of the wizard. */
+interface WizardStep {
+  readonly field: WizardField;
+  /** The letter the step's button carries. */
+  readonly letter: string;
+}
 
 /**
  * The wizard panel.
@@ -70,68 +94,12 @@ export const WIZARD_FIELDS: readonly WizardField[] = [
  *              *message* (not of the process — a draft has no row).
  */
 export function buildWizardPanel(draft: WizardDraft, token: string): Panel {
-  const embed = new EmbedBuilder()
-    .setTitle("Tournament setup")
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      "Fill the fields below and press **Save**. The tournament starts as a draft — press **Start Reg** afterwards to open the registration.",
-    );
+  const steps: WizardStep[] = WIZARD_FIELDS.map((field, index) => ({
+    field,
+    letter: fieldLetter(index).toUpperCase(),
+  }));
 
-  embed.addFields(
-    { name: "Name", value: `\`${draft.name}\``, inline: true },
-    {
-      name: "Registration Channel",
-      value: draft.registrationChannelId
-        ? `<#${draft.registrationChannelId}>`
-        : "`Not set`",
-      inline: true,
-    },
-    {
-      name: "Confirm Channel",
-      value: draft.confirmChannelId
-        ? `<#${draft.confirmChannelId}>`
-        : "`Not set`",
-      inline: true,
-    },
-    {
-      name: "Success Role",
-      value: draft.roleId ? `<@&${draft.roleId}>` : "`Not set`",
-      inline: true,
-    },
-    {
-      name: "Required Mentions",
-      value: `\`${draft.requiredMentions}\``,
-      inline: true,
-    },
-    {
-      name: "Total Slots",
-      value: draft.totalSlots ? `\`${draft.totalSlots}\`` : "`Not set`",
-      inline: true,
-    },
-    {
-      name: "Teams per Group",
-      value: draft.groupSize ? `\`${draft.groupSize}\`` : "`Not set`",
-      inline: true,
-    },
-    {
-      name: "Reactions",
-      value: `${draft.emojis.tick},${draft.emojis.cross}`,
-      inline: true,
-    },
-    {
-      name: "Open Days",
-      value:
-        draft.openDays.length > 0
-          ? draft.openDays.map((day) => `\`${day}\``).join(", ")
-          : "`Every day`",
-      inline: true,
-    },
-    {
-      name: "Open Time",
-      value: `\`${draft.openTime}\``,
-      inline: true,
-    },
-  );
+  const next = steps.find((step) => !isFilled(draft, step.field.key)) ?? null;
 
   const ready =
     draft.registrationChannelId !== null &&
@@ -139,47 +107,57 @@ export function buildWizardPanel(draft: WizardDraft, token: string): Panel {
     draft.roleId !== null &&
     draft.totalSlots !== null;
 
+  const embed = panelEmbed({
+    title: "Create a tournament",
+    description: next
+      ? `Next step: **${next.letter} · ${next.field.label}**`
+      : "Every step is filled in. Save the tournament when you are ready.",
+    fields: steps.map((step) => ({
+      name: `${step.letter} · ${step.field.label}`,
+      value: stepValue(draft, step.field.key),
+      inline: true,
+    })),
+    footer:
+      "Press a letter to fill that step in. The tournament is created as a draft — the registration opens afterwards.",
+  });
+
   const rows: PanelComponents = [];
 
-  const first = WIZARD_FIELDS.slice(0, 5);
-  const second = WIZARD_FIELDS.slice(5);
-
-  rows.push(
-    buttonRow(
-      ...first.map((field, index) =>
-        button({
-          customId: tourneysId("wizard", field.key, token),
-          label: `${String.fromCharCode(97 + index)} ${field.label}`,
-          style: ButtonStyle.Secondary,
+  // The steps, in rows of five. The step that is next is the primary:
+  // it is the thing to do now.
+  const buttons = steps.map((step) =>
+    step === next
+      ? primaryButton({
+          customId: tourneysId("wizard", step.field.key, token),
+          label: step.letter,
+        })
+      : secondaryButton({
+          customId: tourneysId("wizard", step.field.key, token),
+          label: step.letter,
         }),
-      ),
-    ),
   );
 
-  rows.push(
-    buttonRow(
-      ...second.map((field, index) =>
-        button({
-          customId: tourneysId("wizard", field.key, token),
-          label: `${String.fromCharCode(97 + 5 + index)} ${field.label}`,
-          style: ButtonStyle.Secondary,
-        }),
-      ),
-    ),
-  );
+  for (let index = 0; index < buttons.length; index += 5) {
+    rows.push(actionRow(...buttons.slice(index, index + 5)));
+  }
 
+  // The main action: saving is what creates the tournament.
   rows.push(
-    buttonRow(
-      button({
+    actionRow(
+      successButton({
         customId: tourneysId("wizard", "save", token),
-        label: "Save",
-        style: ButtonStyle.Success,
+        label: "Save tournament",
         disabled: !ready,
       }),
-      button({
+    ),
+  );
+
+  // The way out. A wizard that can only be saved is a trap.
+  rows.push(
+    navigationRow(
+      secondaryButton({
         customId: tourneysId("wizard", "cancel", token),
         label: "Cancel",
-        style: ButtonStyle.Danger,
       }),
     ),
   );
@@ -187,6 +165,60 @@ export function buildWizardPanel(draft: WizardDraft, token: string): Panel {
   assertComponentBudget(rows);
 
   return { embeds: [embed], components: rows };
+}
+
+/**
+ * Is the step's value already set?
+ *
+ * The steps that start with a default — the mentions, the reactions,
+ * the open days and the open time — count as filled in, because there
+ * is nothing to decide about them.
+ */
+function isFilled(draft: WizardDraft, key: string): boolean {
+  switch (key) {
+    case "set_reg_channel":
+      return draft.registrationChannelId !== null;
+    case "set_confirm_channel":
+      return draft.confirmChannelId !== null;
+    case "set_role":
+      return draft.roleId !== null;
+    case "set_slots":
+      return draft.totalSlots !== null;
+    case "set_group_size":
+      return draft.groupSize !== null;
+    default:
+      return true;
+  }
+}
+
+/** A step's value, as the embed shows it. */
+function stepValue(draft: WizardDraft, key: string): string {
+  switch (key) {
+    case "set_reg_channel":
+      return draft.registrationChannelId
+        ? `<#${draft.registrationChannelId}>`
+        : "`Not set`";
+    case "set_confirm_channel":
+      return draft.confirmChannelId ? `<#${draft.confirmChannelId}>` : "`Not set`";
+    case "set_role":
+      return draft.roleId ? `<@&${draft.roleId}>` : "`Not set`";
+    case "set_mentions":
+      return `\`${draft.requiredMentions}\``;
+    case "set_slots":
+      return draft.totalSlots ? `\`${draft.totalSlots}\`` : "`Not set`";
+    case "set_group_size":
+      return draft.groupSize ? `\`${draft.groupSize}\`` : "`Not set`";
+    case "set_emojis":
+      return `${draft.emojis.tick},${draft.emojis.cross}`;
+    case "set_open_days":
+      return draft.openDays.length > 0
+        ? draft.openDays.map((day) => `\`${day}\``).join(", ")
+        : "`Every day`";
+    case "set_open_time":
+      return `\`${draft.openTime}\``;
+    default:
+      return "`Not set`";
+  }
 }
 
 /**

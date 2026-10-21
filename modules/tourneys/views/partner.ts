@@ -21,14 +21,15 @@
  *     in the server you are trying to media partner with.").
  */
 
-import { ButtonStyle, EmbedBuilder } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
-import type { MediaPartnerRecord, TourneyRecord } from "../types.js";
 import {
+  actionRow,
   assertComponentBudget,
-  button,
-  buttonRow,
-} from "./components.js";
+  dangerButton,
+  panelEmbed,
+  secondaryButton,
+  successButton,
+} from "../../../core/ui.js";
+import type { MediaPartnerRecord, TourneyRecord } from "../types.js";
 import { tourneysId } from "./ids.js";
 import type { Panel, PanelComponents } from "./handlers.js";
 
@@ -41,46 +42,47 @@ export function buildPartnerPanel(options: {
 }): Panel {
   const { tourney, partners } = options;
 
-  const embed = new EmbedBuilder()
-    .setTitle(`Media Partnership — ${tourney.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      [
-        "A media partner is a channel in **another server**. Registrations made there are checked against that server's tournament and then accepted into this one.",
-        "",
-        partners.length === 0
-          ? "No partner channel yet."
-          : partners
-              .map(
-                (partner, index) =>
-                  `\`${String(index + 1).padStart(2, "0")}.\` <#${partner.channelId}> — **${partner.playerCount}** players`,
-              )
-              .join("\n"),
-        "",
-        "Click **Add New** to create a new media partner.",
-      ].join("\n"),
-    );
+  const embed = panelEmbed({
+    title: `Media partners — ${tourney.name}`,
+    description:
+      "A media partner is a channel in another server. The registrations made there are accepted into this tournament.",
+    fields: partners.map((partner, index) => ({
+      name: `Partner ${String(index + 1).padStart(2, "0")}`,
+      value: `<#${partner.channelId}> — **${partner.playerCount}** players`,
+      inline: true,
+    })),
+    footer:
+      partners.length === 0
+        ? "Add a partner to take registrations from another server."
+        : "Add a partner, or remove one that is no longer needed.",
+  });
 
-  const rows: PanelComponents = [
-    buttonRow(
-      button({
+  const rows: PanelComponents = [];
+
+  // The first row holds the one thing to do next: adding a partner
+  // creates one, so it is green.
+  rows.push(
+    actionRow(
+      successButton({
         customId: tourneysId("partner_add", tourney.id),
-        label: "Add New",
-        style: ButtonStyle.Success,
-      }),
-      button({
-        customId: tourneysId("partner_remove", tourney.id),
-        label: "Remove",
-        style: ButtonStyle.Danger,
-        disabled: partners.length === 0,
-      }),
-      button({
-        customId: tourneysId("manager", tourney.id),
-        label: "Main Menu",
-        style: ButtonStyle.Secondary,
+        label: "Add partner",
       }),
     ),
-  ];
+  );
+
+  rows.push(
+    actionRow(
+      dangerButton({
+        customId: tourneysId("partner_remove", tourney.id),
+        label: "Remove partner",
+        disabled: partners.length === 0,
+      }),
+      secondaryButton({
+        customId: tourneysId("manager", tourney.id),
+        label: "Back",
+      }),
+    ),
+  );
 
   assertComponentBudget(rows);
 

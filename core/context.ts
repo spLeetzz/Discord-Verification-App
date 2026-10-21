@@ -40,6 +40,7 @@ import type {
 import { escapeMentions } from "./escape.js";
 import { run } from "./fire-and-forget.js";
 import { EMBED_COLOR, ERROR_COLOR } from "./constants.js";
+import { assertComponentBudget } from "./ui.js";
 
 /** How long Quotient watched for the invoking message to be deleted. */
 const DEFAULT_DELETE_WINDOW_MS = 30_000;
@@ -126,6 +127,14 @@ export async function respond(
   payload: ReplyPayload,
   ephemeral = false,
 ): Promise<ReplyHandle> {
+  // The budget is checked here, where the message is sent, rather than
+  // in each area's own builder. A panel over Discord's limit is
+  // refused by the API with an opaque 400 and simply does not appear —
+  // the moderator presses a button and nothing happens.
+  if (payload.components) {
+    assertComponentBudget(payload.components);
+  }
+
   if (interaction.replied) {
     // The interaction has answered already. A second answer cannot be a
     // reply — Discord would throw — so it is a follow-up: a new message.

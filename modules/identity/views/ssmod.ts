@@ -64,33 +64,62 @@
  *  - **The panel's prefixes shadowed each other.** The wizard's prefix
  *    was a segment-prefix of the editor's, so the pair worked only
  *    because the wizard was registered first. There is one prefix now.
+ *
+ * ## How it looks
+ *
+ * The panel is built from the shared design language (`core/ui.ts`), so
+ * it looks like the rest of the bot:
+ *
+ *  - **One coloured button per panel.** The button that creates
+ *    something is green — **Create setup** on the list panel, **Save
+ *    setup** on the wizard — and the one that destroys something is red
+ *    — **Delete setup** on the editor. Everything else is grey, and the
+ *    navigation is grey and last.
+ *  - **A value that is not set reads as not set.** A missing channel,
+ *    role, type, page name, keyword or success message is written in
+ *    italics, so an unfinished setup cannot be mistaken for a finished
+ *    one. The wizard's footer names what is still missing.
+ *  - **The footer carries the hint.** The description says what the
+ *    panel is; the footer says what to do next.
+ *  - **Five rows, no more.** Discord gives a message five action rows
+ *    and a select menu has a row to itself, so the four pickers take
+ *    four of them and the buttons share the last one.
  */
 
 import {
   ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   ChannelSelectMenuBuilder,
   ChannelType,
-  EmbedBuilder,
-  ModalBuilder,
   RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
-  TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
 import type {
   AnySelectMenuInteraction,
   ButtonInteraction,
+  EmbedBuilder,
   MessageActionRowComponentBuilder,
+  ModalBuilder,
   ModalSubmitInteraction,
   RepliableInteraction,
 } from "discord.js";
 import { TokenStore } from "../../../core/custom-id.js";
-import { EMBED_COLOR, ERROR_COLOR } from "../../../core/constants.js";
 import { respond } from "../../../core/context.js";
+import {
+  PANEL_COLOR,
+  SUCCESS_COLOR,
+  actionRow,
+  buildModal,
+  dangerButton,
+  emptyPanel,
+  panelEmbed,
+  secondaryButton,
+  successButton,
+} from "../../../core/ui.js";
+import type { PanelField } from "../../../core/ui.js";
 import { errorMessage } from "../../../utils/errors.js";
 import { logger } from "../../../utils/logger.js";
+import { resolveDuplicateThreshold } from "../duplicate.js";
 import { canManageSsConfig } from "../guards.js";
 import * as service from "../service.js";
 import type { ScreenshotType, SsConfig } from "../types.js";
@@ -241,8 +270,8 @@ export type SsTarget =
 
 /** The panel, as it is sent to Discord. */
 export interface SsPanel {
-  readonly embed: EmbedBuilder;
-  readonly components: ActionRowBuilder<MessageActionRowComponentBuilder>[];
+  readonly embeds: readonly EmbedBuilder[];
+  readonly components: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
 }
 
 /**
@@ -265,33 +294,41 @@ export const SCREENSHOT_TYPE_OPTIONS: readonly ScreenshotType[] = [
 export const REQUIRED_SS_OPTIONS: readonly number[] = [1, 2, 3, 4, 5];
 
 /**
- * Builds the panel.
+ * How a value that is not set reads.
  *
- * The same seven fields as Quotient's wizard — channel, role, required
- * screenshots, screenshot type, page name, page link and "the same
- * screenshot may be reused" — plus the success message, which Quotient
- * only had in the editor.
+ * The panel must never make an unfinished setup look like a finished
+ * one, so a value that is missing is written in italics — the way
+ * Discord writes a placeholder.
  */
-export function buildSsPanel(target: SsTarget): SsPanel {
-  const embed = new EmbedBuilder()
-    .setColor(EMBED_COLOR)
-    .setTitle(
-      target.kind === "setup"
-        ? "Screenshot Verification — Setup"
-        : "Screenshot Verification — Edit",
-    );
+const UNSET = "_Not set_";
 
-  const view = readView(target);
+/**
+ * The hint the editor's footer carries.
+ *
+ * The editor has no save button — every field is written the moment it
+ * is changed — so the footer says so, and says what the red button
+ * does.
+ */
+const EDITOR_HINT =
+  "Every change is saved the moment you make it. **Delete setup** removes the verification and its submissions.";
 
-  embed.addFields(
+/**
+ * The fields of the setup panel.
+ *
+ * The same fields on the wizard and on the editor: what the moderator
+ * is looking at is the same either way. A value that is not set reads
+ * as not set, so the missing ones can be seen at a glance.
+ */
+function ssFields(view: SsView): PanelField[] {
+  return [
     {
       name: "Channel",
-      value: view.channelId ? `<#${view.channelId}>` : "`Not-Set`",
+      value: view.channelId ? `<#${view.channelId}>` : UNSET,
       inline: true,
     },
     {
       name: "Role",
-      value: view.roleId ? `<@&${view.roleId}>` : "`Not-Set`",
+      value: view.roleId ? `<@&${view.roleId}>` : UNSET,
       inline: true,
     },
     {
@@ -301,36 +338,118 @@ export function buildSsPanel(target: SsTarget): SsPanel {
     },
     {
       name: "Screenshot type",
-      value: view.ssType ? `\`${SCREENSHOT_TYPE_LABELS[view.ssType]}\`` : "`Not-Set`",
+      value: view.ssType ? `\`${SCREENSHOT_TYPE_LABELS[view.ssType]}\`` : UNSET,
       inline: true,
     },
     {
       name: "Page name",
-      value: view.channelName ? `\`${view.channelName}\`` : "`Not-Set`",
+      value: view.channelName ? `\`${view.channelName}\`` : UNSET,
       inline: true,
     },
     {
       name: "Page link",
-      value: view.channelLink
-        ? `[Click Here](${view.channelLink})`
-        : "`Not-Set`",
+      value: view.channelLink ? `[Open the page](${view.channelLink})` : UNSET,
+      inline: true,
+    },
+    {
+      name: "Keywords",
+      value:
+        view.keywords.length > 0
+          ? view.keywords.map((word) => `\`${word}\``).join(", ")
+          : UNSET,
+      inline: true,
+    },
+    {
+      name: "Duplicate threshold",
+      value: thresholdValue(view.duplicateThreshold),
       inline: true,
     },
     {
       name: "Allow the same screenshot",
-      value: view.allowSame ? "`Yes`" : "`No`",
+      value: view.allowSame ? "Yes" : "No",
       inline: true,
     },
     {
       name: "Success message",
       value: view.successMessage
         ? `\`${view.successMessage.slice(0, 100)}\``
-        : "`Not-Set`",
-      inline: true,
+        : UNSET,
+      inline: false,
     },
-  );
+  ];
+}
+
+/**
+ * How the duplicate threshold reads.
+ *
+ * A setup with a threshold of its own shows it; a setup without one
+ * shows the default it falls back to. The value that is shown is the
+ * one the check actually runs with, so a threshold that cannot be a
+ * Hamming distance reads as the default it becomes.
+ */
+function thresholdValue(threshold: number | null): string {
+  const resolved = resolveDuplicateThreshold(threshold);
+
+  // A threshold that cannot be a Hamming distance is not used at all:
+  // the check falls back to the default, and the panel says so.
+  if (threshold === null || resolved !== threshold) {
+    return `\`${resolved}\` (default)`;
+  }
+
+  return `\`${resolved}\``;
+}
+
+/**
+ * The hint the wizard's footer carries.
+ *
+ * It names what is still missing, so the moderator can see why the
+ * save button is not available yet.
+ */
+function wizardHint(draft: SsDraft): string {
+  const missing: string[] = [];
+
+  if (draft.channelId === null) missing.push("channel");
+  if (draft.roleId === null) missing.push("role");
+  if (draft.ssType === null) missing.push("type");
+  if (draft.channelName.length === 0) missing.push("page name");
+
+  if (missing.length === 0) {
+    return "Everything is set. Press **Save setup** to make the verification live.";
+  }
+
+  return `Still to set: **${missing.join("**, **")}**. Then press **Save setup**.`;
+}
+
+/**
+ * Builds the panel.
+ *
+ * The same fields as Quotient's wizard — channel, role, required
+ * screenshots, screenshot type, page name, page link and "the same
+ * screenshot may be reused" — plus the success message, which Quotient
+ * only had in the editor.
+ *
+ * **The rows.** Discord gives a message five action rows, and a select
+ * menu has a row to itself, so the four pickers take four of them and
+ * the buttons share the last one. The wizard's green button — the one
+ * that creates the setup — leads that row; the editor's red button —
+ * the one that destroys it — sits between the fields and the
+ * navigation, and the navigation is always last.
+ */
+export function buildSsPanel(target: SsTarget): SsPanel {
+  const view = readView(target);
 
   const isSetup = target.kind === "setup";
+
+  const embed = panelEmbed({
+    title: isSetup
+      ? "Screenshot verification — setup"
+      : "Screenshot verification — edit",
+    description: isSetup
+      ? "Set up a channel where members prove they follow the page with a screenshot."
+      : "The verification setup of this channel.",
+    fields: ssFields(view),
+    footer: isSetup ? wizardHint(target.draft) : EDITOR_HINT,
+  });
 
   // The surface is the segment right after the prefix, and it says what
   // the target is: a token for the wizard, a row id for the editor.
@@ -385,63 +504,61 @@ export function buildSsPanel(target: SsTarget): SsPanel {
         ),
     );
 
-  const fieldRow =
-    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.pageDetails, id))
-        .setLabel("Page details")
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.allowSame, id))
-        .setLabel("Allow same")
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(ssModCustomId(surface, SSMOD_ACTIONS.successMessage, id))
-        .setLabel("Success message")
-        .setStyle(ButtonStyle.Secondary),
-    );
+  const detailButton = secondaryButton({
+    customId: ssModCustomId(surface, SSMOD_ACTIONS.pageDetails, id),
+    label: "Edit page details",
+  });
 
-  const components: ActionRowBuilder<MessageActionRowComponentBuilder>[] = [
-    channelRow,
-    roleRow,
-    typeRow,
-    countRow,
-    fieldRow,
-  ];
+  const allowSameButton = secondaryButton({
+    customId: ssModCustomId(surface, SSMOD_ACTIONS.allowSame, id),
+    label: "Allow same screenshot",
+  });
 
-  if (isSetup) {
-    components.push(
-      new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-        new ButtonBuilder()
+  const successMessageButton = secondaryButton({
+    customId: ssModCustomId(surface, SSMOD_ACTIONS.successMessage, id),
+    label: "Edit success message",
+  });
+
+  const actionRowOfButtons = isSetup
+    ? actionRow(
+        successButton({
           // The wizard's own buttons carry the wizard's **surface**, like
           // every other button of the wizard. Without it they were the
           // editor's ids, and the wizard could never be saved.
-          .setCustomId(ssModCustomId("wizard", SSMOD_ACTIONS.save, id))
-          .setLabel("Save & setup")
-          .setStyle(ButtonStyle.Success)
-          .setDisabled(!isDraftComplete(target.draft)),
-        new ButtonBuilder()
-          .setCustomId(ssModCustomId("wizard", SSMOD_ACTIONS.close, id))
-          .setLabel("Cancel")
-          .setStyle(ButtonStyle.Danger),
-      ),
-    );
-  } else {
-    components.push(
-      new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(ssModCustomId("edit", SSMOD_ACTIONS.delete, id))
-          .setLabel("Delete setup")
-          .setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
-          .setCustomId(ssModCustomId("edit", SSMOD_ACTIONS.close, id))
-          .setLabel("Close")
-          .setStyle(ButtonStyle.Secondary),
-      ),
-    );
-  }
+          customId: ssModCustomId("wizard", SSMOD_ACTIONS.save, id),
+          label: "Save setup",
+          disabled: !isDraftComplete(target.draft),
+        }),
+        detailButton,
+        allowSameButton,
+        successMessageButton,
+        // The navigation is grey and last: throwing the draft away
+        // destroys nothing that is live.
+        secondaryButton({
+          customId: ssModCustomId("wizard", SSMOD_ACTIONS.close, id),
+          label: "Cancel",
+        }),
+      )
+    : actionRow(
+        detailButton,
+        allowSameButton,
+        successMessageButton,
+        // The one destructive action of the area, and the only red
+        // button on the panel.
+        dangerButton({
+          customId: ssModCustomId("edit", SSMOD_ACTIONS.delete, id),
+          label: "Delete setup",
+        }),
+        secondaryButton({
+          customId: ssModCustomId("edit", SSMOD_ACTIONS.close, id),
+          label: "Close",
+        }),
+      );
 
-  return { embed, components };
+  return {
+    embeds: [embed],
+    components: [channelRow, roleRow, typeRow, countRow, actionRowOfButtons],
+  };
 }
 
 /** The fields the panel shows, whichever target it is editing. */
@@ -452,6 +569,10 @@ interface SsView {
   readonly ssType: ScreenshotType | null;
   readonly channelName: string;
   readonly channelLink: string;
+  /** The words the custom filter matches on. */
+  readonly keywords: readonly string[];
+  /** The setup's own duplicate threshold, or `null` when it has none. */
+  readonly duplicateThreshold: number | null;
   readonly allowSame: boolean;
   readonly successMessage: string | null;
 }
@@ -467,6 +588,10 @@ function readView(target: SsTarget): SsView {
       ssType: draft.ssType,
       channelName: draft.channelName,
       channelLink: draft.channelLink,
+      keywords: draft.keywords,
+      // A draft has no threshold of its own: the setup it becomes falls
+      // back to the default.
+      duplicateThreshold: null,
       allowSame: draft.allowSame,
       successMessage: draft.successMessage,
     };
@@ -481,6 +606,8 @@ function readView(target: SsTarget): SsView {
     ssType: config.ssType,
     channelName: config.channelName,
     channelLink: config.channelLink,
+    keywords: config.keywords,
+    duplicateThreshold: config.duplicateThreshold,
     allowSame: config.allowSame,
     successMessage: config.successMessage,
   };
@@ -530,31 +657,30 @@ export function buildPageDetailsModal(
   target: string,
   current: { channelName: string; channelLink: string },
 ): ModalBuilder {
-  return new ModalBuilder()
-    .setCustomId(pageDetailsModalId(surface, target))
-    .setTitle("The page the screenshot must belong to")
-    .addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("name")
-          .setLabel("Page name")
-          .setPlaceholder("The exact name of the page or channel.")
-          .setMaxLength(50)
-          .setRequired(true)
-          .setStyle(TextInputStyle.Short)
-          .setValue(current.channelName),
-      ),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("link")
-          .setLabel("Page link")
-          .setPlaceholder("The direct link to the page or channel.")
-          .setMaxLength(150)
-          .setRequired(false)
-          .setStyle(TextInputStyle.Short)
-          .setValue(current.channelLink),
-      ),
-    );
+  return buildModal({
+    customId: pageDetailsModalId(surface, target),
+    title: "Edit page details",
+    inputs: [
+      {
+        id: "name",
+        label: "Page name",
+        placeholder: "Team Phoenix",
+        value: current.channelName,
+        maxLength: 50,
+        required: true,
+        style: TextInputStyle.Short,
+      },
+      {
+        id: "link",
+        label: "Page link",
+        placeholder: "https://example.com/team-phoenix",
+        value: current.channelLink,
+        maxLength: 150,
+        required: false,
+        style: TextInputStyle.Short,
+      },
+    ],
+  });
 }
 
 /**
@@ -565,21 +691,20 @@ export function buildSuccessMessageModal(
   target: string,
   current: string | null,
 ): ModalBuilder {
-  return new ModalBuilder()
-    .setCustomId(successMessageModalId(surface, target))
-    .setTitle("The message shown on a successful verification")
-    .addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("message")
-          .setLabel("Success message")
-          .setPlaceholder("Leave empty to remove it.")
-          .setMaxLength(500)
-          .setRequired(false)
-          .setStyle(TextInputStyle.Paragraph)
-          .setValue(current ?? ""),
-      ),
-    );
+  return buildModal({
+    customId: successMessageModalId(surface, target),
+    title: "Edit success message",
+    inputs: [
+      {
+        id: "message",
+        label: "Success message",
+        placeholder: "Your screenshots are verified.",
+        value: current ?? "",
+        maxLength: 500,
+        required: false,
+      },
+    ],
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -590,74 +715,84 @@ export function buildSuccessMessageModal(
  * Builds the panel that lists a guild's setups.
  */
 export function buildSsListPanel(configs: readonly SsConfig[]): SsPanel {
-  const embed = new EmbedBuilder()
-    .setColor(EMBED_COLOR)
-    .setTitle("Screenshot Verification");
+  // The one action of the panel: it creates a setup, so it is the one
+  // green button, and it leads.
+  const createButton = successButton({
+    customId: ssModCustomId("list", SSMOD_ACTIONS.setup),
+    label: "Create setup",
+  });
+
+  // The reading button, and the last one on the panel.
+  const faqButton = secondaryButton({
+    customId: ssModCustomId("list", SSMOD_ACTIONS.faq),
+    label: "FAQ",
+  });
 
   if (configs.length === 0) {
-    embed.setDescription(
-      "No screenshot-verification setups yet.\nUse **Setup** to create one.",
-    );
-  } else {
-    embed.setDescription(
-      configs
-        .map(
-          (config, index) =>
-            `\`${index + 1}.\` <#${config.channelId}> — ${SCREENSHOT_TYPE_LABELS[config.ssType]}`,
-        )
-        .join("\n"),
-    );
+    // The empty state is the first thing a new user sees, so it says
+    // what to do rather than only reporting the absence.
+    const empty = emptyPanel({
+      title: "Screenshot verification",
+      description:
+        "No screenshot-verification setups yet. Press **Create setup** to make one.",
+      footer:
+        "A setup checks the screenshots posted in a channel and grants a role when they are valid.",
+      action: createButton,
+    });
+
+    return {
+      embeds: empty.embeds,
+      components: [...empty.components, actionRow(faqButton)],
+    };
   }
 
-  const setupRow =
-    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(ssModCustomId("list", SSMOD_ACTIONS.setup))
-        .setLabel("Setup")
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(ssModCustomId("list", SSMOD_ACTIONS.faq))
-        .setLabel("FAQ")
-        .setStyle(ButtonStyle.Secondary),
-    );
+  const embed = panelEmbed({
+    title: "Screenshot verification",
+    description: "The verification setups of this server.",
+    fields: configs.map((config) => ({
+      name: SCREENSHOT_TYPE_LABELS[config.ssType],
+      value: `<#${config.channelId}> — ${config.requiredSs} screenshots`,
+      inline: true,
+    })),
+    footer:
+      "Press **Create setup** to add another one, or pick a setup to edit it.",
+  });
 
-  const components: ActionRowBuilder<MessageActionRowComponentBuilder>[] = [setupRow];
-
-  if (configs.length > 0) {
-    components.push(
-      new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+  return {
+    embeds: [embed],
+    components: [
+      actionRow(createButton),
+      actionRow(
         ...configs.slice(0, 5).map((config) =>
-          new ButtonBuilder()
-            .setCustomId(ssModCustomId("list", SSMOD_ACTIONS.edit, config.id))
-            .setLabel(`Edit ${SCREENSHOT_TYPE_LABELS[config.ssType]}`)
-            .setStyle(ButtonStyle.Primary),
+          secondaryButton({
+            customId: ssModCustomId("list", SSMOD_ACTIONS.edit, config.id),
+            label: `Edit ${SCREENSHOT_TYPE_LABELS[config.ssType]}`,
+          }),
         ),
       ),
-    );
-  }
-
-  return { embed, components };
+      actionRow(faqButton),
+    ],
+  };
 }
 
 /**
  * The frequently asked questions.
  */
 export function buildSsFaqEmbed(): EmbedBuilder {
-  return new EmbedBuilder()
-    .setColor(EMBED_COLOR)
-    .setTitle("Screenshot Verification — FAQ")
-    .setDescription(
-      [
-        "**How do I set a verification channel?**",
-        "> Press **Setup**, pick the channel, the role, how many screenshots are needed and the kind of screenshot. Then press **Save & setup**.",
-        "",
-        "**What is a custom filter?**",
-        "> A custom filter checks a screenshot for a name and a list of words you choose. Use it for any app — an installation screen, a game, anything.",
-        "",
-        "**What happens when a screenshot is not valid?**",
-        "> The bot says why it was refused and does not count it. Submit enough valid screenshots and the role is granted.",
-      ].join("\n"),
-    );
+  return panelEmbed({
+    title: "Screenshot verification — FAQ",
+    description: [
+      "**How do I set up a verification channel?**",
+      "> Press **Create setup**, pick the channel, the role, how many screenshots are needed and the kind of screenshot. Then press **Save setup**.",
+      "",
+      "**What is a custom filter?**",
+      "> A custom filter checks a screenshot for a name and a list of words you choose. Use it for any app — an installation screen, a game, anything.",
+      "",
+      "**What happens when a screenshot is not valid?**",
+      "> The bot says why it was refused and does not count it. Submit enough valid screenshots and the role is granted.",
+    ].join("\n"),
+    footer: "Press **Create setup** to begin.",
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1115,7 +1250,7 @@ async function startWizard(interaction: ButtonInteraction): Promise<void> {
   });
 
   await interaction.update({
-    embeds: [panel.embed],
+    embeds: panel.embeds,
     components: panel.components,
   });
 }
@@ -1189,7 +1324,7 @@ async function saveWizard(
   });
 
   await interaction.update({
-    embeds: [panel.embed],
+    embeds: panel.embeds,
     components: panel.components,
   });
 
@@ -1235,7 +1370,7 @@ async function openEditor(
   const panel = buildSsPanel({ kind: "edit", configId, config });
 
   await interaction.update({
-    embeds: [panel.embed],
+    embeds: panel.embeds,
     components: panel.components,
   });
 }
@@ -1338,11 +1473,11 @@ async function deleteSetup(
 
   await interaction.update({
     embeds: [
-      new EmbedBuilder()
-        .setColor(EMBED_COLOR)
-        .setDescription(
-          `🗑️ The setup in <#${config.channelId}> was deleted. Its submissions went with it.`,
-        ),
+      panelEmbed({
+        title: "Setup deleted",
+        description: `The setup in <#${config.channelId}> was removed. Its submissions went with it.`,
+        color: SUCCESS_COLOR,
+      }),
     ],
     components: [],
   });
@@ -1357,9 +1492,11 @@ async function deleteSetup(
 async function closePanel(interaction: ButtonInteraction): Promise<void> {
   await interaction.update({
     embeds: [
-      new EmbedBuilder()
-        .setColor(ERROR_COLOR)
-        .setDescription("This panel is closed."),
+      panelEmbed({
+        title: "Screenshot verification",
+        description: "This panel is closed. Run `/ssverify` to open it again.",
+        color: PANEL_COLOR,
+      }),
     ],
     components: [],
   });
@@ -1579,7 +1716,7 @@ async function renderPanel(
   }
 
   await interaction.update({
-    embeds: [panel.embed],
+    embeds: panel.embeds,
     components: panel.components,
   });
 }
@@ -1599,7 +1736,7 @@ async function renderPanelAfterModal(
 
   if (message) {
     await message.edit({
-      embeds: [panel.embed],
+      embeds: panel.embeds,
       components: panel.components,
     });
 
@@ -1607,7 +1744,7 @@ async function renderPanelAfterModal(
   }
 
   await interaction.editReply({
-    embeds: [panel.embed],
+    embeds: panel.embeds,
     components: panel.components,
   });
 }
