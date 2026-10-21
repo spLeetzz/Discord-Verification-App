@@ -195,16 +195,48 @@ list — they are consequences of D20.
 | The channel cache | `core/channel-cache.ts` (D21), with **three** instances. | The log puts the shared cache in `core/`, and the scrims area already uses it. The three sets stay apart, because a listener that finds no record for a cached channel removes that channel from the cache. |
 | The command adapters | One file per command, in `commands/esports/`. | The loader reads one command per file. See §1. |
 
-### One thing the log asked for that is not done
+### D20 is done: the threshold is the setup's own
 
 D20 says the duplicate threshold "is a config value, not a constant". It
 **is** a parameter of the check (`checkDuplicate(candidate, stored,
 threshold)`) and the default comes from the hashing module
 (`DEFAULT_DUPLICATE_THRESHOLD`). The `ss_configs` table has a
-`duplicate_threshold` column now, but the repository does not read it yet,
-so the per-guild value is still unused. That is the one item of D20 this
-area leaves open — the column arrives with the database port, and the
-wiring belongs with it.
+`duplicate_threshold` column, and the repository reads it: the duplicate
+check of a submission runs with **that setup's** value.
+
+| The setup's value | What the check runs with |
+|---|---|
+| a whole number from 0 to 64 | that number |
+| nothing | the global default (7) |
+| not a whole number, or outside 0…64 | the global default (7) |
+
+A value that cannot be a Hamming distance over a 64-bit hash **falls
+back** rather than fails: a nonsense number in a column must not stop a
+member from being verified. The check is still on the **dHash** — the
+pHash is stored beside it, but the threshold of 7 was calibrated on the
+dHash.
+
+The column is **read**, not yet written: nothing in the panel sets it, so
+today only the database holds a value other than the default. A field in
+the setup panel is the obvious next step, and it is not part of this
+change.
+
+### The keywords moved to a table of their own
+
+`ss_configs.keywords` was a `text[]` column. It is `ss_config_keywords`
+now — one row per keyword, with a unique index on `(ss_config_id,
+keyword)`. The repository reads the set through that table and writes it
+with an insert that carries a conflict clause (so a keyword that is
+already there is stored once, and the write cannot fail on it) and a
+delete for the keywords that are gone. The two statements share a
+transaction with the setup's own columns, and the write is scoped to the
+guild like every other write of this area.
+
+The keywords are stored **as they were typed**: the comparison normalises
+them — case-insensitively, with the spaces stripped, on both sides — when
+it looks at them, so normalising on the way in would only lose what the
+operator wrote. The set has no ordinal, so the refusal of a custom filter
+names the **page** rather than "the first keyword".
 
 ---
 
@@ -254,14 +286,16 @@ the repository uses.
 
 ## 8. The tests
 
-`npx vitest run modules/identity` — 226 tests in 12 files.
+`npx vitest run modules/identity` — 257 tests in 14 files.
 
 | File | Tests | What it covers |
 |---|---|---|
 | `easytag.test.ts` | 31 | The full tag the source could not read, the `\b` bug, the email address, the resolution of all three shapes, the order of the tokens. |
 | `tagcheck.test.ts` | 13 | The two guards, their order, the "no mentions required" channel, and the team name the reply shows. |
-| `duplicate.test.ts` | 15 | The threshold **at** and **around** the boundary, the two kinds of duplicate, the absent hash, and the hashes that cannot be compared. |
-| `verification.test.ts` | 36 | Every type's rules, against text this port's OCR provider actually produces, plus the tolerant name match and the button checks. |
+| `duplicate.test.ts` | 19 | The threshold **at** and **around** the boundary, the two kinds of duplicate, the absent hash, the hashes that cannot be compared, and the resolution of a setup's own threshold. |
+| `repo.test.ts` | 16 | The repository against a **real database**: the keyword set round trip through `ss_config_keywords`, the threshold column, and the cascade that takes the keywords with the setup. |
+| `threshold.test.ts` | 9 | The **setup's own** threshold, end to end: the setups are rows in a real database, and the configuration the service sees is the one the database holds. |
+| `verification.test.ts` | 38 | Every type's rules, against text this port's OCR provider actually produces, plus the tolerant name match and the button checks. |
 | `service.test.ts` | 20 | The four premium gates — nothing is written when a gate refuses — the two rate limits with an injected clock, and the guild scope of a setup. |
 | `ocr.test.ts` | 27 | The boot decision (forced on, forced off, automatic) and the **effective** state of the provider; the refusal when the OCR is off, when the service is down and when the service sends rubbish — including that **nothing is stored**; the URL that reaches the service; and the stored hash that cannot be compared. |
 | `commands.test.ts` | 10 | The three commands serialise through `toJSON()`, the adapter files are found, each name registers exactly once, and `/ssverify` answers ephemerally. |

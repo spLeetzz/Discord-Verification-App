@@ -528,6 +528,62 @@ describe("modules/premium/purchase — the repair", () => {
       Math.abs((result.expiresAt?.getTime() ?? 0) - expected),
     ).toBeLessThan(5_000);
     expect((await getUserSettings(userId))?.premiums).toBe(1);
+
+    // The user's own row was put back too, and it holds the same expiry.
+    const user = await getUserSettings(userId);
+
+    expect(user?.isPremium).toBe(true);
+    expect(
+      Math.abs((user?.premiumExpireTime?.getTime() ?? 0) - expected),
+    ).toBeLessThan(5_000);
+  });
+
+  it("does not shorten a longer subscription when it repairs", async () => {
+    // The guild bought a longer subscription somewhere else, and the
+    // purchase being replayed bought a shorter one. The repair must put
+    // the missing features back without taking the longer subscription
+    // away.
+    const userId = nextUserId();
+    const { txnId, durationDays } = await makeTransaction(userId);
+
+    const paidAt = new Date(Date.now() - 86_400_000);
+    const longer = new Date(Date.now() + 100 * 86_400_000);
+
+    await db
+      .update(premiumTransactions)
+      .set({
+        status: "paid",
+        paidAt,
+        rawData: { txnid: txnId, status: "success" },
+      })
+      .where(sql`${premiumTransactions.txnId} = ${txnId}`);
+
+    // One feature is entitled — the grant was interrupted — and the guild
+    // already holds a much longer subscription.
+    await db.insert(guildEntitlements).values({
+      guildId: GUILD_ID,
+      feature: PREMIUM_FEATURES[0] ?? "scrim_slots",
+      enabled: true,
+      expiresAt: new Date(paidAt.getTime() + durationDays * 86_400_000),
+      source: "premium",
+    });
+
+    await db
+      .insert(guildSettings)
+      .values({ guildId: GUILD_ID, premiumExpiresAt: longer })
+      .onConflictDoUpdate({
+        target: guildSettings.guildId,
+        set: { premiumExpiresAt: longer },
+      });
+
+    const result = await activatePremium(makePurchase(txnId));
+
+    expect(result.outcome).toBe("repaired");
+    expect(await listEntitlements(GUILD_ID)).toHaveLength(PREMIUM_FEATURES.length);
+
+    // The longer subscription is still the one that is running.
+    expect((await getGuildSettings(GUILD_ID))?.premiumExpiresAt).toEqual(longer);
+    expect(result.expiresAt?.getTime()).toBe(longer.getTime());
   });
 
   it("does not resurrect a subscription that has already run out", async () => {

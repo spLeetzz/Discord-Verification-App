@@ -225,6 +225,12 @@ than one method.
 | `any_ss` | — (everything is accepted) |
 | `custom` | Does it show the filter's name **or** one of its keywords? |
 
+The keywords of a custom filter live in their own table
+(`ss_config_keywords`), one row per keyword, and they are **stored as they
+were typed**. The comparison normalises them — lowercased, with the spaces
+stripped, on both sides — when it looks at them, so normalising on the way
+into the database would only lose what the operator wrote.
+
 The refusals are the source's wording:
 
 ```
@@ -591,13 +597,15 @@ any more — they stay because each of them is safe against any engine.
 
 ## The tests
 
-`npx vitest run modules/identity` — 226 tests in 12 files.
+`npx vitest run modules/identity` — 257 tests in 14 files.
 
 | File | What it covers |
 |---|---|
 | `easytag.test.ts` | The mention extraction, including the full tag the source could not read. |
 | `tagcheck.test.ts` | The two guards, their order, and the team name the reply shows. |
-| `duplicate.test.ts` | The threshold, the two kinds of duplicate, and the hashes that cannot be compared. |
+| `duplicate.test.ts` | The threshold, the two kinds of duplicate, the hashes that cannot be compared, and the resolution of a setup's own threshold. |
+| `repo.test.ts` | The repository against a **real database**: the keyword set round trip through `ss_config_keywords`, the threshold column, and the cascade that takes the keywords with the setup. |
+| `threshold.test.ts` | The **setup's own** threshold, end to end — the setups are rows in a real database and the configuration the service sees is the one the database holds. |
 | `verification.test.ts` | Every type's rules, against text this port's OCR provider produces. |
 | `service.test.ts` | The premium gates (nothing is written when a gate refuses), the rate limits, and the guild scope of a setup. |
 | `ocr.test.ts` | The boot decision (forced on, forced off, automatic) and the **effective** state of the provider; the refusal when the OCR is off, when the service is down, and when the service sends rubbish — including that **nothing is stored**; the URL that reaches the service; and the stored hash that cannot be compared. |

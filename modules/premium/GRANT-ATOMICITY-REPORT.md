@@ -22,22 +22,36 @@ about.
 ```
 activatePremium(purchase)
 └── withLockedTransaction(txnId, fn)          modules/premium/repo.ts
+    ├── the in-process mutex                  ← the lock that makes two
+    │                                          callbacks safe
     ├── BEGIN
-    ├── SELECT … FOR UPDATE premium_transactions    ← the lock that makes
-    │                                                  two callbacks safe
+    ├── SELECT premium_transactions           ← the row, read alone
     ├── INSERT guild_settings  ON CONFLICT DO NOTHING
     ├── INSERT user_settings   ON CONFLICT DO NOTHING
-    ├── SELECT … FOR UPDATE guild_settings           ← two purchases for
-    │                                                  one guild cannot both
-    │                                                  extend one expiry
-    ├── UPDATE premium_transactions → paid           (conditional UPDATE)
+    ├── UPDATE guild_settings                ← a conditional UPDATE: the
+    │                                          write lock, held for the
+    │                                          rest of the transaction
+    ├── UPDATE premium_transactions → paid    (conditional UPDATE: the
+    │                                          state machine)
     ├── 7 × INSERT/UPSERT guild_entitlements
     ├── UPDATE guild_settings
     ├── UPDATE user_settings
     └── COMMIT
 ```
 
-`withLockedTransaction` now hands the transaction handle to its callback,
+> **The row locks became a conditional `UPDATE` plus a mutex.** The
+> engine is SQLite now, and SQLite has no `SELECT … FOR UPDATE`. What
+> replaces it is the pair the schema's own slot claim uses: the
+> **conditional `UPDATE`** is the state machine that decides who wins,
+> and the **in-process mutex** is the lock that makes the grant run
+> alone. On SQLite a write inside a transaction holds the write lock for
+> the rest of that transaction, so the mutex is not merely a substitute
+> for the row lock — it is the correct primitive. The order matters: the
+> mutex is taken **before** the row is read, so a second callback cannot
+> read a `pending` row that the first one has already flipped to `paid`
+> but has not finished granting.
+
+`withLockedTransaction` hands the transaction handle to its callback,
 so every statement in the grant runs on the same connection. The repo
 layer grew one optional parameter — `executor: DbExecutor = db` — on the
 statements the grant uses (`upsertEntitlement`, `setGuildPremium`,
@@ -85,15 +99,15 @@ The rule never hands out a second set of days: the expiry is never longer
 than the guild's own subscription, and it is anchored on `paid_at`, so a
 replayed webhook for a subscription that has already run out restores
 nothing. The guild's and the user's summaries are only ever moved
-**later** (`greatest`), and `made_premium_by` is only filled in when it is
-empty — a repair never overwrites the name of whoever bought the
-subscription that is actually running.
+**later**, and `made_premium_by` is only filled in when it is empty — a
+repair never overwrites the name of whoever bought the subscription that
+is actually running.
 
 **The counter is recounted, not incremented.** `user_settings.premiums` is
 a summary of the purchases and `premium_transactions` is the record of
-them, so the repair sets the counter to `greatest(counter, the number of
-paid transactions)`. A purchase is never counted twice, and a counter
-that predates the transactions table is never lowered.
+them, so the repair sets the counter to the larger of the counter and the
+number of paid transactions. A purchase is never counted twice, and a
+counter that predates the transactions table is never lowered.
 
 **One deliberate trade-off.** The repair re-applies the grant as a whole,
 so a row an operator had switched off by hand would be switched back on.
@@ -196,11 +210,12 @@ and a later success callback can still flip it to `paid`). The log says
 | `purchase.test.ts` — *puts back a purchase that was paid for but never granted* | The divergence is written straight into the database; the next callback repairs it, restores the subscription, and the purchase is counted once. |
 | `purchase.test.ts` — *does not resurrect a subscription that has already run out* | A replayed webhook for a lapsed subscription changes nothing. |
 | `server/server.test.ts` — *the failure redirect* | Seven cases: no signature, a bad signature, another transaction's signature, a tampered amount, a `success` status, a foreign origin, and a forged failure not overwriting the audit data — and a late failure not un-buying a paid subscription. |
+| `server/server.test.ts` — *renders the payment page after the catalogue is reseeded* | The plan row is deleted — the catalogue is reseeded — and the page still renders, because the receipt reads the **snapshot**. |
 | `server/server.test.ts` — *the notification* | The notifier sees the entitlement already in force (the commit happened first); a notifier that throws does not undo the purchase; a repaired purchase is still announced. |
 | `payu.test.ts` — *the failure callback* | The unit-level checks: the transaction id, the merchant key, the status, the amount, the origin and the signature. |
 
-`purchase.test.ts` is 21 tests, `server/server.test.ts` is 30 and
-`payu.test.ts` is 60. The whole premium area is 161 tests in 8 files, and
+`purchase.test.ts` is 21 tests, `server/server.test.ts` is 31 and
+`payu.test.ts` is 60. The whole premium area is 162 tests in 8 files, and
 `npm run typecheck` and `npm test` are green for the whole project.
 
 ---
@@ -209,7 +224,7 @@ and a later success callback can still flip it to `paid`). The log says
 
 | File | What changed |
 |---|---|
-| `modules/premium/repo.ts` | `DbExecutor` and the optional executor on the statements the grant uses; `lockGuildSettings`; `restoreGuildPremium`; `restoreUserPremium`; `recountUserPremiums`; `withLockedTransaction` hands the transaction handle to its callback. |
+| `modules/premium/repo.ts` | `DbExecutor` and the optional executor on the statements the grant uses; `lockGuildSettings`; `restoreGuildPremium`; `restoreUserPremium`; `recountUserPremiums`; `withLockedTransaction` hands the transaction handle to its callback. **Ported to SQLite:** the `SELECT … FOR UPDATE` row locks became a conditional `UPDATE` plus an in-process mutex, and the two `greatest()` calls became the portable `CASE WHEN` form. |
 | `modules/premium/purchase.ts` | `activatePremium` is one transaction; `grantPurchase`; `repairPaidTransaction`; the new `"repaired"` outcome. |
 | `modules/premium/payu.ts` | `isFailureStatus`; `verifyPayuFailureCallback`. |
 | `modules/premium/server/index.ts` | `/premium_failed` is verified (`completeFailure`); the notification fires for `"repaired"` as well as `"activated"`. |

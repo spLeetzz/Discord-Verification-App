@@ -166,6 +166,10 @@ export interface ActivationResult {
  * `pending` and no entitlement rows, and the next callback grants it
  * properly.
  *
+ * **Alone.** The grant runs behind the area's mutex, so two callbacks
+ * for the same transaction cannot overlap: the second one waits, and
+ * then finds the row already `paid`.
+ *
  * @param purchase a payment whose signature has already been verified.
  */
 export async function activatePremium(
@@ -202,6 +206,11 @@ async function grantPurchase(
   // written, and the guild's row is **locked** while it is read: two
   // purchases for the same guild would otherwise both read the same
   // expiry and both extend it, and one subscription would be lost.
+  //
+  // The lock is a conditional `UPDATE` — SQLite has no `SELECT … FOR
+  // UPDATE`, and a write inside a transaction holds the write lock for
+  // the rest of that transaction. The whole grant is behind the area's
+  // mutex as well, so two callbacks cannot overlap at all.
   await ensureGuildSettings(transaction.guildId, tx);
   await ensureUserSettings(transaction.userId, tx);
 
