@@ -115,9 +115,9 @@ The lifecycle is an explicit value (D26):
 
 | From | To | How |
 |---|---|---|
-| `draft` | `open` | The moderator presses **Start Reg**, or the daily `scrim_open` job fires. |
-| `open` | `closed` | The moderator presses **Stop Reg**, the day ends, or the **last slot is taken**. |
-| `closed` | `open` | The moderator presses **Start Reg** again. The slots are reset. |
+| `draft` | `open` | The moderator presses **Start registration**, or the daily `scrim_open` job fires. |
+| `open` | `closed` | The moderator presses **Stop registration**, the day ends, or the **last slot is taken**. |
+| `closed` | `open` | The moderator presses **Start registration** again. The slots are reset. |
 
 ### Opening
 
@@ -417,7 +417,7 @@ have changed.
 
 **The editor has no room for a twenty-first field.** It is exactly 25
 components, which is Discord's limit for one message, so a field that
-is not one of the twenty lives in a sub-panel: the **Auto Slotlist**
+is not one of the twenty lives in a sub-panel: the publish-on-close
 switch is in the design panel, not here.
 
 **Every "type a value" flow is a modal or a select menu** (D17). The
@@ -436,13 +436,19 @@ the row. The wizard's state is a token, not a row.
 
 | Panel | What it holds |
 |---|---|
-| The list | The scrims of the guild, a select menu to pick one, and **Create Scrim**. |
-| One scrim | Edit, Start/Stop Reg, Reserve Slots, Ban/Unban, Design, Manage Slotlist, Set Match Time, Enable/Disable, Delete, Main Menu. |
-| Bans | Ban Users, Unban Users, Unban All, and a list of the bans. |
-| Reserved slots | The scrim's slots with their reservations, Reserve Slot, Remove Reserved. |
-| Autoclean | The two toggles and the time the pass runs at. |
-| Design | The open message, the close message, the slotlist design, and the **Auto Slotlist** switch. |
-| Slotlist | The manager's preview of the list, with the **slot area's** row — Edit, Punish, Info — and the way back to the manager panel. |
+| The list | The scrims of the guild with a dot for their state, a select menu to pick one, and **Create scrim**. |
+| One scrim | **Edit settings**, Start/Stop registration, Reserve slots, Manage bans, Design, Manage slotlist, Set match time, Enable/Disable scrim, Delete scrim, and the way back to the list. |
+| Bans | **Ban users**, Unban user, Unban all, and a list of the bans. |
+| Reserved slots | The reservations, **Reserve slot**, Remove reservation. |
+| Autoclean | **Set clean time**, the two switches, and the time the pass runs at. |
+| Design | **Edit open message**, Edit close message, Edit slotlist message, and the publish-on-close switch. |
+| Slotlist | Every slot with a dot for its state, the **slot area's** row — Edit, Punish, Info — and the way back to the manager panel. |
+
+The buttons follow the shared design language in `core/ui.ts`: one
+main action per panel, alone on its own row, green when it creates
+something, red when it destroys something, and the navigation last and
+grey. A switch says what the press will do, so a button never reads as
+"purge the channel" when it would switch the purge off.
 
 ### The ban matrix
 
@@ -630,7 +636,7 @@ would let one area evict the other area's channels.
 
 | Column | Where it is set |
 |---|---|
-| `autoslotlist` | **The design panel** — the "Auto Slotlist: On/Off" switch. The column is honoured when the scrim closes (the slotlist is published), so the switch that sets it had to be somewhere a moderator can reach. It is not one of the editor's twenty fields: the editor is exactly 25 components, which is Discord's limit for one message, and it has no room. |
+| `autoslotlist` | **The design panel** — the "Publish slotlist on close" switch. The column is honoured when the scrim closes (the slotlist is published), so the switch that sets it had to be somewhere a moderator can reach. It is not one of the editor's twenty fields: the editor is exactly 25 components, which is Discord's limit for one message, and it has no room. |
 | `cdn` | **Nowhere.** See the table above — the column is read and written back unchanged, and the countdown does not exist. |
 | `autodelete_rejects`, `autodelete_extras` | The editor's "Autodelete rejected" and "Autodelete late messages" toggles. |
 

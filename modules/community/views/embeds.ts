@@ -1,18 +1,25 @@
 /**
- * The community area's embeds.
+ * The community area's panels.
  *
- * Every embed the area posts is built here, and every builder is a pure
+ * Every panel the area shows is built here, and every builder is a pure
  * function: it takes data and returns an `EmbedBuilder`. Nothing in this
  * file talks to Discord or to the database, so the wording of a message
  * can be checked without a gateway.
  *
- * The emoji are Unicode (D36) — Quotient's snowflake ids point at its
- * own emote server and would render as literal text here.
+ * The panels are built with `core/ui.ts` — the bot's design language. A
+ * panel has a title, a *short* description, the data in the fields, and
+ * a footer that says what to do next, so the description does not have
+ * to shout it.
+ *
+ * The area has no buttons of its own: every action here is a slash
+ * command, so the footer is where the action is named. The one button
+ * the area does show is a link, and it lives in `views/buttons.ts`.
  */
 
-import { EmbedBuilder } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
+import type { EmbedBuilder } from "discord.js";
+import { escapeMarkdown } from "../../../core/escape.js";
 import { formatTimestamp } from "../../../core/time.js";
+import { panelEmbed } from "../../../core/ui.js";
 import type {
   AutoPurgeConfig,
   GuildTagStats,
@@ -21,18 +28,8 @@ import type {
   TagRecord,
 } from "../types.js";
 
-/** The emoji the source's `emojize` helper produced, in order. */
-const RANK_EMOJI = ["🥱", "🥲", "🥳"];
-
 /**
- * The emoji for a rank, cycling when there are more than three.
- */
-function rankEmoji(index: number): string {
-  return RANK_EMOJI[index % RANK_EMOJI.length] ?? "•";
-}
-
-/**
- * The embed `/snipe` posts.
+ * The panel `/snipe` posts.
  *
  * @param authorName the deleted message's author, as a plain name. The
  *                   source named the author rather than mentioning them,
@@ -44,44 +41,48 @@ export function buildSnipeEmbed(
   authorName: string,
   channelName: string,
 ): EmbedBuilder {
-  return new EmbedBuilder()
-    .setDescription(
-      [
-        `Message sent by **${authorName}** was deleted in **${channelName}**.`,
-        formatTimestamp(snipe.createdAt),
-        "",
-        "**__Message Content__**",
-        snipe.content,
-      ].join("\n"),
-    )
-    .setFooter({ text: "Deleted" })
-    .setTimestamp(snipe.createdAt)
-    .setColor(EMBED_COLOR);
+  return panelEmbed({
+    title: "Deleted message",
+    description: [
+      `**${authorName}** deleted this in **${channelName}**.`,
+      "",
+      snipe.content,
+    ].join("\n"),
+    fields: [
+      {
+        name: "Deleted",
+        value: formatTimestamp(snipe.createdAt),
+        inline: true,
+      },
+    ],
+    footer: "Sniped messages are kept for ten days.",
+  });
 }
 
 /**
- * The embed `/tag info` posts.
+ * The panel `/tag info` posts.
  */
 export function buildTagInfoEmbed(
   tag: TagRecord,
   ownerName: string,
 ): EmbedBuilder {
-  return new EmbedBuilder()
-    .setTitle(`Stats for tag ${tag.name}`)
-    .setAuthor({ name: ownerName })
-    .addFields(
+  return panelEmbed({
+    // The name is the member's own text, so it is escaped: a tag called
+    // `*rules*` must not turn the title into italics.
+    title: `Tag: ${escapeMarkdown(tag.name)}`,
+    fields: [
       { name: "Owner", value: ownerName, inline: true },
-      { name: "ID", value: tag.id, inline: true },
+      { name: "ID", value: `\`${tag.id}\``, inline: true },
       { name: "Uses", value: String(tag.usage), inline: true },
       { name: "NSFW", value: tag.isNsfw ? "Yes" : "No", inline: true },
       { name: "Embed", value: tag.isEmbed ? "Yes" : "No", inline: true },
-    )
-    .setFooter({ text: `Created At: ${formatTimestamp(tag.createdAt)}` })
-    .setColor(EMBED_COLOR);
+    ],
+    footer: "Post it with `/tag show <name>`.",
+  });
 }
 
 /**
- * The embed `/autorole config` posts.
+ * The panel `/autorole config` posts.
  *
  * @param humans one line per configured human role.
  * @param bots   one line per configured bot role.
@@ -90,56 +91,53 @@ export function buildAutoroleConfigEmbed(
   humans: readonly string[],
   bots: readonly string[],
 ): EmbedBuilder {
-  return new EmbedBuilder()
-    .setTitle("Autorole Config")
-    .addFields(
+  return panelEmbed({
+    title: "Auto-roles",
+    description: "The roles a new member is given when they join.",
+    fields: [
       {
         name: "Humans",
-        value: humans.length > 0 ? humans.join("\n") : "Not Set!",
+        value: humans.length > 0 ? humans.join("\n") : "Not set",
         inline: false,
       },
       {
         name: "Bots",
-        value: bots.length > 0 ? bots.join("\n") : "Not Set!",
+        value: bots.length > 0 ? bots.join("\n") : "Not set",
         inline: false,
       },
-    )
-    .setColor(EMBED_COLOR);
+    ],
+    footer: "Add a role with `/autorole humans` or `/autorole bots`.",
+  });
 }
 
 /**
- * The embed `/autopurge list` posts.
+ * The panel `/autopurge list` posts.
+ *
+ * The empty case is the command's empty panel, so this is only called
+ * with at least one channel.
  *
  * @param channels the channel name of every configured channel. A channel
- *                 that no longer exists is shown as "Deleted Channel".
+ *                 that no longer exists is shown as "Deleted channel".
  */
 export function buildAutoPurgeListEmbed(
   configs: readonly AutoPurgeConfig[],
   channels: ReadonlyMap<string, string>,
 ): EmbedBuilder {
   const lines = configs.map((config, index) => {
-    const name = channels.get(config.channelId) ?? "Deleted Channel";
-    const minutes = Math.floor(config.deleteAfter / 60);
-    const seconds = config.deleteAfter % 60;
+    const name = channels.get(config.channelId) ?? "Deleted channel";
 
-    const delay =
-      minutes > 0
-        ? `${minutes} minute${minutes === 1 ? "" : "s"}${
-            seconds > 0 ? ` ${seconds}s` : ""
-          }`
-        : `${seconds} second${seconds === 1 ? "" : "s"}`;
-
-    return `\`${String(index + 1).padStart(2, "0")}\` | ${name} (${delay})`;
+    return `\`${String(index + 1).padStart(2, "0")}\` ${name} — ${formatDelay(config.deleteAfter)}`;
   });
 
-  return new EmbedBuilder()
-    .setTitle("AutoPurge List")
-    .setDescription(lines.join("\n") || "This server has no auto-purge channels.")
-    .setColor(EMBED_COLOR);
+  return panelEmbed({
+    title: "Auto-purge channels",
+    description: lines.join("\n"),
+    footer: "Set a channel up with `/autopurge set`.",
+  });
 }
 
 /**
- * The embed `/tag stats` posts for a whole guild.
+ * The panel `/tag stats` posts for a whole guild.
  */
 export function buildGuildTagStatsEmbed(stats: GuildTagStats): EmbedBuilder {
   const topTags =
@@ -147,45 +145,45 @@ export function buildGuildTagStatsEmbed(stats: GuildTagStats): EmbedBuilder {
       ? stats.topTags
           .map(
             (tag, index) =>
-              `${rankEmoji(index)}: ${tag.name} (${tag.usage} uses)`,
+              `${rank(index)} **${escapeMarkdown(tag.name)}** (${tag.usage} uses)`,
           )
           .join("\n")
-      : "No tag statistics here.";
+      : "No tags yet.";
 
-  const topUsers = Array.from({ length: 3 }, (_, index) => {
-    const entry = stats.topUsers[index];
-
-    if (!entry) return `${rankEmoji(index)}: No one!`;
-
-    return `${rankEmoji(index)}: <@${entry.userId}> (${entry.uses} times)`;
-  }).join("\n");
+  const topUsers =
+    stats.topUsers.length > 0
+      ? stats.topUsers
+          .map(
+            (entry, index) =>
+              `${rank(index)} <@${entry.userId}> (${entry.uses} uses)`,
+          )
+          .join("\n")
+      : "Nobody has used a tag yet.";
 
   const topCreators =
     stats.topCreators.length > 0
       ? stats.topCreators
           .map(
             (entry, index) =>
-              `${rankEmoji(index)}: <@${entry.ownerId}> (${entry.count} tags)`,
+              `${rank(index)} <@${entry.ownerId}> (${entry.count} tags)`,
           )
           .join("\n")
-      : "No statistics to show here.";
+      : "Nobody has created a tag yet.";
 
-  return new EmbedBuilder()
-    .setTitle("Tag Stats")
-    .setDescription(
-      `${stats.totalTags} tags, ${stats.totalUses} tag uses`,
-    )
-    .addFields(
-      { name: "Top Tags", value: topTags, inline: false },
-      { name: "Top Tag Users", value: topUsers, inline: false },
-      { name: "Top Tag Creators", value: topCreators, inline: false },
-    )
-    .setFooter({ text: "These statistics are server-specific." })
-    .setColor(EMBED_COLOR);
+  return panelEmbed({
+    title: "Tag stats",
+    description: `${stats.totalTags} tags, ${stats.totalUses} tag uses`,
+    fields: [
+      { name: "Top tags", value: topTags, inline: false },
+      { name: "Top tag users", value: topUsers, inline: false },
+      { name: "Top tag creators", value: topCreators, inline: false },
+    ],
+    footer: "These statistics are for this server only.",
+  });
 }
 
 /**
- * The embed `/tag stats` posts for one member.
+ * The panel `/tag stats` posts for one member.
  *
  * @param stats the member's own tags.
  */
@@ -198,36 +196,57 @@ export function buildMemberTagStatsEmbed(
     tags: readonly MemberTagStat[];
   },
 ): EmbedBuilder {
-  const owned = stats.tags[0];
+  const tagLines =
+    stats.tags.length > 0
+      ? stats.tags
+          .map(
+            (entry, index) =>
+              `${rank(index)} **${escapeMarkdown(entry.name)}** (${entry.usage} uses)`,
+          )
+          .join("\n")
+      : "No tags yet.";
 
-  const tagLines = Array.from({ length: 3 }, (_, index) => {
-    const entry = stats.tags[index];
-
-    if (!entry) return `${rankEmoji(index)} Owned Tag: Nothing!`;
-
-    return `${rankEmoji(index)} Owned Tag: ${entry.name} (${entry.usage} uses)`;
-  }).join("\n");
-
-  return new EmbedBuilder()
-    .setAuthor({ name: memberName })
-    .addFields(
+  return panelEmbed({
+    title: `Tag stats for ${escapeMarkdown(memberName)}`,
+    fields: [
+      { name: "Owned tags", value: String(stats.ownedTags), inline: true },
+      { name: "Owned tag uses", value: String(stats.ownedUses), inline: true },
       {
-        name: "Owned Tags",
-        value: owned ? String(owned.totalTags) : "None",
-        inline: true,
-      },
-      {
-        name: "Owned Tag Uses",
-        value: owned ? String(owned.totalUses) : "0",
-        inline: true,
-      },
-      {
-        name: "Tag Command Uses",
+        name: "Tag command uses",
         value: String(stats.commandUses),
         inline: true,
       },
-      { name: "Top Tags", value: tagLines, inline: false },
-    )
-    .setFooter({ text: "These statistics are server-specific." })
-    .setColor(EMBED_COLOR);
+      { name: "Top tags", value: tagLines, inline: false },
+    ],
+    footer: "These statistics are for this server only.",
+  });
+}
+
+/**
+ * The number of a place in a list.
+ *
+ * A number says the order, which is all a rank is: the source drew the
+ * top three with a rank emoji, and a list of emoji is a list of things
+ * to decode rather than a list to read.
+ */
+function rank(index: number): string {
+  return `${index + 1}.`;
+}
+
+/**
+ * A delay in seconds, as a human reads it.
+ */
+function formatDelay(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+
+  if (minutes === 0) {
+    return `${rest} second${rest === 1 ? "" : "s"}`;
+  }
+
+  if (rest === 0) {
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+
+  return `${minutes} minute${minutes === 1 ? "" : "s"} ${rest}s`;
 }

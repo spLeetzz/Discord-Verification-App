@@ -46,6 +46,7 @@ export const SLOTS_ACTIONS = [
   "slotlist_add",
   "slotlist_remove",
   "slotlist_change",
+  "slotlist_back",
   /* The slot-manager editor. */
   "manager_toggle",
   "manager_reminders",
@@ -55,6 +56,7 @@ export const SLOTS_ACTIONS = [
   "manager_scrims_remove",
   "manager_delete",
   "manager_channel",
+  "manager_back",
   /* The flows. */
   "pick",
   "modal_claim",

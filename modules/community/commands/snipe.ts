@@ -13,6 +13,7 @@ import { InputError } from "../../../core/errors.js";
 import { canShowSnipe } from "../rules.js";
 import * as service from "../service.js";
 import { buildSnipeEmbed } from "../views/embeds.js";
+import { emptySnipePanel, panelPayload } from "../views/panels.js";
 import { respondSafe } from "../views/reply.js";
 import { displayName, requireGuild, runCommand } from "./shared.js";
 import type { CommunityCommand } from "./shared.js";
@@ -55,7 +56,12 @@ const snipeCommand: CommunityCommand = {
       const snipe = await service.getSnipe(channelId);
 
       if (!snipe) {
-        throw new InputError("There is nothing to snipe.");
+        await respondSafe(
+          interaction,
+          panelPayload(emptySnipePanel()),
+        );
+
+        return;
       }
 
       // The check is on the channel the snipe is *shown* in, as it was in

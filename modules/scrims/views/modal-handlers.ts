@@ -793,7 +793,7 @@ async function handleDesignModal(
   };
 
   if (Object.keys(template).length === 0) {
-    await fail(interaction, "Fill in at least one of the fields, or press Cancel.");
+    await fail(interaction, "Fill in at least one of the fields, or close the form.");
 
     return;
   }

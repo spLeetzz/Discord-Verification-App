@@ -25,9 +25,11 @@ import { InputError } from "../../../core/errors.js";
 import { escapeMentions } from "../../../core/escape.js";
 import { Paginator } from "../../../core/paginator.js";
 import { discordTimestamp } from "../../../core/time.js";
-import { plural, truncate } from "../../../core/text.js";
+import { plural } from "../../../core/text.js";
 import { readReminder } from "../rules.js";
 import * as service from "../service.js";
+import { reminderListPages } from "../views/lists.js";
+import { emptyReminderListPanel, panelPayload } from "../views/panels.js";
 import { respondSafe } from "../views/reply.js";
 import { requireGuild, runCommand } from "./shared.js";
 import type { CommunityCommand } from "./shared.js";
@@ -180,7 +182,12 @@ async function listReminders(
   const reminders = await service.listReminders(userId, REMINDER_LIST_LIMIT);
 
   if (reminders.length === 0) {
-    throw new InputError("You have no running reminders.");
+    await respondSafe(
+      interaction,
+      panelPayload(emptyReminderListPanel()),
+    );
+
+    return;
   }
 
   const total = await service.countReminders(userId);
@@ -188,19 +195,13 @@ async function listReminders(
   const pager = new Paginator({
     namespace: `reminders-${userId}`,
     perPage: 10,
-    title: `Your running reminders (${total})`,
+    title: `Running reminders (${total})`,
     loadPages: async () => {
       const rows = await service.listReminders(userId, REMINDER_LIST_LIMIT);
 
       if (rows.length === 0) return [];
 
-      return [
-        rows.map((row) => {
-          const when = discordTimestamp(row.expiresAt);
-
-          return `\`${row.id}\`: ${truncate(row.message, 40)} (${when})`;
-        }),
-      ];
+      return reminderListPages(rows);
     },
   });
 

@@ -40,9 +40,10 @@
 import { StringSelectMenuBuilder } from "discord.js";
 import type { AnySelectMenuInteraction, ButtonInteraction } from "discord.js";
 import { TokenStore } from "../../../core/custom-id.js";
+import { buildModal } from "../../../core/ui.js";
 import * as repo from "../repo.js";
 import type { ScrimRecord, SlotRecord } from "../types.js";
-import { buildModal, selectRow } from "./components.js";
+import { selectRow } from "./components.js";
 import { fail } from "./handlers.js";
 import { scrimsId } from "./ids.js";
 import { buildSlotlistEditorPanel } from "./panels.js";
@@ -148,7 +149,13 @@ export async function openSlotPicker(
 
   const panel = buildSlotlistEditorPanel(scrim);
 
-  const components: PanelComponents = [...panel.components, selectRow(menu)];
+  // The menu lands under the main action and above the navigation: it
+  // is the answer to the press, not the way back.
+  const [main, ...rest] = panel.components;
+
+  const components: PanelComponents = main
+    ? [main, selectRow(menu), ...rest]
+    : [selectRow(menu)];
 
   if (interaction.replied) {
     // The press has answered already, so the panel's message cannot be
@@ -255,16 +262,19 @@ export async function handleSlotPick(
     buildModal({
       customId: scrimsId("modal", "slot_team", token),
       title: kind === "add" ? "Add a team" : "Change the team",
-      texts: [
+      inputs: [
         {
           id: "team_name",
-          label: "The team name",
+          label: "Team name",
+          placeholder: "Team Alpha",
+          required: true,
           maxLength: 25,
         },
         {
           id: "leader",
-          label: "The team leader (optional)",
+          label: "Team leader",
           placeholder: "@leader",
+          required: false,
           maxLength: 64,
         },
       ],

@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import { clearRegistry, registeredPrefixes } from "../../core/router.js";
 import { parseSlotsId, payloadOf, slotsId } from "./ids.js";
 import { buildPublicEmbed, buildPublicRows } from "./views/panel.js";
+import { buildManagerScrimsRows } from "./views/manager.js";
 import {
   buildSlotListEditorRows,
   buildSlotListRows,
@@ -77,10 +78,10 @@ describe("the public panel", () => {
       .map((component) => (component as { data: { custom_id: string } }).data.custom_id);
 
     expect(ids).toEqual([
-      `slots:cancel:${MANAGER_ID}`,
       `slots:claim:${MANAGER_ID}`,
       `slots:remind:${MANAGER_ID}`,
       `slots:idp:${MANAGER_ID}`,
+      `slots:cancel:${MANAGER_ID}`,
     ]);
   });
 
@@ -131,7 +132,7 @@ describe("the public panel", () => {
   });
 
   it("lists the free slots", () => {
-    const embed = buildPublicEmbed(claimable);
+    const embed = buildPublicEmbed(makeManager({ id: MANAGER_ID }), claimable);
 
     expect(embed.data.description).toContain("Slot 3");
     expect(embed.data.description).toContain("2 Slots");
@@ -165,10 +166,39 @@ describe("the published slot list", () => {  it("carries the scrim's id on every
 
     expect(ids).toEqual([
       `slots:slotlist_change:${SCRIM_ID}`,
-      `slots:slotlist_remove:${SCRIM_ID}`,
       `slots:slotlist_add:${SCRIM_ID}`,
-      `slots:slotlist_edit:${SCRIM_ID}`,
+      `slots:slotlist_remove:${SCRIM_ID}`,
+      `slots:slotlist_back:${SCRIM_ID}`,
     ]);
+  });
+
+  it("sends Back back to the list, not back into the editor", () => {
+    // The editor's "Back" used to carry `slotlist_edit`, which opened
+    // the editor again — the button the user had just come from.
+    const rows = buildSlotListEditorRows(SCRIM_ID);
+
+    const ids = rows
+      .flatMap((row) => row.components)
+      .map(
+        (component) => (component as { data: { custom_id: string } }).data.custom_id,
+      );
+
+    expect(ids).not.toContain(`slots:slotlist_edit:${SCRIM_ID}`);
+  });
+
+  it("does not switch the slot manager off when Back is pressed", () => {
+    // The scrims sub-panel's "Back" used to carry `manager_toggle`,
+    // which switched the whole slot manager off.
+    const manager = makeManager();
+
+    const ids = buildManagerScrimsRows(manager)
+      .flatMap((row) => row.components)
+      .map(
+        (component) => (component as { data: { custom_id: string } }).data.custom_id,
+      );
+
+    expect(ids).not.toContain(`slots:manager_toggle:${manager.id}`);
+    expect(ids).toContain(`slots:manager_back:${manager.id}`);
   });
 });
 

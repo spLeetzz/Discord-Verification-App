@@ -22,6 +22,7 @@ import {
 import { prompt } from "../../../core/prompt.js";
 import { parseNaturalTime } from "../../../core/time.js";
 import { Day, PremiumFeature } from "../../../core/constants.js";
+import { buildModal } from "../../../core/ui.js";
 import type { AutocleanKind, Weekday } from "../../../db/schema/common.js";
 import { assertEntitled, FREE_TIER, isEntitled } from "../../premium/index.js";
 import * as repo from "../repo.js";
@@ -29,7 +30,7 @@ import * as service from "../service.js";
 import { slotNumbers } from "../slots.js";
 import { truncate } from "../../../core/text.js";
 import type { ScrimRecord } from "../types.js";
-import { EDITOR_FIELDS, buildModal } from "./components.js";
+import { EDITOR_FIELDS } from "./components.js";
 import { scrimsId } from "./ids.js";
 import {
   buildEditorPanel,
@@ -312,12 +313,16 @@ async function handleWizardButton(
       await interaction.showModal(
         buildModal({
           customId: scrimsId("modal", "wizard", "set_mentions", token),
-          title: "Required mentions",
-          text: {
-            label: "How many mentions are required? (0 - 10)",
-            placeholder: "4",
-            maxLength: 2,
-          },
+          title: "Set required mentions",
+          inputs: [
+            {
+              id: "value",
+              label: "Mentions",
+              placeholder: "4",
+              required: true,
+              maxLength: 2,
+            },
+          ],
         }),
       );
 
@@ -327,12 +332,16 @@ async function handleWizardButton(
       await interaction.showModal(
         buildModal({
           customId: scrimsId("modal", "wizard", "set_slots", token),
-          title: "Total slots",
-          text: {
-            label: "How many slots does the scrim have? (1 - 30)",
-            placeholder: "10",
-            maxLength: 2,
-          },
+          title: "Set total slots",
+          inputs: [
+            {
+              id: "value",
+              label: "Slots",
+              placeholder: "10",
+              required: true,
+              maxLength: 2,
+            },
+          ],
         }),
       );
 
@@ -342,12 +351,16 @@ async function handleWizardButton(
       await interaction.showModal(
         buildModal({
           customId: scrimsId("modal", "wizard", "set_open_time", token),
-          title: "Open time",
-          text: {
-            label: "When should registration open? (IST)",
-            placeholder: "every day at 7 PM",
-            maxLength: 64,
-          },
+          title: "Set open time",
+          inputs: [
+            {
+              id: "value",
+              label: "Open time",
+              placeholder: "every day at 7 PM",
+              required: true,
+              maxLength: 64,
+            },
+          ],
         }),
       );
 
@@ -357,12 +370,16 @@ async function handleWizardButton(
       await interaction.showModal(
         buildModal({
           customId: scrimsId("modal", "wizard", "set_emojis", token),
-          title: "Reactions",
-          text: {
-            label: "Two emojis, separated by a comma",
-            placeholder: "✅,❌",
-            maxLength: 16,
-          },
+          title: "Set reactions",
+          inputs: [
+            {
+              id: "value",
+              label: "Reactions",
+              placeholder: "✅,❌",
+              required: true,
+              maxLength: 16,
+            },
+          ],
         }),
       );
 
@@ -609,50 +626,106 @@ export function fieldModalFor(
     case "set_name":
       return buildModal({
         customId: scrimsId("modal", "field", key, scrimId),
-        title: "Scrim name",
-        text: { label: "The name of the scrim (max 30 characters)", maxLength: 30 },
+        title: "Set scrim name",
+        inputs: [
+          {
+            id: "value",
+            label: "Name",
+            placeholder: "Friday Scrims",
+            required: true,
+            maxLength: 30,
+          },
+        ],
       });
 
     case "set_mentions":
       return buildModal({
         customId: scrimsId("modal", "field", key, scrimId),
-        title: "Required mentions",
-        text: { label: "How many mentions are required? (0 - 10)", maxLength: 2 },
+        title: "Set required mentions",
+        inputs: [
+          {
+            id: "value",
+            label: "Mentions",
+            placeholder: "4",
+            required: true,
+            maxLength: 2,
+          },
+        ],
       });
 
     case "set_slots":
       return buildModal({
         customId: scrimsId("modal", "field", key, scrimId),
-        title: "Total slots",
-        text: { label: "How many slots does the scrim have? (1 - 30)", maxLength: 2 },
+        title: "Set total slots",
+        inputs: [
+          {
+            id: "value",
+            label: "Slots",
+            placeholder: "10",
+            required: true,
+            maxLength: 2,
+          },
+        ],
       });
 
     case "set_start_from":
       return buildModal({
         customId: scrimsId("modal", "field", key, scrimId),
-        title: "Slotlist start",
-        text: { label: "Which slot number does the slotlist start at?", maxLength: 3 },
+        title: "Set slotlist start",
+        inputs: [
+          {
+            id: "value",
+            label: "First slot number",
+            placeholder: "1",
+            required: true,
+            maxLength: 3,
+          },
+        ],
       });
 
     case "set_lines":
       return buildModal({
         customId: scrimsId("modal", "field", key, scrimId),
-        title: "Required lines",
-        text: { label: "How many lines must a registration have? (0 - 100)", maxLength: 3 },
+        title: "Set required lines",
+        inputs: [
+          {
+            id: "value",
+            label: "Lines",
+            placeholder: "3",
+            required: true,
+            maxLength: 3,
+          },
+        ],
       });
 
     case "set_open_time":
       return buildModal({
         customId: scrimsId("modal", "field", key, scrimId),
-        title: "Open time",
-        text: { label: "When should registration open? (IST)", maxLength: 64 },
+        title: "Set open time",
+        inputs: [
+          {
+            id: "value",
+            label: "Open time",
+            placeholder: "every day at 7 PM",
+            required: true,
+            maxLength: 64,
+          },
+        ],
       });
 
     case "set_emojis":
       return buildModal({
         customId: scrimsId("modal", "field", key, scrimId),
-        title: "Reactions",
-        text: { label: "Two emojis, separated by a comma", maxLength: 16 },
+        title: "Set reactions",
+        inputs: [
+          {
+            id: "value",
+            label: "Reactions",
+            placeholder: "✅,❌",
+            required: true,
+            maxLength: 16,
+          },
+        ],
       });
 
     default:
@@ -760,11 +833,15 @@ async function handleEditorNav(
       buildModal({
         customId: scrimsId("modal", "skip_to", scrim.id),
         title: "Skip to a scrim",
-        text: {
-          label: `Which scrim? (1 - ${all.length})`,
-          placeholder: "1",
-          maxLength: 3,
-        },
+        inputs: [
+          {
+            id: "value",
+            label: "Scrim number",
+            placeholder: "1",
+            required: true,
+            maxLength: 3,
+          },
+        ],
       }),
     );
 
@@ -1018,23 +1095,26 @@ async function handleBanButton(
       buildModal({
         customId: scrimsId("modal", "ban", scrim.id),
         title: "Ban users",
-        texts: [
+        inputs: [
           {
             id: "users",
-            label: "Who do you want to ban? (mention them)",
+            label: "Users",
             placeholder: "@user @other",
+            required: true,
             maxLength: 1000,
           },
           {
             id: "duration",
-            label: "Ban duration (optional)",
+            label: "Duration",
             placeholder: "7 days, 24h, Friday at 6pm",
+            required: false,
             maxLength: 64,
           },
           {
             id: "reason",
-            label: "Reason (optional)",
+            label: "Reason",
             placeholder: "Why are they banned?",
+            required: false,
             maxLength: 200,
           },
         ],
@@ -1170,27 +1250,33 @@ async function handleReserveButton(
       buildModal({
         customId: scrimsId("modal", "reserve", scrim.id),
         title: "Reserve a slot",
-        texts: [
+        inputs: [
           {
             id: "num",
-            label: `Slot number (${scrim.startFrom} - ${scrim.startFrom + scrim.totalSlots - 1})`,
+            label: "Slot number",
+            placeholder: String(scrim.startFrom),
+            required: true,
             maxLength: 3,
           },
           {
             id: "team_name",
             label: "Team name",
+            placeholder: "Team Alpha",
+            required: true,
             maxLength: 25,
           },
           {
             id: "owner",
-            label: "Team owner (optional)",
+            label: "Team owner",
             placeholder: "@owner",
+            required: false,
             maxLength: 64,
           },
           {
             id: "expires",
-            label: "Expires (optional)",
+            label: "Expires",
             placeholder: "7 days, 24h, Friday at 6pm",
+            required: false,
             maxLength: 64,
           },
         ],
@@ -1288,8 +1374,16 @@ async function handleAutocleanButton(
     await interaction.showModal(
       buildModal({
         customId: scrimsId("modal", "autoclean_time", scrim.id),
-        title: "Autoclean time",
-        text: { label: "When should the autoclean run? (IST)", maxLength: 64 },
+        title: "Set clean time",
+        inputs: [
+          {
+            id: "value",
+            label: "Clean at",
+            placeholder: "4 AM",
+            required: true,
+            maxLength: 64,
+          },
+        ],
       }),
     );
 
@@ -1330,24 +1424,30 @@ async function handleDesignButton(
         customId: scrimsId("modal", "design", action, scrim.id),
         title:
           action === "open"
-            ? "Open message"
+            ? "Design the open message"
             : action === "close"
-              ? "Close message"
-              : "Slotlist design",
-        texts: [
+              ? "Design the close message"
+              : "Design the slotlist message",
+        inputs: [
           {
             id: "title",
-            label: "Title (leave empty for the default)",
+            label: "Title",
+            placeholder: "Registration is open",
+            required: false,
             maxLength: 256,
           },
           {
             id: "description",
-            label: "Description (leave empty for the default)",
+            label: "Description",
+            placeholder: "The teams can register now.",
+            required: false,
             maxLength: 4000,
           },
           {
             id: "footer",
-            label: "Footer (leave empty for the default)",
+            label: "Footer",
+            placeholder: "Registration closes at 8 PM",
+            required: false,
             maxLength: 256,
           },
         ],

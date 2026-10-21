@@ -327,7 +327,7 @@ updated by the commands that add or remove a channel.
 | `jobs.ts` | the job handlers and the daily pass |
 | `listeners.ts` | the four listeners |
 | `commands/` | the command definitions |
-| `views/` | the embeds, the reminder delivery and the reply helper (`views/reply.ts`) |
+| `views/` | the panels (`views/embeds.ts`), the lists (`views/lists.ts`), the empty states (`views/panels.ts`), the area's own button helper (`views/buttons.ts`), the reminder delivery and the reply helper (`views/reply.ts`) |
 | `register.ts` | what the manager wires in |
 
 ### What the manager has to wire
@@ -379,6 +379,42 @@ well (`like 'tag %'`), so either convention works.
 
 ---
 
+## The panels
+
+Every panel the area shows is built with `core/ui.ts` — the bot's design
+language. A panel has a **title**, a *short* description, the data in
+**fields**, and a **footer** that says what to do next, so the
+description does not have to shout it.
+
+| Panel | Command | Title | The footer says |
+|---|---|---|---|
+| the deleted message | `/snipe` | "Deleted message" | "Sniped messages are kept for ten days." |
+| the tag's statistics | `/tag info` | "Tag: `<name>`" | "Post it with `/tag show <name>`." |
+| the auto-roles | `/autorole config` | "Auto-roles" | "Add a role with `/autorole humans` or `/autorole bots`." |
+| the auto-purge channels | `/autopurge list` | "Auto-purge channels" | "Set a channel up with `/autopurge set`." |
+| the guild's tag statistics | `/tag stats` | "Tag stats" | "These statistics are for this server only." |
+| a member's tag statistics | `/tag stats <member>` | "Tag stats for `<name>`" | "These statistics are for this server only." |
+| a reminder | the delivery | "Reminder" | "Delete it early with `/reminder delete`." |
+| a list of tags | `/tag list`, `/tag mine`, `/tag search` | the paginator's title | the header above the list |
+| a list of reminders | `/reminder list` | "Running reminders (n)" | the header above the list |
+
+**A tag is a short thing, and the panel that shows a tag is a list.**
+The list *is* the panel: a numbered row per tag, the name in bold and
+the id in a code span, and the hint about what to do with the list above
+it, because the paginator's own footer carries the page count.
+
+**The area has no buttons of its own.** Every action here is a slash
+command, so the footer is where the action is named. The one button the
+area does show is the reminder's "Jump to original message" link, and a
+link is grey: it takes the reader somewhere and changes nothing.
+
+> **The link button is the area's own helper.** `core/ui.ts` has the
+> button styles, and none of them is the *link* style, because a link
+> button is the one button that cannot carry a custom id. The helper
+> lives in `views/buttons.ts` until the core grows one.
+
+---
+
 ## The error modes
 
 A refusal is an answer, not a crash. The module raises the `DenialError`
@@ -406,7 +442,16 @@ The refusals the module raises itself:
 | "You can have at most 25 reminders running. Delete one with `/reminder delete` before you set another." | the member's reminder allowance is used up |
 | "The owner of that tag is still in the server." | `/tag claim` on a tag whose owner is here |
 | "That reminder is not one of yours, or it has already fired." | `/reminder delete` with somebody else's id |
-| "I have no running reminders." | `/reminder list` with nothing running |
+
+> **An empty list is a panel, not a refusal.** A command that shows a
+> list — `/tag list`, `/tag mine`, `/tag search`, `/reminder list`,
+> `/autopurge list`, `/autorole config`, `/snipe` — answers with the
+> **empty panel** from `core/ui.ts` when there is nothing to show, and
+> the panel's footer says what to do next ("Create one with
+> `/tag create`."). A new member meets that panel first, so it has to
+> say what to do rather than only report the absence. A *refusal* —
+> "that channel is not an auto-purge channel" — is not an empty state
+> and stays a refusal.
 
 ---
 

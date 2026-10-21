@@ -18,6 +18,7 @@ import { parseDuration } from "../../../core/time.js";
 import { autoPurgeChannels } from "../cache.js";
 import * as service from "../service.js";
 import { buildAutoPurgeListEmbed } from "../views/embeds.js";
+import { emptyAutoPurgePanel, panelPayload } from "../views/panels.js";
 import { respondSafe } from "../views/reply.js";
 import {
   missingPermission,
@@ -196,7 +197,12 @@ async function listAutoPurge(
   const configs = await service.listAutoPurgeConfigs(guild.id);
 
   if (configs.length === 0) {
-    throw new InputError("This server has no auto-purge channels.");
+    await respondSafe(
+      interaction,
+      panelPayload(emptyAutoPurgePanel()),
+    );
+
+    return;
   }
 
   const names = new Map<string, string>();

@@ -186,7 +186,7 @@ ban and unban entries. **This area reads that row and writes the
 entries** (`ban-log.ts`); it never writes the row, so there is one
 answer to "where does the log go".
 
-The slot area owns the published slot list, so it owns the **Punish**
+The slot area owns the published slot list, so it owns the **Ban teams**
 button on it — the flow a moderator actually uses to ban a team. A ban
 made through that button has to leave the same trail a ban made anywhere
 else leaves, or the log stops being an audit trail of anything.
@@ -261,9 +261,9 @@ guarantees that a slot has exactly one owner (D14).
 | From | To | Who | How |
 |---|---|---|---|
 | `free` | `claimed` | a member | the conditional `UPDATE` from S7 |
-| `free` | `claimed` | a moderator | the same statement (the "Add Team" button) |
+| `free` | `claimed` | a moderator | the same statement (the "Add team" button) |
 | `claimed` | `free` | the owner | the conditional `UPDATE` from S7 (the cancel) |
-| `claimed` | `free` | a moderator | the "Remove Team" button |
+| `claimed` | `free` | a moderator | the "Remove team" button |
 | `claimed` | `claimed` | the owner | the ID-Pass transfer (the ownership moves) |
 | `locked` / `banned` | `free` | a moderator | the scrims area's state machine |
 
@@ -339,8 +339,8 @@ guards changes (D15).
 
 | Feature | What it opens | Where |
 |---|---|---|
-| `slot_reminders` | the **Remind Me** button | `views/public.ts` |
-| `idp_transfer` | the **Transfer IDP Role** button | `views/public.ts` |
+| `slot_reminders` | the **Remind me** button | `views/public.ts` |
+| `idp_transfer` | the **Transfer ID/Pass role** button | `views/public.ts` |
 | `extra_channels` | more slot managers than the free tier allows | `views/manager.ts` |
 
 The free-tier allowance is read from the configuration (`FREE_TIER`),
@@ -358,7 +358,7 @@ business model — so nothing is silently disabled.
 | B1 | The slot-claim race, guarded by a process-global lock. | `views/public.ts`, `repo.ts` | The claim is one conditional `UPDATE … WHERE state = 'free'`. Zero rows updated means somebody else won. There is no lock, no read-modify-write and no array. |
 | B2 | The "remind" filter mutated the list it was iterating, so every second match survived. | `service.ts` (`filterReminderCandidates`) | The excluded ids are collected into a `Set` and the candidates are filtered against it. Every match is excluded; none is skipped. |
 | B3 | The claim recorded only the claimer as a member, so the ID-Pass transfer could never find a teammate. **The feature had never worked.** | `views/modals.ts`, `service.ts` (`claimMembers`) | The claim form collects the teammate mentions, like the registration flow does, and they are written to `slot_members`. |
-| B4 | The "Add Team" button hard-coded `range(start_from, 30)`, ignoring `total_slots`. | `service.ts` (`slotNumbersOf`), `views/slotlist.ts` | The numbers offered are the scrim's own: `start_from … start_from + total_slots - 1`. |
+| B4 | The "Add team" button hard-coded `range(start_from, 30)`, ignoring `total_slots`. | `service.ts` (`slotNumbersOf`), `views/slotlist.ts` | The numbers offered are the scrim's own: `start_from … start_from + total_slots - 1`. |
 | B9 | The IDP transfer removed the captain from `slot.members` **in memory only**; the database still listed the old captain. | `service.ts` (`applyIdpTransfer`) | The transfer writes the new owner **and** the new member list back. |
 | B10 | `guild.get_member()` may be null; the source crashed on it inside a detached task. | `views/helpers.ts` (`resolveMembers`) | The members that cannot be resolved are dropped, and the caller is told when nobody is left. |
 | B5 | The source's error reply did not `return`, so execution continued into a failure. | everywhere | Every refusal returns. |
@@ -422,7 +422,7 @@ business model — so nothing is silently disabled.
   or replying to an interaction"). So a command flow has no way to ask
   for a line of free text, and a modal in a command handler is a crash
   waiting to happen. The command's punish picks the ban type and the
-  duration from select menus; the slot list's **Punish** button has the
+  duration from select menus; the slot list's **Ban teams** button has the
   full flow, with a modal for the reason and the duration. **Free text
   is routed through the panel, not through the command.**
 - **The pick mechanism.** `core/select.ts`'s `awaitSelect` *consumes* the

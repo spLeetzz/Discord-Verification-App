@@ -18,13 +18,14 @@
  * and the shared helper cannot answer one.
  */
 
-import { EmbedBuilder, MessageFlags } from "discord.js";
+import { MessageFlags } from "discord.js";
 import type {
   ButtonInteraction,
+  EmbedBuilder,
   MessageComponentInteraction,
   ModalSubmitInteraction,
 } from "discord.js";
-import { ERROR_COLOR } from "../../../core/constants.js";
+import { DANGER_COLOR, panelEmbed } from "../../../core/ui.js";
 import { canUseScrimMod } from "../guards.js";
 import type { ScrimsInteraction } from "../guards.js";
 import * as repo from "../repo.js";
@@ -134,7 +135,11 @@ export async function fail(
   interaction: PanelInteraction,
   message: string,
 ): Promise<void> {
-  const embed = new EmbedBuilder().setDescription(message).setColor(ERROR_COLOR);
+  const embed = panelEmbed({
+    title: "Could not do that",
+    description: message,
+    color: DANGER_COLOR,
+  });
 
   if (interaction.deferred || interaction.replied) {
     await interaction

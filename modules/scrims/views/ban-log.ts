@@ -15,9 +15,10 @@
  * database by the time this runs.
  */
 
-import { ChannelType, EmbedBuilder } from "discord.js";
+import { ChannelType } from "discord.js";
 import type { Guild } from "discord.js";
-import { EMBED_COLOR, ERROR_COLOR } from "../../../core/constants.js";
+import { DANGER_COLOR, SUCCESS_COLOR, panelEmbed } from "../../../core/ui.js";
+import type { PanelField } from "../../../core/ui.js";
 import { discordTimestamp } from "../../../core/time.js";
 import * as repo from "../repo.js";
 
@@ -61,32 +62,37 @@ export async function writeBanLog(
 
   if (!channel || channel.type !== ChannelType.GuildText) return;
 
-  const embed = new EmbedBuilder()
-    .setTitle(entry.action === "banned" ? "🔨 Banned" : "🔓 Unbanned")
-    .setColor(entry.action === "banned" ? ERROR_COLOR : EMBED_COLOR)
-    .addFields(
-      { name: "User", value: `<@${entry.userId}>`, inline: true },
-      { name: "Scrim", value: entry.scrimName, inline: true },
-      {
-        name: "Until",
-        value: entry.expires
-          ? discordTimestamp(entry.expires, "f")
-          : "Never expires",
-        inline: true,
-      },
-    );
+  const banned = entry.action === "banned";
+
+  const fields: PanelField[] = [
+    { name: "User", value: `<@${entry.userId}>`, inline: true },
+    { name: "Scrim", value: entry.scrimName, inline: true },
+    {
+      name: "Until",
+      value: entry.expires ? discordTimestamp(entry.expires, "f") : "Never expires",
+      inline: true,
+    },
+  ];
 
   if (entry.reason) {
-    embed.addFields({ name: "Reason", value: entry.reason });
+    fields.push({ name: "Reason", value: entry.reason });
   }
 
   if (entry.moderatorId) {
-    embed.addFields({
+    fields.push({
       name: "Moderator",
       value: `<@${entry.moderatorId}>`,
       inline: true,
     });
   }
+
+  // The colour says what happened: red for a ban, green for the lift of
+  // one.
+  const embed = panelEmbed({
+    title: banned ? "User banned" : "User unbanned",
+    color: banned ? DANGER_COLOR : SUCCESS_COLOR,
+    fields,
+  });
 
   await channel.send({ embeds: [embed] }).catch(() => undefined);
 }

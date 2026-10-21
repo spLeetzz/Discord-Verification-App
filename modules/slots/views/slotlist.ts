@@ -1,5 +1,5 @@
 /**
- * The published slot list and its Edit / Punish / Info panel.
+ * The published slot list and its Edit / Ban / Info panel.
  *
  * The slot list is a message in the scrim's slotlist channel. It has to
  * survive a restart, so the custom id carries the **scrim id** (D18) and
@@ -7,9 +7,9 @@
  *
  * Three buttons, as in the source:
  *
- *  - **Edit** — change, add or remove a team;
- *  - **Punish** — ban the teams of the chosen slots;
- *  - **Info** — who is in a slot.
+ *  - **Edit slot list** — change, add or remove a team;
+ *  - **Ban teams** — ban the teams of the chosen slots;
+ *  - **Slot info** — who is in a slot.
  *
  * Two things are fixed here rather than ported:
  *
@@ -23,20 +23,31 @@
  *    the scrim did not have (B4). Ours offers the scrim's own numbers.
  */
 
-import { ButtonStyle, EmbedBuilder, MessageFlags, PermissionFlagsBits } from "discord.js";
+import { MessageFlags, PermissionFlagsBits, TextInputStyle } from "discord.js";
 import type {
   ActionRowBuilder,
   AnySelectMenuInteraction,
   ButtonBuilder,
   ButtonInteraction,
   Client,
+  EmbedBuilder,
   Guild,
   Message,
   TextChannel,
 } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
 import { respond, replyError, replySuccess } from "../../../core/context.js";
 import { plural, truncate } from "../../../core/text.js";
+import {
+  actionRow,
+  buildModal,
+  dangerButton,
+  label,
+  navigationRow,
+  panelEmbed,
+  primaryButton,
+  secondaryButton,
+  successButton,
+} from "../../../core/ui.js";
 import { logger } from "../../../utils/logger.js";
 import { writeBanLogs } from "../ban-log.js";
 import * as repo from "../repo.js";
@@ -44,12 +55,7 @@ import * as service from "../service.js";
 import { slotsId } from "../ids.js";
 import { BAN_MODES, BAN_MODE_LABELS, BanMode } from "../types.js";
 import type { ScrimLite, SlotRecord } from "../types.js";
-import {
-  assertComponentBudget,
-  buildModal,
-  button,
-  buttonRow,
-} from "./components.js";
+import { assertComponentBudget } from "./components.js";
 import { addScrimRole, removeScrimRole } from "./helpers.js";
 import { refreshPublicMessage } from "./panel.js";
 import { clearPickMenu, issueModalToken, showPick } from "./pick.js";
@@ -78,31 +84,87 @@ export interface SlotListSlot {
 }
 
 /**
+ * The mark each state is shown with.
+ *
+ * A slot list is read in a hurry, so the state of a slot has to be
+ * obvious before the words are read: a dot for a slot that is taken, a
+ * ring for a free one, a padlock for a locked one and a stop sign for a
+ * banned one.
+ */
+const STATE_MARKS: Record<string, string> = {
+  free: "⚪",
+  claimed: "🟢",
+  locked: "🔒",
+  banned: "⛔",
+};
+
+/** How many characters the slot list may use. */
+const MAX_DESCRIPTION = 3800;
+
+/**
  * The slot list's body.
  *
- * A plain list of the claimed slots. The message is edited in place, so
- * the list is always the current one.
+ * A plain list of the slots, each with its state. The message is edited
+ * in place, so the list is always the current one.
  */
 export function buildSlotListEmbed(
   scrim: { readonly name: string },
   slots: readonly SlotListSlot[],
 ): EmbedBuilder {
-  const claimed = slots.filter((slot) => slot.state === "claimed");
+  return panelEmbed({
+    title: `Slot list — ${scrim.name}`,
+    description: slotLines(slots),
+    footer:
+      "The buttons below edit the teams, ban a team, or show who is in a slot.",
+  });
+}
 
-  const body =
-    claimed.length === 0
-      ? "No team has registered yet."
-      : claimed
-          .map(
-            (slot) =>
-              `${slot.num}. ${slot.teamName ?? "—"} ${slot.ownerUserId ? `<@${slot.ownerUserId}>` : ""}`.trim(),
-          )
-          .join("\n");
+/**
+ * The lines of the slot list.
+ *
+ * Every slot is a line, so a free slot is as visible as a taken one.
+ * The list is cut short if it would not fit into an embed, because a
+ * message Discord refuses to send is a slot list nobody can read.
+ */
+function slotLines(slots: readonly SlotListSlot[]): string {
+  if (slots.length === 0) return "No team has registered yet.";
 
-  return new EmbedBuilder()
-    .setTitle(`Slotlist — ${scrim.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription(body);
+  const lines: string[] = [];
+
+  let used = 0;
+
+  for (const slot of slots) {
+    const line = slotLine(slot);
+
+    if (used + line.length > MAX_DESCRIPTION) {
+      lines.push(`…and ${slots.length - lines.length} more.`);
+      break;
+    }
+
+    lines.push(line);
+    used += line.length + 1;
+  }
+
+  return lines.join("\n");
+}
+
+/** One line of the slot list. */
+function slotLine(slot: SlotListSlot): string {
+  const mark = STATE_MARKS[slot.state] ?? "•";
+
+  if (slot.state === "claimed") {
+    const owner = slot.ownerUserId ? ` <@${slot.ownerUserId}>` : "";
+
+    return `${mark} ${slot.num}. ${slot.teamName ?? "—"}${owner}`;
+  }
+
+  if (slot.state === "banned") {
+    const team = slot.teamName ? ` — ${slot.teamName}` : "";
+
+    return `${mark} ${slot.num}. Banned${team}`;
+  }
+
+  return `${mark} ${slot.num}. ${label(slot.state)}`;
 }
 
 /**
@@ -113,29 +175,29 @@ export function buildSlotListEmbed(
  *
  * The buttons are the **slot area's**: `slots:slotlist_*`. There is one
  * namespace for these buttons across the bot, and it is this one.
+ *
+ * Editing the list is what the panel is for, so it is the one blue
+ * button. Banning a team takes their slot away, so it is red, and
+ * looking a slot up changes nothing, so it is grey.
  */
 export function buildSlotListRows(
   scrimId: string,
 ): ActionRowBuilder<ButtonBuilder>[] {
   const rows = [
-    buttonRow(
-      button({
+    actionRow(
+      primaryButton({
         customId: slotsId("slotlist_edit", scrimId),
-        label: "Edit",
-        emoji: "📝",
-        style: ButtonStyle.Success,
+        label: "Edit slot list",
       }),
-      button({
+    ),
+    actionRow(
+      dangerButton({
         customId: slotsId("slotlist_punish", scrimId),
-        label: "Punish",
-        emoji: "🛠️",
-        style: ButtonStyle.Danger,
+        label: "Ban teams",
       }),
-      button({
+      secondaryButton({
         customId: slotsId("slotlist_info", scrimId),
-        label: "Info",
-        emoji: "🧐",
-        style: ButtonStyle.Success,
+        label: "Slot info",
       }),
     ),
   ];
@@ -155,26 +217,26 @@ export function buildSlotListEditorRows(
   scrimId: string,
 ): ActionRowBuilder<ButtonBuilder>[] {
   const rows = [
-    buttonRow(
-      button({
+    actionRow(
+      primaryButton({
         customId: slotsId("slotlist_change", scrimId),
-        label: "Change Team",
-        style: ButtonStyle.Primary,
+        label: "Change team",
       }),
-      button({
-        customId: slotsId("slotlist_remove", scrimId),
-        label: "Remove Team",
-        style: ButtonStyle.Danger,
-      }),
-      button({
+    ),
+    actionRow(
+      successButton({
         customId: slotsId("slotlist_add", scrimId),
-        label: "Add Team",
-        style: ButtonStyle.Success,
+        label: "Add team",
       }),
-      button({
-        customId: slotsId("slotlist_edit", scrimId),
+      dangerButton({
+        customId: slotsId("slotlist_remove", scrimId),
+        label: "Remove team",
+      }),
+    ),
+    navigationRow(
+      secondaryButton({
+        customId: slotsId("slotlist_back", scrimId),
         label: "Back",
-        style: ButtonStyle.Secondary,
       }),
     ),
   ];
@@ -186,10 +248,11 @@ export function buildSlotListEditorRows(
 
 /** The editor's embed. */
 export function buildSlotListEditorEmbed(scrim: ScrimLite): EmbedBuilder {
-  return new EmbedBuilder()
-    .setTitle(`Edit the slotlist — ${scrim.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription("Choose an option below to edit the slotlist.");
+  return panelEmbed({
+    title: `Edit the slot list — ${scrim.name}`,
+    description: "Add a team, change a team, or take one away.",
+    footer: "Every change shows on the published slot list straight away.",
+  });
 }
 
 /**
@@ -376,6 +439,20 @@ export async function handleSlotListButton(
     return;
   }
 
+  if (action === "slotlist_back") {
+    // Back to the list itself. This used to carry `slotlist_edit`,
+    // which meant that pressing "Back" opened the editor again — the
+    // button you had just come from.
+    const slots = await repo.listSlots(scrim.id);
+
+    await respond(interaction, {
+      embeds: [buildSlotListEmbed(scrim, slots)],
+      components: buildSlotListRows(scrim.id),
+    });
+
+    return;
+  }
+
   if (action === "slotlist_add") {
     await startAddTeam(interaction, scrim);
     return;
@@ -474,7 +551,6 @@ async function startAddTeam(
     numbers.slice(0, 25).map((num) => ({
       label: `Slot ${num}`.slice(0, 100),
       value: String(num),
-      emoji: "📇",
     })),
     context,
     {
@@ -507,7 +583,6 @@ async function startChangeTeam(
       label: `Slot ${slot.num}`.slice(0, 100),
       value: slot.id,
       description: truncate(slot.teamName ?? "—", 40),
-      emoji: "📇",
     })),
     context,
     {
@@ -540,7 +615,6 @@ async function startRemoveTeam(
       label: `Slot ${numText(slot.num)}`.slice(0, 100),
       value: slot.id,
       description: truncate(slot.teamName ?? "—", 40),
-      emoji: "📇",
     })),
     context,
     {
@@ -573,7 +647,6 @@ async function startPunish(
       label: `Slot ${slot.num}`.slice(0, 100),
       value: slot.id,
       description: truncate(slot.teamName ?? "—", 40),
-      emoji: "📇",
     })),
     context,
     {
@@ -605,7 +678,6 @@ async function startInfo(
       label: `Slot ${slot.num}`.slice(0, 100),
       value: slot.id,
       description: truncate(slot.teamName ?? "—", 40),
-      emoji: "📇",
     })),
     context,
     {
@@ -656,22 +728,24 @@ export async function handleAddTeamPick(params: {
   await interaction.showModal(
     buildModal({
       customId: slotsId("modal_team", token),
-      title: "Add a team to the slotlist",
-      texts: [
+      title: "Add a team",
+      inputs: [
         {
           id: "team_name",
-          label: "Team Name",
-          placeholder: "Enter the team name...",
+          label: "Team name",
+          placeholder: "e.g. Team Aurora",
           required: true,
           minLength: 3,
           maxLength: 25,
+          style: TextInputStyle.Short,
         },
         {
           id: "leader",
-          label: "Team leader (mention, optional)",
-          placeholder: "Mention the captain of that team",
+          label: "Team leader",
+          placeholder: "Mention the captain, e.g. @Alice",
           required: false,
           maxLength: 100,
+          style: TextInputStyle.Short,
         },
       ],
     }),
@@ -709,22 +783,24 @@ export async function handleChangeTeamPick(params: {
   await interaction.showModal(
     buildModal({
       customId: slotsId("modal_team", token),
-      title: "Change the team of a slot",
-      texts: [
+      title: "Change a team",
+      inputs: [
         {
           id: "team_name",
-          label: "Team Name",
-          placeholder: "Enter the team name...",
+          label: "Team name",
+          placeholder: "e.g. Team Aurora",
           required: true,
           minLength: 3,
           maxLength: 25,
+          style: TextInputStyle.Short,
         },
         {
           id: "leader",
-          label: "Team leader (mention, optional)",
-          placeholder: "Mention the captain of that team",
+          label: "Team leader",
+          placeholder: "Mention the captain, e.g. @Alice",
           required: false,
           maxLength: 100,
+          style: TextInputStyle.Short,
         },
       ],
     }),
@@ -900,21 +976,23 @@ export async function handlePunishModePick(params: {
   await interaction.showModal(
     buildModal({
       customId: slotsId("modal_punish", token),
-      title: "Ban time and reason",
-      texts: [
+      title: "Ban a team",
+      inputs: [
         {
           id: "duration",
-          label: "Ban duration (optional)",
-          placeholder: "7 days, 24h, Friday at 6pm",
+          label: "Duration",
+          placeholder: "e.g. 7 days, 24h, Friday at 6pm",
           required: false,
           maxLength: 64,
+          style: TextInputStyle.Short,
         },
         {
           id: "reason",
-          label: "Reason (optional)",
-          placeholder: "Why are they banned?",
+          label: "Reason",
+          placeholder: "e.g. The team did not show up",
           required: false,
           maxLength: 200,
+          style: TextInputStyle.Paragraph,
         },
       ],
     }),

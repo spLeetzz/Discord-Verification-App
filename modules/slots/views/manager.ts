@@ -4,28 +4,31 @@
  * A slot manager is a channel with a public panel in it. Setting one up
  * creates the channel, posts the panel and records the scrims it shows.
  *
- * The editor has five buttons and a delete, as in the source:
+ * The editor has five buttons and a delete, as in the source — only
+ * now every one of them says what it does:
  *
- *  - **A — Main Channel.** A deliberate stub in the source: it answers
+ *  - **Main channel.** A deliberate stub in the source: it answers
  *    "Main Channel can't be edited. Sorry 🥲" and does nothing else. The
  *    port keeps the stub and the message; there is no channel-rename
  *    flow.
- *  - **B — Slot-m Status.** The panel's on/off switch.
- *  - **C — Reminders button.** Whether "Remind Me" is offered.
- *  - **D — Multi Slot-Claim.** Whether one member may hold more than one
- *    slot in a scrim.
- *  - **E — Scrims.** Which scrims the panel shows.
- *  - **Delete Slot-M.** Removes the manager and disables the panel.
+ *  - **Enable/Disable panel.** The panel's on/off switch.
+ *  - **Enable/Disable reminders.** Whether "Remind me" is offered.
+ *  - **Enable/Disable multi-claim.** Whether one member may hold more
+ *    than one slot in a scrim.
+ *  - **Edit scrims.** Which scrims the panel shows.
+ *  - **Delete manager.** Removes the manager and disables the panel.
  */
 
-import { ButtonStyle, EmbedBuilder, MessageFlags, PermissionFlagsBits } from "discord.js";
+import { MessageFlags, PermissionFlagsBits } from "discord.js";
 import type {
+  ActionRowBuilder,
+  ButtonBuilder,
   ButtonInteraction,
   ChatInputCommandInteraction,
+  EmbedBuilder,
   Guild,
   TextChannel,
 } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
 import { respond, replyError, replySuccess } from "../../../core/context.js";
 import { awaitSelect } from "../../../core/select.js";
 import { prompt } from "../../../core/prompt.js";
@@ -33,13 +36,22 @@ import { isStaff } from "../../../core/guards.js";
 import { plural } from "../../../core/text.js";
 import { freeTierLimit } from "../../../core/premium.js";
 import { PremiumFeature } from "../../../core/premium.js";
+import {
+  actionRow,
+  dangerButton,
+  navigationRow,
+  panelEmbed,
+  primaryButton,
+  secondaryButton,
+  successButton,
+} from "../../../core/ui.js";
 import { assertEntitled } from "../../premium/index.js";
 import { buildPremiumGate, gateReason } from "../../premium/gate.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
 import { slotsId } from "../ids.js";
 import type { SlotManagerRecord } from "../types.js";
-import { assertComponentBudget, button, buttonRow } from "./components.js";
+import { assertComponentBudget } from "./components.js";
 import {
   buildPublicEmbed,
   buildPublicRows,
@@ -60,90 +72,80 @@ export const SLOT_MANAGER_CHANNEL_NAME = "cancel-claim-slot";
 /**
  * The editor's embed.
  *
- * The source's field layout, with the letters it used.
+ * The fields are the settings, and the footer says what the buttons
+ * below them are for.
  */
 export function buildManagerEmbed(
   manager: SlotManagerRecord,
   scrimCount: number,
 ): EmbedBuilder {
-  const fields: { name: string; value: string }[] = [
-    { name: "A — Main Channel:", value: `<#${manager.mainChannelId}>` },
-    {
-      name: "B — Slot-m Status:",
-      value: manager.toggle ? "Enabled" : "Disabled",
-    },
-    {
-      name: "C — Reminders button:",
-      value: manager.allowReminders ? "Enabled" : "Disabled",
-    },
-    {
-      name: "D — Multi Slot-Claim:",
-      value: manager.multipleSlots ? "Enabled" : "Disabled",
-    },
-    {
-      name: "E — Scrims:",
-      value: `${plural(scrimCount, "scrim")} (\`Click to edit\`)`,
-    },
-  ];
-
-  const embed = new EmbedBuilder()
-    .setTitle("Slot-M Editor")
-    .setColor(EMBED_COLOR);
-
-  embed.addFields(
-    fields.map((field) => ({
-      name: field.name,
-      value: field.value,
-      inline: false,
-    })),
-  );
-
-  embed.addFields({
-    name: "🟥 Delete Slot-M",
-    value: "`Click to delete`",
-    inline: false,
+  return panelEmbed({
+    title: "Slot manager",
+    description:
+      "The channel, the settings and the scrims this slot manager shows.",
+    fields: [
+      { name: "Main channel", value: `<#${manager.mainChannelId}>` },
+      { name: "Panel", value: manager.toggle ? "Enabled" : "Disabled" },
+      {
+        name: "Reminders",
+        value: manager.allowReminders ? "Enabled" : "Disabled",
+      },
+      {
+        name: "Multi slot-claim",
+        value: manager.multipleSlots ? "Enabled" : "Disabled",
+      },
+      { name: "Scrims", value: plural(scrimCount, "scrim") },
+    ],
+    footer:
+      "The buttons below change the scrims, switch a setting on or off, or delete this slot manager.",
   });
-
-  return embed;
 }
 
-/** The editor's buttons. */
+/**
+ * The editor's buttons.
+ *
+ * **One primary action:** the scrims the panel shows are what a
+ * moderator comes here for, so "Edit scrims" is the blue button and it
+ * stands alone. The settings are switches and the stub that cannot
+ * change the channel are grey. Deleting the slot manager takes it away
+ * for good, so it is red and it is on its own row.
+ */
 export function buildManagerRows(
   manager: SlotManagerRecord,
-): ReturnType<typeof buttonRow>[] {
+): ActionRowBuilder<ButtonBuilder>[] {
   const rows = [
-    buttonRow(
-      button({
-        customId: slotsId("manager_channel", manager.id),
-        label: "A",
-        style: ButtonStyle.Primary,
-      }),
-      button({
-        customId: slotsId("manager_toggle", manager.id),
-        label: "B",
-        style: ButtonStyle.Primary,
-      }),
-      button({
-        customId: slotsId("manager_reminders", manager.id),
-        label: "C",
-        style: ButtonStyle.Primary,
-      }),
-      button({
-        customId: slotsId("manager_multi", manager.id),
-        label: "D",
-        style: ButtonStyle.Primary,
-      }),
-      button({
+    actionRow(
+      primaryButton({
         customId: slotsId("manager_scrims", manager.id),
-        label: "E",
-        style: ButtonStyle.Primary,
+        label: "Edit scrims",
       }),
     ),
-    buttonRow(
-      button({
+    actionRow(
+      secondaryButton({
+        customId: slotsId("manager_channel", manager.id),
+        label: "Main channel",
+      }),
+      secondaryButton({
+        customId: slotsId("manager_toggle", manager.id),
+        label: manager.toggle ? "Disable panel" : "Enable panel",
+      }),
+      secondaryButton({
+        customId: slotsId("manager_reminders", manager.id),
+        label: manager.allowReminders
+          ? "Disable reminders"
+          : "Enable reminders",
+      }),
+      secondaryButton({
+        customId: slotsId("manager_multi", manager.id),
+        label: manager.multipleSlots
+          ? "Disable multi-claim"
+          : "Enable multi-claim",
+      }),
+    ),
+    actionRow(
+      dangerButton({
         customId: slotsId("manager_delete", manager.id),
-        label: "Delete Slot-Manager",
-        style: ButtonStyle.Danger,
+        label: "Delete manager",
       }),
     ),
   ];
@@ -153,26 +155,31 @@ export function buildManagerRows(
   return rows;
 }
 
-/** The scrims sub-panel's buttons. */
+/**
+ * The scrims sub-panel's buttons.
+ *
+ * Adding a scrim puts one into the panel and removing one takes it
+ * out, so the first is green and the second is red. Going back is
+ * navigation, so it is grey and it is on the last row.
+ */
 export function buildManagerScrimsRows(
   manager: SlotManagerRecord,
-): ReturnType<typeof buttonRow>[] {
+): ActionRowBuilder<ButtonBuilder>[] {
   const rows = [
-    buttonRow(
-      button({
+    actionRow(
+      successButton({
         customId: slotsId("manager_scrims_add", manager.id),
-        label: "➕ Add scrims",
-        style: ButtonStyle.Success,
+        label: "Add scrims",
       }),
-      button({
+      dangerButton({
         customId: slotsId("manager_scrims_remove", manager.id),
-        label: "➖ Remove scrims",
-        style: ButtonStyle.Danger,
+        label: "Remove scrims",
       }),
-      button({
-        customId: slotsId("manager_toggle", manager.id),
+    ),
+    navigationRow(
+      secondaryButton({
+        customId: slotsId("manager_back", manager.id),
         label: "Back",
-        style: ButtonStyle.Secondary,
       }),
     ),
   ];
@@ -191,12 +198,13 @@ export function buildManagerScrimsEmbed(
       ? scrimIds.map((id) => `\`${id}\``).join(", ")
       : "*none*";
 
-  return new EmbedBuilder()
-    .setTitle("Slot-M Editor — scrims")
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      `Do you want to add scrims or remove scrims from this slot-m?\n\nCurrent scrims: ${list}`,
-    );
+  return panelEmbed({
+    title: "Slot manager — scrims",
+    description: "The scrims this slot manager shows.",
+    fields: [{ name: "Scrims", value: list }],
+    footer:
+      "Add a scrim to show it in the panel, or remove one to take it away.",
+  });
 }
 
 /**
@@ -292,6 +300,14 @@ export async function handleManagerButton(
   if (action === "manager_channel") {
     // The deliberate stub, ported with the same message.
     await respond(interaction, { content: MAIN_CHANNEL_EDIT_MESSAGE });
+    return;
+  }
+
+  if (action === "manager_back") {
+    // Back to the editor, and *only* back to the editor. This used to
+    // carry `manager_toggle`, which meant that pressing "Back" switched
+    // the whole slot manager off.
+    await showEditor(interaction, manager.id);
     return;
   }
 
@@ -401,7 +417,6 @@ async function addScrims(
       label: `#${scrim.name}`.slice(0, 100),
       value: scrim.id,
       description: scrim.registrationChannelId.slice(0, 100),
-      emoji: "📇",
     })),
     {
       maxValues: Math.min(available.length, 25),
@@ -438,7 +453,6 @@ async function removeScrims(
     current.slice(0, 25).map((id) => ({
       label: `\`${id}\``.slice(0, 100),
       value: id,
-      emoji: "📇",
     })),
     {
       maxValues: Math.min(current.length, 25),
@@ -570,7 +584,6 @@ export async function runSetup(
       label: `#${scrim.name}`.slice(0, 100),
       value: scrim.id,
       description: scrim.registrationChannelId.slice(0, 100),
-      emoji: "📇",
     })),
     {
       maxValues: Math.min(available.length, 25),
@@ -614,7 +627,7 @@ export async function runSetup(
   const claimable = await service.listClaimableScrims(repo.slotStore, manager.id);
 
   const message = await channel.send({
-    embeds: [buildPublicEmbed(claimable)],
+    embeds: [buildPublicEmbed(manager, claimable)],
     components: buildPublicRows(manager, claimable),
   });
 

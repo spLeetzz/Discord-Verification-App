@@ -14,7 +14,6 @@
 
 import {
   ChannelType,
-  EmbedBuilder,
   SlashCommandBuilder,
   SlashCommandSubcommandBuilder,
   SlashCommandSubcommandGroupBuilder,
@@ -23,8 +22,10 @@ import type { ChatInputCommandInteraction } from "discord.js";
 import type { Command } from "../../../types/command.js";
 import { awaitSelect } from "../../../core/select.js";
 import { respond, replyError, replySuccess } from "../../../core/context.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
+import type { ReplyPayload } from "../../../core/context.js";
 import { plural } from "../../../core/text.js";
+import { emptyPanel, panelEmbed } from "../../../core/ui.js";
+import type { PanelField } from "../../../core/ui.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
 import { BAN_MODES, BAN_MODE_LABELS, BanMode } from "../types.js";
@@ -102,10 +103,7 @@ export const editSubcommand: SlotSubcommand = {
     const managers = await repo.listSlotManagers(guild.id);
 
     if (managers.length === 0) {
-      await replyError(
-        interaction,
-        "You haven't added any slot-manager channel yet.\n\nRun `/slotmanager setup` to add one.",
-      );
+      await respond(interaction, emptySlotManagers());
 
       return;
     }
@@ -116,7 +114,6 @@ export const editSubcommand: SlotSubcommand = {
         label: `#${manager.mainChannelId}`.slice(0, 100),
         value: manager.id,
         description: `${manager.toggle ? "Enabled" : "Disabled"}`.slice(0, 100),
-        emoji: "📇",
       })),
       {
         maxValues: 1,
@@ -166,39 +163,50 @@ export const listSubcommand: SlotSubcommand = {
     const managers = await repo.listSlotManagers(guild.id);
 
     if (managers.length === 0) {
-      await replyError(
-        interaction,
-        "You haven't added any slot-manager channel yet.\n\nRun `/slotmanager setup` to add one.",
-      );
+      await respond(interaction, emptySlotManagers());
 
       return;
     }
 
-    const lines: string[] = [];
+    const fields: PanelField[] = [];
 
     for (const manager of managers) {
       const scrimIds = await repo.listSlotManagerScrimIds(manager.id);
 
-      lines.push(
-        `• <#${manager.mainChannelId}> — ${plural(scrimIds.length, "scrim")} — ${manager.toggle ? "Enabled" : "Disabled"}`,
-      );
+      fields.push({
+        name: `<#${manager.mainChannelId}>`,
+        value: `${plural(scrimIds.length, "scrim")} — ${manager.toggle ? "Enabled" : "Disabled"}`,
+      });
     }
 
-    const embed = new EmbedBuilder()
-      .setTitle("Scrims Slot-Manager Setup")
-      .setColor(EMBED_COLOR)
-      .setDescription(
-        [
-          "Slot-Manager is a way to ease-up the scrims slot management process. With a slot-m, members can cancel their slot, claim an empty slot and set a reminder for vacant slots — all without bugging a mod.",
-          "",
-          "**Current slot-manager channels:**",
-          lines.join("\n"),
-        ].join("\n"),
-      );
+    const embed = panelEmbed({
+      title: "Slot managers",
+      description: "The slot-manager channels of this server.",
+      fields,
+      footer:
+        "Run `/slotmanager edit` to change one of them, or `/slotmanager setup` to add another.",
+    });
 
     await respond(interaction, { embeds: [embed] });
   },
 };
+
+/**
+ * The empty state of the slot-manager commands.
+ *
+ * A server that has no slot manager yet is not in trouble, so this is
+ * a plain panel and not a refusal — and it says what to do next.
+ */
+function emptySlotManagers(): ReplyPayload {
+  const panel = emptyPanel({
+    title: "No slot managers yet",
+    description:
+      "A slot manager is a channel where the members claim and cancel their own scrim slots.",
+    footer: "Run `/slotmanager setup` to create one.",
+  });
+
+  return { embeds: [...panel.embeds], components: panel.components };
+}
 
 /* ------------------------------------------------------------------ *
  * slotlist
@@ -290,7 +298,6 @@ export const slotListPunishSubcommand: SlotSubcommand = {
         label: `Slot ${slot.num}`.slice(0, 100),
         value: slot.id,
         description: (slot.teamName ?? "—").slice(0, 100),
-        emoji: "📇",
       })),
       {
         maxValues: Math.min(claimed.length, 25),
@@ -442,7 +449,6 @@ export const slotListInfoSubcommand: SlotSubcommand = {
         label: `Slot ${slot.num}`.slice(0, 100),
         value: slot.id,
         description: (slot.teamName ?? "—").slice(0, 100),
-        emoji: "📇",
       })),
       {
         maxValues: 1,
@@ -609,7 +615,6 @@ async function pickScrim(
       label: `#${scrim.name}`.slice(0, 100),
       value: scrim.id,
       description: scrim.registrationChannelId.slice(0, 100),
-      emoji: "📇",
     })),
     {
       maxValues: 1,

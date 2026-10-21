@@ -10,16 +10,12 @@
  * logged. Nothing else can be done with it.
  */
 
-import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  EmbedBuilder,
-} from "discord.js";
+import type { ActionRowBuilder, ButtonBuilder, EmbedBuilder } from "discord.js";
 import type { Client } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
-import { discordTimestamp, formatTimestamp } from "../../../core/time.js";
+import { formatTimestamp } from "../../../core/time.js";
+import { actionRow, panelEmbed } from "../../../core/ui.js";
 import { logger } from "../../../utils/logger.js";
+import { linkButton } from "./buttons.js";
 import type { ReminderJobPayload } from "../types.js";
 
 /**
@@ -37,7 +33,8 @@ export type ReminderDelivery =
  * The embed a reminder is posted with.
  *
  * @param reminderId the job's id, so a member can tell two reminders
- *                   apart.
+ *                   apart — and so `/reminder delete` can be pointed at
+ *                   the right one.
  * @param createdAt  when the reminder was set.
  */
 export function buildReminderEmbed(
@@ -46,11 +43,15 @@ export function buildReminderEmbed(
   createdAt: Date,
   jumpUrl: string | null,
 ): EmbedBuilder {
-  const embed = new EmbedBuilder()
-    .setTitle(`Reminder #${reminderId}`)
-    .setDescription(`${discordTimestamp(createdAt)}: ${message}`)
-    .setTimestamp(Date.now())
-    .setColor(EMBED_COLOR);
+  const embed = panelEmbed({
+    title: "Reminder",
+    description: message,
+    fields: [
+      { name: "Set", value: formatTimestamp(createdAt), inline: true },
+      { name: "ID", value: `\`${reminderId}\``, inline: true },
+    ],
+    footer: "Delete it early with `/reminder delete`.",
+  });
 
   if (jumpUrl) embed.setURL(jumpUrl);
 
@@ -59,13 +60,13 @@ export function buildReminderEmbed(
 
 /**
  * The "jump to the original message" button.
+ *
+ * A link, so it is grey: it takes the reader somewhere and changes
+ * nothing.
  */
 function buildJumpRow(jumpUrl: string): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setLabel("Jump to Original Message")
-      .setURL(jumpUrl)
-      .setStyle(ButtonStyle.Link),
+  return actionRow(
+    linkButton({ label: "Jump to original message", url: jumpUrl }),
   );
 }
 

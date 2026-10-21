@@ -9,7 +9,7 @@
  * conditional `UPDATE`, and the database settles it. There is no lock.
  */
 
-import { EmbedBuilder, MessageFlags } from "discord.js";
+import { EmbedBuilder, MessageFlags, TextInputStyle } from "discord.js";
 import type {
   AnySelectMenuInteraction,
   ButtonInteraction,
@@ -21,6 +21,7 @@ import { awaitSelect } from "../../../core/select.js";
 import { prompt } from "../../../core/prompt.js";
 import { plural } from "../../../core/text.js";
 import { PremiumFeature } from "../../../core/premium.js";
+import { buildModal } from "../../../core/ui.js";
 import { assertEntitled } from "../../premium/index.js";
 import { buildPremiumGate, gateReason } from "../../premium/gate.js";
 import { logger } from "../../../utils/logger.js";
@@ -28,7 +29,6 @@ import * as repo from "../repo.js";
 import * as service from "../service.js";
 import { slotsId } from "../ids.js";
 import type { SlotManagerRecord } from "../types.js";
-import { buildModal } from "./components.js";
 import {
   addScrimRole,
   channelName,
@@ -134,7 +134,6 @@ async function handleClaim(
     label: `Slot ${entry.lowestFreeNum} ─ #${channelName(guild, entry.scrim.registrationChannelId)}`.slice(0, 100),
     value: `${entry.scrim.id}:${entry.lowestFreeNum}`,
     description: `${entry.scrim.name} — ${plural(entry.freeCount, "slot")} free`.slice(0, 100),
-    emoji: "📇",
   }));
 
   const context: PickContext = { kind: "claim", managerId: manager.id };
@@ -182,7 +181,6 @@ async function handleCancel(
       label: `Slot ${slot.num}`.slice(0, 100),
       value: slot.id,
       description: (slot.teamName ?? "—").slice(0, 100),
-      emoji: "📇",
     })),
     {
       maxValues: Math.min(slots.length, 25),
@@ -291,7 +289,6 @@ async function handleRemind(
       label: `#${channelName(guild, candidate.registrationChannelId)}`.slice(0, 100),
       value: candidate.scrimId,
       description: candidate.scrimName.slice(0, 100),
-      emoji: "📇",
     })),
     {
       maxValues: Math.min(candidates.length, 25),
@@ -366,7 +363,6 @@ async function handleIdp(
       label: `Slot ${slot.num}`.slice(0, 100),
       value: slot.id,
       description: (slot.teamName ?? "—").slice(0, 100),
-      emoji: "📇",
     })),
     {
       maxValues: 1,
@@ -429,7 +425,6 @@ async function handleIdp(
       members.slice(0, 25).map((member) => ({
         label: member.displayName.slice(0, 100),
         value: member.id,
-        emoji: "📇",
       })),
       {
         maxValues: 1,
@@ -522,22 +517,24 @@ export async function handleClaimPick(params: {
   await interaction.showModal(
     buildModal({
       customId: slotsId("modal_claim", token),
-      title: "Claim a scrims slot",
-      texts: [
+      title: "Claim a slot",
+      inputs: [
         {
           id: "team_name",
-          label: "Team Name",
-          placeholder: "Enter your team name here...",
+          label: "Team name",
+          placeholder: "e.g. Team Aurora",
           required: true,
           minLength: 3,
           maxLength: 25,
+          style: TextInputStyle.Short,
         },
         {
           id: "members",
-          label: "Teammates (mentions)",
-          placeholder: "Mention your teammates, e.g. @Alice @Bob",
+          label: "Teammates",
+          placeholder: "Mention them, e.g. @Alice @Bob",
           required: false,
           maxLength: 200,
+          style: TextInputStyle.Short,
         },
       ],
     }),

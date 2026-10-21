@@ -35,6 +35,8 @@ import * as rules from "../rules.js";
 import * as service from "../service.js";
 import { TAG_CONTENT_MAX_LENGTH, TAG_NAME_MAX_LENGTH } from "../rules.js";
 import { buildGuildTagStatsEmbed, buildMemberTagStatsEmbed, buildTagInfoEmbed } from "../views/embeds.js";
+import { tagListPages } from "../views/lists.js";
+import { emptyTagListPanel, panelPayload } from "../views/panels.js";
 import { respondSafe } from "../views/reply.js";
 import {
   canManageGuild,
@@ -47,6 +49,12 @@ import type { TagRecord } from "../types.js";
 
 /** The longest a raw tag body may be before it is sent as a file. */
 const RAW_FILE_THRESHOLD = 1990;
+
+/** How many tags go on a page of the tag lists. */
+const TAGS_PER_PAGE = 12;
+
+/** How many tags go on a page of the search results. */
+const SEARCH_PER_PAGE = 10;
 
 /**
  * Reads a required string option.
@@ -453,26 +461,43 @@ async function listTags(interaction: ChatInputCommandInteraction): Promise<void>
 
   const ownerId = member?.id ?? null;
 
+  // The display name is the member's own text, so it is escaped: a name
+  // with a `*` in it must not turn the title into italics.
+  const ownerName = ownerId ? escapeMarkdown(displayName(guild, ownerId)) : null;
+
+  const read = ownerId
+    ? () => repo.listTagsByOwner(guild.id, ownerId)
+    : () => repo.listTags(guild.id);
+
+  // The rows the list was opened with. The list is empty or it is not,
+  // and the answer is needed before the panel is built, so the rows are
+  // read here and the first page is built from them.
+  const openedWith = await read();
+
+  if (openedWith.length === 0) {
+    await respondSafe(
+      interaction,
+      panelPayload(
+        emptyTagListPanel(
+          ownerName
+            ? `${ownerName} does not own any tags yet.`
+            : "This server has no tags yet.",
+        ),
+      ),
+    );
+
+    return;
+  }
+
+  const source = tagSource(read, openedWith);
+
   const pager = new Paginator({
     namespace: ownerId
       ? namespace("tags", "of", guild.id, ownerId)
       : namespace("tags", "all", guild.id),
-    perPage: 12,
-    title: ownerId ? "Tags owned by a member" : "Total Tags",
-    loadPages: async () => {
-      const rows = ownerId
-        ? await repo.listTagsByOwner(guild.id, ownerId)
-        : await repo.listTags(guild.id);
-
-      if (rows.length === 0) return [];
-
-      return chunk(
-        rows.map((tag, index) =>
-          `\`${String(index + 1).padStart(2, "0")}\` ${escapeMarkdown(tag.name)} (ID: ${tag.id})`,
-        ),
-        12,
-      );
-    },
+    perPage: TAGS_PER_PAGE,
+    title: ownerName ? `Tags owned by ${ownerName}` : "Server tags",
+    loadPages: async () => tagListPages(await source(), TAGS_PER_PAGE),
   });
 
   await pager.start(interaction);
@@ -620,22 +645,26 @@ async function mineTags(interaction: ChatInputCommandInteraction): Promise<void>
   const guild = requireGuild(interaction);
   const ownerId = interaction.user.id;
 
+  const read = () => repo.listTagsByOwner(guild.id, ownerId);
+
+  const openedWith = await read();
+
+  if (openedWith.length === 0) {
+    await respondSafe(
+      interaction,
+      panelPayload(emptyTagListPanel("You do not own any tags yet.")),
+    );
+
+    return;
+  }
+
+  const source = tagSource(read, openedWith);
+
   const pager = new Paginator({
     namespace: namespace("tags", "mine", guild.id, ownerId),
-    perPage: 12,
+    perPage: TAGS_PER_PAGE,
     title: "Tags you own",
-    loadPages: async () => {
-      const rows = await repo.listTagsByOwner(guild.id, ownerId);
-
-      if (rows.length === 0) return [];
-
-      return chunk(
-        rows.map((tag, index) =>
-          `\`${String(index + 1).padStart(2, "0")}\` ${escapeMarkdown(tag.name)} (ID: ${tag.id})`,
-        ),
-        12,
-      );
-    },
+    loadPages: async () => tagListPages(await source(), TAGS_PER_PAGE),
   });
 
   await pager.start(interaction);
@@ -704,27 +733,32 @@ async function searchTags(
   const guild = requireGuild(interaction);
   const query = requiredString(interaction, "query");
 
-  const rows = await repo.listTagsMatching(guild.id, query, 25);
+  const found = await repo.listTagsMatching(guild.id, query, 25);
 
-  if (rows.length === 0) {
-    throw new InputError("No tags found.");
+  if (found.length === 0) {
+    await respondSafe(
+      interaction,
+      panelPayload(
+        emptyTagListPanel(
+          `No tag matches "${escapeMarkdown(query)}".`,
+          "Try another name, or create one with `/tag create`.",
+        ),
+      ),
+    );
+
+    return;
   }
 
   const pager = new Paginator({
     namespace: namespace("tags", "find", guild.id, query),
-    perPage: 10,
-    title: `Matching Tags: ${rows.length}`,
+    perPage: SEARCH_PER_PAGE,
+    title: `Tags matching "${escapeMarkdown(query)}" (${found.length})`,
     loadPages: async () => {
-      const found = await repo.listTagsMatching(guild.id, query, 25);
+      const rows = await repo.listTagsMatching(guild.id, query, 25);
 
-      if (found.length === 0) return [];
+      if (rows.length === 0) return [];
 
-      return chunk(
-        found.map((tag, index) =>
-          `\`${String(index + 1).padStart(2, "0")}\` ${escapeMarkdown(tag.name)} (ID: ${tag.id})`,
-        ),
-        10,
-      );
+      return tagListPages(rows, SEARCH_PER_PAGE);
     },
   });
 
@@ -770,16 +804,32 @@ async function statsTags(
 }
 
 /**
- * Splits a list of lines into pages.
+ * A page source for a list of tags.
+ *
+ * The paginator reads the pages again on every press, so a tag created
+ * while the list is open shows up. The first page is the rows the list
+ * was opened with — the rows that were already read to answer "is the
+ * list empty?" — so opening the list still costs one read.
+ *
+ * @param read       how the rows are read.
+ * @param openedWith the rows the list was opened with.
  */
-function chunk(lines: string[], perPage: number): string[][] {
-  const pages: string[][] = [];
+function tagSource(
+  read: () => Promise<readonly TagRecord[]>,
+  openedWith: readonly TagRecord[],
+): () => Promise<readonly TagRecord[]> {
+  let pending: readonly TagRecord[] | null = openedWith;
 
-  for (let index = 0; index < lines.length; index += perPage) {
-    pages.push(lines.slice(index, index + perPage));
-  }
+  return async () => {
+    if (pending) {
+      const rows = pending;
+      pending = null;
 
-  return pages;
+      return rows;
+    }
+
+    return read();
+  };
 }
 
 export default tagCommand;

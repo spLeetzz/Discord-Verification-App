@@ -19,6 +19,7 @@ import { InputError } from "../../../core/errors.js";
 import { prompt } from "../../../core/prompt.js";
 import * as service from "../service.js";
 import { buildAutoroleConfigEmbed } from "../views/embeds.js";
+import { emptyAutoRolePanel, panelPayload } from "../views/panels.js";
 import { respondSafe } from "../views/reply.js";
 import {
   missingPermission,
@@ -201,9 +202,12 @@ async function showConfig(
   const config = await service.getAutoroleConfig(guild.id);
 
   if (!config) {
-    throw new InputError(
-      "This server has no auto-roles yet. Add one with `/autorole humans` or `/autorole bots`.",
+    await respondSafe(
+      interaction,
+      panelPayload(emptyAutoRolePanel()),
     );
+
+    return;
   }
 
   await respondSafe(interaction, {

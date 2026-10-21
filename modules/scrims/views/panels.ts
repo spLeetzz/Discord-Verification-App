@@ -4,14 +4,33 @@
  *
  * Each one is a render of the row it belongs to, and each button is a
  * state transition on that row.
+ *
+ * **The shape every panel here has.** One main action, alone on the
+ * first row, coloured by what it does — green creates, red destroys,
+ * blurple is a plain action. The rows below it group the other actions
+ * by meaning, and the last row is the way back, always grey.
+ *
+ * The embeds follow the same rule: a title, a short description, the
+ * data as fields, and a footer that says what to do next — so the
+ * description does not have to shout it.
  */
 
-import { ButtonStyle, EmbedBuilder } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
-import { discordTimestamp, formatTimestamp } from "../../../core/time.js";
+import type { EmbedBuilder } from "discord.js";
+import {
+  actionRow,
+  dangerButton,
+  navigationRow,
+  panelEmbed,
+  primaryButton,
+  secondaryButton,
+  successButton,
+} from "../../../core/ui.js";
+import { discordTimestamp } from "../../../core/time.js";
+import { plural } from "../../../core/text.js";
 import { BAN_MODES, BAN_MODE_LABELS } from "../types.js";
 import type { BannedTeamRecord, ScrimRecord } from "../types.js";
-import { assertComponentBudget, button, buttonRow } from "./components.js";
+import { isEmptyTemplate } from "../template.js";
+import { assertComponentBudget } from "./components.js";
 import { scrimsId } from "./ids.js";
 import type { PanelComponents } from "./manager.js";
 
@@ -24,46 +43,47 @@ export function buildBanPanel(
   scrim: ScrimRecord,
   bans: readonly BannedTeamRecord[],
 ): { embeds: EmbedBuilder[]; components: PanelComponents } {
-  const embed = new EmbedBuilder()
-    .setTitle(`Ban / Unban — ${scrim.name}`)
-    .setColor(EMBED_COLOR);
-
-  if (bans.length === 0) {
-    embed.setDescription("No banned user.");
-  } else {
-    embed.setDescription(
-      bans
-        .map(
-          (ban, index) =>
-            `\`${String(index + 1).padStart(2, "0")}.\` <@${ban.userId}> \`[${ban.userId}]\` — ${ban.expires ? discordTimestamp(ban.expires, "f") : "Lifetime"}`,
-        )
-        .join("\n"),
-    );
-  }
+  const embed = panelEmbed({
+    title: `Bans — ${scrim.name}`,
+    description:
+      bans.length === 0
+        ? "Nobody is banned from this scrim."
+        : bans
+            .map(
+              (ban, index) =>
+                `🔴 \`${String(index + 1).padStart(2, "0")}\` <@${ban.userId}> \`${ban.userId}\` — ${
+                  ban.expires ? `banned until ${discordTimestamp(ban.expires, "f")}` : "banned for good"
+                }`,
+            )
+            .join("\n"),
+    footer: "Ban a team to keep it out of this scrim.",
+  });
 
   const rows: PanelComponents = [
-    buttonRow(
-      button({
+    // The main action: a ban is the thing the panel is for, and it is
+    // the one action here that cannot be taken back by a press.
+    actionRow(
+      dangerButton({
         customId: scrimsId("ban", scrim.id, "ban"),
-        label: "Ban Users",
-        style: ButtonStyle.Danger,
+        label: "Ban users",
       }),
-      button({
+    ),
+    actionRow(
+      successButton({
         customId: scrimsId("ban", scrim.id, "unban"),
-        label: "Unban Users",
-        style: ButtonStyle.Success,
+        label: "Unban user",
         disabled: bans.length === 0,
       }),
-      button({
+      secondaryButton({
         customId: scrimsId("ban", scrim.id, "unban_all"),
-        label: "Unban All",
-        style: ButtonStyle.Primary,
+        label: "Unban all",
         disabled: bans.length === 0,
       }),
-      button({
+    ),
+    navigationRow(
+      secondaryButton({
         customId: scrimsId("manager", scrim.id),
-        label: "Main Menu",
-        style: ButtonStyle.Secondary,
+        label: "Back",
       }),
     ),
   ];
@@ -101,47 +121,49 @@ export function buildReservePanel(
     readonly expires: Date | null;
   }[],
 ): { embeds: EmbedBuilder[]; components: PanelComponents } {
-  const embed = new EmbedBuilder()
-    .setTitle(`Reserved Slots — ${scrim.name}`)
-    .setColor(EMBED_COLOR);
+  const first = scrim.startFrom;
+  const last = scrim.startFrom + scrim.totalSlots - 1;
 
-  const lines: string[] = [];
-
-  for (
-    let num = scrim.startFrom;
-    num < scrim.startFrom + scrim.totalSlots;
-    num += 1
-  ) {
-    const entry = reserved.find((slot) => slot.num === num);
-
-    const label = entry
-      ? `${entry.teamName ?? "Reserved"} [${
-          entry.expires ? formatTimestamp(entry.expires) : "Lifetime"
-        }]`
-      : "❌";
-
-    lines.push(`Slot ${String(num).padStart(2, "0")}  -->  ${label}`);
-  }
-
-  embed.setDescription(`\`\`\`\n${lines.join("\n")}\n\`\`\``);
+  const embed = panelEmbed({
+    title: `Reserved slots — ${scrim.name}`,
+    description: `Slots ${first} to ${last} — ${plural(reserved.length, "slot")} reserved.`,
+    fields: reserved.map((slot) => ({
+      name: `Slot ${String(slot.num).padStart(2, "0")}`,
+      value: [
+        slot.teamName ?? "Reserved",
+        slot.userId ? `<@${slot.userId}>` : null,
+        slot.expires
+          ? `until ${discordTimestamp(slot.expires, "f")}`
+          : "no expiry",
+      ]
+        .filter((part) => part !== null)
+        .join(" · "),
+    })),
+    footer:
+      reserved.length === 0
+        ? "No slot is reserved — every slot is free."
+        : "The free slots are the numbers not listed above.",
+  });
 
   const rows: PanelComponents = [
-    buttonRow(
-      button({
+    // The main action: a reservation is something that is created.
+    actionRow(
+      successButton({
         customId: scrimsId("reserve", scrim.id, "new"),
-        label: "Reserve Slot",
-        style: ButtonStyle.Success,
+        label: "Reserve slot",
       }),
-      button({
+    ),
+    actionRow(
+      dangerButton({
         customId: scrimsId("reserve", scrim.id, "remove"),
-        label: "Remove Reserved",
-        style: ButtonStyle.Danger,
+        label: "Remove reservation",
         disabled: reserved.length === 0,
       }),
-      button({
+    ),
+    navigationRow(
+      secondaryButton({
         customId: scrimsId("manager", scrim.id),
-        label: "Main Menu",
-        style: ButtonStyle.Secondary,
+        label: "Back",
       }),
     ),
   ];
@@ -161,53 +183,58 @@ export function buildReservePanel(
  * Two independent toggles — purge the registration channel, and strip
  * the success role from everybody who holds it — plus the time the pass
  * runs at.
+ *
+ * A switch says what the press will do, so a button never reads as
+ * "purge the channel" when it would actually switch the purge off. The
+ * state of each switch is a field of the panel, right above it.
  */
 export function buildAutocleanPanel(
   scrim: ScrimRecord,
 ): { embeds: EmbedBuilder[]; components: PanelComponents } {
-  const embed = new EmbedBuilder()
-    .setTitle(`Scrim Autoclean — ${scrim.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      [
-        "```",
-        `1. Purge channel   ${scrim.autoclean.includes("channel") ? "✅" : "❌"}`,
-        `2. Strip role      ${scrim.autoclean.includes("role") ? "✅" : "❌"}`,
-        `3. Clean at        ${
-          scrim.autocleanTime
-            ? formatTimestamp(scrim.autocleanTime)
-            : "Not set"
-        }`,
-        "```",
-        "The pass runs daily, and only while the scrim closed less than 48 hours ago.",
-      ].join("\n"),
-    );
+  const purges = scrim.autoclean.includes("channel");
+  const strips = scrim.autoclean.includes("role");
+
+  const embed = panelEmbed({
+    title: `Autoclean — ${scrim.name}`,
+    description:
+      "The pass runs every day, and only while the scrim closed less than 48 hours ago.",
+    fields: [
+      { name: "Purge channel", value: purges ? "On" : "Off", inline: true },
+      { name: "Strip role", value: strips ? "On" : "Off", inline: true },
+      {
+        name: "Clean at",
+        value: scrim.autocleanTime
+          ? discordTimestamp(scrim.autocleanTime, "f")
+          : "Not set",
+        inline: true,
+      },
+    ],
+    footer: "A switch turns the setting on or off.",
+  });
 
   const rows: PanelComponents = [
-    buttonRow(
-      button({
-        customId: scrimsId("autoclean", scrim.id, "channel"),
-        label: scrim.autoclean.includes("channel")
-          ? "Don't purge"
-          : "Purge channel",
-        style: ButtonStyle.Secondary,
-      }),
-      button({
-        customId: scrimsId("autoclean", scrim.id, "role"),
-        label: scrim.autoclean.includes("role")
-          ? "Don't strip role"
-          : "Strip role",
-        style: ButtonStyle.Secondary,
-      }),
-      button({
+    // The main action: the time of the pass is the one thing that has
+    // to be set before the other two mean anything.
+    actionRow(
+      primaryButton({
         customId: scrimsId("autoclean", scrim.id, "time"),
-        label: "Clean At",
-        style: ButtonStyle.Secondary,
+        label: "Set clean time",
       }),
-      button({
+    ),
+    actionRow(
+      secondaryButton({
+        customId: scrimsId("autoclean", scrim.id, "channel"),
+        label: purges ? "Don't purge" : "Purge channel",
+      }),
+      secondaryButton({
+        customId: scrimsId("autoclean", scrim.id, "role"),
+        label: strips ? "Don't strip role" : "Strip role",
+      }),
+    ),
+    navigationRow(
+      secondaryButton({
         customId: scrimsId("manager", scrim.id),
-        label: "Main Menu",
-        style: ButtonStyle.Secondary,
+        label: "Back",
       }),
     ),
   ];
@@ -228,52 +255,64 @@ export function buildAutocleanPanel(
 export function buildDesignPanel(
   scrim: ScrimRecord,
 ): { embeds: EmbedBuilder[]; components: PanelComponents } {
-  const embed = new EmbedBuilder()
-    .setTitle(`Scrims — Design Settings — ${scrim.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      [
-        "What do you want to design?",
-        "",
-        "**A** — Registration open message",
-        "**B** — Registration close message",
-        "**C** — Slotlist design",
-        "",
-        `The slotlist is published when the scrim closes: **${
-          scrim.autoslotlist ? "yes" : "no"
-        }**.`,
-      ].join("\n"),
-    );
+  const embed = panelEmbed({
+    title: `Design — ${scrim.name}`,
+    description:
+      "The messages the bot posts when the scrim opens, when it closes, and when the slotlist goes out.",
+    fields: [
+      {
+        name: "Open message",
+        value: isEmptyTemplate(scrim.openMessage) ? "Default" : "Custom",
+        inline: true,
+      },
+      {
+        name: "Close message",
+        value: isEmptyTemplate(scrim.closeMessage) ? "Default" : "Custom",
+        inline: true,
+      },
+      {
+        name: "Slotlist message",
+        value: isEmptyTemplate(scrim.slotlistFormat) ? "Default" : "Custom",
+        inline: true,
+      },
+      {
+        name: "Publish the slotlist on close",
+        value: scrim.autoslotlist ? "Yes" : "No",
+        inline: true,
+      },
+    ],
+    footer: "A field you leave empty keeps the default.",
+  });
 
   const rows: PanelComponents = [
-    buttonRow(
-      button({
+    // The main action: the open message is the one everybody reads
+    // first.
+    actionRow(
+      primaryButton({
         customId: scrimsId("design", scrim.id, "open"),
-        label: "A",
-        emoji: "📝",
-        style: ButtonStyle.Secondary,
+        label: "Edit open message",
       }),
-      button({
+    ),
+    actionRow(
+      secondaryButton({
         customId: scrimsId("design", scrim.id, "close"),
-        label: "B",
-        emoji: "📝",
-        style: ButtonStyle.Secondary,
+        label: "Edit close message",
       }),
-      button({
+      secondaryButton({
         customId: scrimsId("design", scrim.id, "slotlist"),
-        label: "C",
-        emoji: "📝",
-        style: ButtonStyle.Secondary,
+        label: "Edit slotlist message",
       }),
-      button({
+      secondaryButton({
         customId: scrimsId("design", scrim.id, "autoslotlist"),
-        label: scrim.autoslotlist ? "Auto Slotlist: On" : "Auto Slotlist: Off",
-        style: scrim.autoslotlist ? ButtonStyle.Success : ButtonStyle.Secondary,
+        label: scrim.autoslotlist
+          ? "Don't publish slotlist"
+          : "Publish slotlist on close",
       }),
-      button({
+    ),
+    navigationRow(
+      secondaryButton({
         customId: scrimsId("manager", scrim.id),
-        label: "Main Menu",
-        style: ButtonStyle.Secondary,
+        label: "Back",
       }),
     ),
   ];
@@ -298,32 +337,35 @@ export function buildDesignPanel(
 export function buildSlotlistEditorPanel(
   scrim: ScrimRecord,
 ): { embeds: EmbedBuilder[]; components: PanelComponents } {
-  const embed = new EmbedBuilder()
-    .setTitle(`Edit the slotlist — ${scrim.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription("Choose an option below to edit the slotlist.");
+  const embed = panelEmbed({
+    title: `Edit slotlist — ${scrim.name}`,
+    description:
+      "Add a team to a free slot, change the team on a claimed one, or take a team off.",
+    footer: "Pick a slot to add a team to, or to change the team on.",
+  });
 
   const rows: PanelComponents = [
-    buttonRow(
-      button({
-        customId: scrimsId("slotlist", scrim.id, "change_team"),
-        label: "Change Team",
-        style: ButtonStyle.Primary,
-      }),
-      button({
-        customId: scrimsId("slotlist", scrim.id, "remove_team"),
-        label: "Remove Team",
-        style: ButtonStyle.Danger,
-      }),
-      button({
+    // The main action: a team on a slot is something that is created.
+    actionRow(
+      successButton({
         customId: scrimsId("slotlist", scrim.id, "add_team"),
-        label: "Add Team",
-        style: ButtonStyle.Success,
+        label: "Add team",
       }),
-      button({
+    ),
+    actionRow(
+      secondaryButton({
+        customId: scrimsId("slotlist", scrim.id, "change_team"),
+        label: "Change team",
+      }),
+      dangerButton({
+        customId: scrimsId("slotlist", scrim.id, "remove_team"),
+        label: "Remove team",
+      }),
+    ),
+    navigationRow(
+      secondaryButton({
         customId: scrimsId("manager", scrim.id),
-        label: "Main Menu",
-        style: ButtonStyle.Secondary,
+        label: "Back",
       }),
     ),
   ];

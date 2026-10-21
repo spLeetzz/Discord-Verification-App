@@ -95,7 +95,8 @@ export function registerSlotsInteractions(): void {
       id.action === "slotlist_info" ||
       id.action === "slotlist_add" ||
       id.action === "slotlist_remove" ||
-      id.action === "slotlist_change"
+      id.action === "slotlist_change" ||
+      id.action === "slotlist_back"
     ) {
       await handleSlotListButton(interaction, id.action, record);
       return;

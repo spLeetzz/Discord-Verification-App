@@ -7,19 +7,35 @@
  *
  * The builders live here and the handlers live in `public.ts`, so the
  * slot list can refresh the panel without importing the handlers.
+ *
+ * **The look.** The panel exists so that a member can take a slot, so
+ * "Claim slot" is the one blue button and it stands alone on the first
+ * row. "Cancel slot" takes the slot away, so it is red. Everything else
+ * is grey. The footer carries the hint, so the body does not have to
+ * shout it.
  */
 
-import { ButtonStyle, EmbedBuilder } from "discord.js";
-import type { Client } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
+import type {
+  ActionRowBuilder,
+  ButtonBuilder,
+  Client,
+  EmbedBuilder,
+} from "discord.js";
 import { plural } from "../../../core/text.js";
+import {
+  actionRow,
+  dangerButton,
+  panelEmbed,
+  primaryButton,
+  secondaryButton,
+} from "../../../core/ui.js";
 import { logger } from "../../../utils/logger.js";
 import * as repo from "../repo.js";
 import * as service from "../service.js";
 import { slotsId } from "../ids.js";
 import type { ClaimableScrim } from "../service.js";
 import type { SlotManagerRecord } from "../types.js";
-import { assertComponentBudget, button, buttonRow } from "./components.js";
+import { assertComponentBudget } from "./components.js";
 
 /**
  * The message shown when the slot manager is switched off.
@@ -33,9 +49,11 @@ export const SLOT_MANAGER_DISABLED_MESSAGE =
 /**
  * The panel's embed.
  *
- * The source's wording, with the button names it actually has.
+ * The body is the data — the slots that can be taken right now — and
+ * the footer is the hint about what to do next.
  */
 export function buildPublicEmbed(
+  manager: SlotManagerRecord,
   claimable: readonly ClaimableScrim[],
 ): EmbedBuilder {
   const lines = claimable.map((entry, index) => {
@@ -47,19 +65,34 @@ export function buildPublicEmbed(
   const body =
     lines.length > 0
       ? lines.join("\n")
-      : "```No Slots Available at the time.\nPress 🔔 to set a reminder.```";
+      : "No slots are available right now.";
 
-  return new EmbedBuilder()
-    .setTitle("Scrims Slot Management")
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      [
-        "● Press `Cancel Slot` to cancel your slot.",
-        "● Note that the ID/Pass role can only be transferred to your teammates.",
-        "",
-        `● Available Slots:\n${body}`,
-      ].join("\n"),
-    );
+  return panelEmbed({
+    title: "Scrims slot management",
+    description: body,
+    footer: publicFooter(manager, claimable.length),
+  });
+}
+
+/**
+ * The panel's hint.
+ *
+ * It says the one thing the body does not: what to press, or why
+ * nothing can be pressed.
+ */
+function publicFooter(
+  manager: SlotManagerRecord,
+  available: number,
+): string {
+  if (!manager.toggle) {
+    return "This panel is switched off. A moderator has to switch it on before a slot can be claimed.";
+  }
+
+  if (available === 0) {
+    return "No slot is free right now. Set a reminder and the bot will tell you when one opens up.";
+  }
+
+  return "Claim a slot with the button below. The ID/Pass role only moves to a teammate you mention when you claim.";
 }
 
 /**
@@ -72,34 +105,31 @@ export function buildPublicEmbed(
 export function buildPublicRows(
   manager: SlotManagerRecord,
   claimable: readonly ClaimableScrim[],
-): ReturnType<typeof buttonRow>[] {
+): ActionRowBuilder<ButtonBuilder>[] {
   const disabled = !manager.toggle;
 
   const rows = [
-    buttonRow(
-      button({
-        customId: slotsId("cancel", manager.id),
-        label: "Cancel Slot",
-        style: ButtonStyle.Danger,
-        disabled,
-      }),
-      button({
+    actionRow(
+      primaryButton({
         customId: slotsId("claim", manager.id),
-        label: "Claim Slot",
-        style: ButtonStyle.Success,
+        label: "Claim slot",
         disabled: disabled || claimable.length === 0,
       }),
-      button({
+    ),
+    actionRow(
+      secondaryButton({
         customId: slotsId("remind", manager.id),
-        label: "Remind Me",
-        emoji: "🔔",
-        style: ButtonStyle.Secondary,
+        label: "Remind me",
         disabled: disabled || !manager.allowReminders,
       }),
-      button({
+      secondaryButton({
         customId: slotsId("idp", manager.id),
-        label: "Transfer IDP Role",
-        style: ButtonStyle.Success,
+        label: "Transfer ID/Pass role",
+        disabled,
+      }),
+      dangerButton({
+        customId: slotsId("cancel", manager.id),
+        label: "Cancel slot",
         disabled,
       }),
     ),
@@ -130,7 +160,7 @@ export async function refreshPublicMessage(
     manager.id,
   );
 
-  const embed = buildPublicEmbed(claimable);
+  const embed = buildPublicEmbed(manager, claimable);
   const rows = buildPublicRows(manager, claimable);
 
   const guild = client.guilds.cache.get(manager.guildId);

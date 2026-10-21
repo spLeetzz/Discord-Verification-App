@@ -17,23 +17,64 @@
  * area's own, and its buttons are the slot area's.
  */
 
-import { ButtonStyle, EmbedBuilder } from "discord.js";
-import { EMBED_COLOR } from "../../../core/constants.js";
+import type { EmbedBuilder } from "discord.js";
+import { navigationRow, panelEmbed, secondaryButton } from "../../../core/ui.js";
 import { buildSlotListPanel as slotAreaRows } from "../../slots/index.js";
-import { slotListLines } from "../render.js";
 import type { ScrimRecord, SlotRecord } from "../types.js";
-import { assertComponentBudget, button, buttonRow } from "./components.js";
+import { assertComponentBudget } from "./components.js";
 import { scrimsId } from "./ids.js";
 import type { PanelComponents } from "./manager.js";
 
 /**
+ * The dot that says what state a slot is in.
+ *
+ * The dot is the state: a slot that is free, one that is taken, one
+ * that is locked and one that is banned look different at a glance,
+ * without the eye having to read the word next to them.
+ */
+const SLOT_MARKS: Record<SlotRecord["state"], string> = {
+  free: "⚪",
+  claimed: "🟢",
+  locked: "🔒",
+  banned: "🚫",
+};
+
+/** The word that goes with the dot. */
+const SLOT_WORDS: Record<SlotRecord["state"], string> = {
+  free: "free",
+  claimed: "claimed",
+  locked: "locked",
+  banned: "banned",
+};
+
+/**
+ * One line of the list.
+ *
+ * A free slot is the dot and the number alone; a slot that carries a
+ * team carries its name; a slot that is locked or banned says so, so
+ * the reason it cannot be taken is never a mystery.
+ */
+function slotLine(slot: SlotRecord): string {
+  const parts = [`${SLOT_MARKS[slot.state]} ${String(slot.num).padStart(2, "0")}`];
+
+  if (slot.teamName) parts.push(slot.teamName);
+
+  if (slot.state === "locked" || slot.state === "banned") {
+    parts.push(`(${SLOT_WORDS[slot.state]})`);
+  }
+
+  return parts.join("  ");
+}
+
+/**
  * The panel that manages the slotlist.
  *
- * The body is this area's own: a plain list of the claimed slots. The
- * `slotlist_format` template (D32) does **not** govern it — it
- * governs the `/scrims slotlist` post, and the published list is the
- * slot area's. One renderer for the preview and the published list is
- * the next step, and it is not this area's to write.
+ * The body is this area's own: every slot of the scrim, in slot order,
+ * with a dot that says what state it is in. The `slotlist_format`
+ * template (D32) does **not** govern it — it governs the
+ * `/scrims slotlist` post, and the published list is the slot area's.
+ * One renderer for the preview and the published list is the next step,
+ * and it is not this area's to write.
  *
  * The buttons are the **slot area's** — `slots:slotlist_edit`,
  * `slots:slotlist_punish` and `slots:slotlist_info` — so the manager
@@ -41,7 +82,7 @@ import type { PanelComponents } from "./manager.js";
  * is one namespace for them across the bot. This area renders no
  * `scrims:slotlist:*` button of its own any more.
  *
- * The second row is the way back to the manager panel. Every other
+ * The last row is the way back to the manager panel. Every other
  * panel in this area has one, and this preview is rendered *on* the
  * manager's message, so without it there would be no way back.
  */
@@ -49,24 +90,23 @@ export function buildSlotlistPanel(
   scrim: ScrimRecord,
   slots: readonly SlotRecord[],
 ): { embeds: EmbedBuilder[]; components: PanelComponents } {
-  const claimed = slots.filter((slot) => slot.state === "claimed");
+  const ordered = [...slots].sort((a, b) => a.num - b.num);
 
-  const embed = new EmbedBuilder()
-    .setTitle(`Slotlist — ${scrim.name}`)
-    .setColor(EMBED_COLOR)
-    .setDescription(
-      claimed.length === 0
-        ? "No team has registered yet."
-        : `\`\`\`\n${slotListLines(claimed)}\n\`\`\``,
-    );
+  const embed = panelEmbed({
+    title: `Slotlist — ${scrim.name}`,
+    description:
+      ordered.length === 0
+        ? `No team has registered yet. They show up here as they register in <#${scrim.registrationChannelId}>.`
+        : ordered.map((slot) => slotLine(slot)).join("\n"),
+    footer: "⚪ free · 🟢 claimed · 🔒 locked · 🚫 banned",
+  });
 
   const rows: PanelComponents = [
     ...slotAreaRows(scrim.id),
-    buttonRow(
-      button({
+    navigationRow(
+      secondaryButton({
         customId: scrimsId("manager", scrim.id),
-        label: "Main Menu",
-        style: ButtonStyle.Secondary,
+        label: "Back",
       }),
     ),
   ];

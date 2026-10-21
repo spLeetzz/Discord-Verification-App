@@ -46,7 +46,7 @@ Sends the message and returns its id.
 
 - The channel is the scrim's own `slotlist_channel_id`, unless the
   caller names one.
-- The message carries the slot area's Edit / Punish / Info panel.
+- The message carries the slot area's Edit slot list / Ban teams / Slot info panel.
 - **Nothing to publish** → `null` (never a throw). That is: the scrim
   does not exist; the channel cannot be found; or **no team has claimed
   a slot** — a list with no teams in it says nothing.
