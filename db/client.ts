@@ -249,9 +249,12 @@ async function transactionInContext<T>(
         handle.execute = execute;
       }
 
-      return transactionContext.run(queuedClient.activeScope, () =>
-        body(handle),
-      );
+      // The scope of the transaction that is open. It is the scope the
+      // queued client entered when the transaction opened; the fallback
+      // is the scope this chain already carries, which is the same one.
+      const scope = queuedClient.activeScope ?? transactionContext.getStore();
+
+      return transactionContext.run(scope, () => body(handle));
     },
     config,
   );

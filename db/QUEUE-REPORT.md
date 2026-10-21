@@ -11,7 +11,7 @@ no module had to be touched.
 
 ## 1. The shape, and where it sits
 
-`db/write-queue.ts` (new) holds the queue. `db/client.ts` wires it in.
+`db/write-queue.ts` holds the queue. `db/client.ts` wires it in.
 
 **It wraps the libsql client**, so it is in front of *every* statement
 the application runs — the query builders, the raw `db.execute(sql…)`
@@ -33,12 +33,17 @@ module code  →  db (drizzle)  →  QueuedClient  →  libsql client  →  file
 | **The transaction is the unit** | A transaction holds the write lock for its whole body, so it holds the queue for its whole body too: the slot is taken when the transaction is opened and given back when it is committed or rolled back. |
 | **The queue does not decide races** | The unique constraints are still the authority. The queue only makes two statements *reach* the database one after the other, so the loser gets the constraint's error rather than the driver's. |
 
-**The busy timeout stays** — and it was fixed on the way. `PRAGMA
-busy_timeout = 5000` reached *one* connection of the pool; the driver
-applies the `timeout` option to **every** connection it opens, so the
-client is now opened with `timeout: BUSY_TIMEOUT_MS` and the pragma
-stays as the belt. The timeout is what covers another *process* writing
-the same file; the queue is what covers this one.
+**There is no busy timeout.** The driver can be told to wait for the
+writer lock, and it was the wrong answer: the timeout is applied to
+*every* connection the driver opens, so it covers the connection a
+transaction is given — the one that already holds the write lock. Two
+transactions that overlap in one process then stall for the whole
+timeout and one of them fails with `SQLITE_BUSY` anyway. A fast failure
+is the better answer, and the queue is what makes it a rare one: one
+writer at a time, in this process, by construction. Nothing else writes
+the file — the bot applies its own migrations at boot, and the deploy
+pipeline has no migration step — so there is no second process to wait
+for either.
 
 ---
 
@@ -68,14 +73,77 @@ Two mechanisms, both in `db/write-queue.ts`:
    from *outside* the body must not be dragged into somebody else's
    transaction. It is queued like any other write.
 
-The context is set by wrapping `db.transaction` (drizzle's method, same
-signature) in `db/client.ts` — so it covers `withTransaction` and the
-one direct `db.transaction(…)` call in `modules/slots/repo.ts` alike.
+### How the context is entered, and how it is left
 
-**A transaction inside a transaction** cannot take the queue (the outer
-one is holding it), so it becomes a **savepoint** on the same
-connection: the statements run there, and a rollback undoes only what
-the nested block wrote.
+**The store holds a scope, not a transaction.** `transactionContext` is
+an `AsyncLocalStorage<TransactionScope | undefined>`, and a scope is a
+box: `{ transaction: Transaction | undefined }`.
+
+The box is there because of two facts about `AsyncLocalStorage`, both
+measured on the Node this runs on (v22.23.1):
+
+- **A store reaches only the async resources created after it is set.**
+  An `enterWith` in an asynchronous continuation never reaches the
+  chain that called it, so a scope entered *after* `await
+  client.transaction()` would be invisible to the caller.
+- **A store cannot be unwound out of a frame that has moved on.** A
+  clear issued from the commit's chain does not clear the caller's
+  chain, and `AsyncLocalStorage.exitWith` — which unwinds one frame —
+  **does not exist before Node 24**, so it cannot be used here at all.
+
+So the scope is:
+
+- **entered synchronously**, in `QueuedClient.transaction()`, *before*
+  the first `await`. That is the caller's own frame, and the scope
+  reaches every resource created after it — including the transaction
+  body's chain, and the caller's own later awaits. The transaction does
+  not exist yet at that moment, which is exactly why the store holds a
+  box and not the transaction: `scope.transaction` is filled in when
+  the driver has opened it.
+- **filled in** when the transaction is open, so a write finds it.
+- **emptied** when the transaction finishes — commit, rollback or
+  `close()`, whichever happens first, exactly once
+  (`QueuedTransaction.#finish()`). A write that finds an empty scope is
+  an ordinary write and is queued like one, so the chain that opened the
+  transaction is never left holding a transaction that has closed. This
+  emptying of the box is the exit; the store itself is not restored,
+  because it cannot be.
+
+**Two paths drive a transaction's body, and they enter the context
+differently.**
+
+- **The callback path** — what the application uses. drizzle takes the
+  body as a callback, so `db/client.ts` runs it with
+  `transactionContext.run(scope, …)`: the store is in place for the
+  body's own chain and taken out again when the body ends. The
+  *caller's* chain is not in the transaction: the caller may go on to
+  do other work while the body runs, and that work has to **wait** for
+  the transaction rather than join it. So `db/client.ts` takes the
+  scope out of the caller's chain as soon as the transaction has been
+  opened.
+- **The handle path** — the libsql transaction handle, where the caller
+  writes the body itself. There is no callback for the queue to wrap,
+  so the scope entered synchronously by `QueuedClient.transaction()` is
+  what carries the transaction, and the caller's chain keeps it until
+  the transaction finishes and empties it.
+
+### The rule for a transaction opened inside another one
+
+**A transaction that takes the queue slot enters a scope. A transaction
+opened while another one is open in the same chain does not: it becomes
+a savepoint on the parent's connection and joins the parent's scope.**
+
+The queue is held by the parent, so the nested transaction cannot take a
+slot of its own — it would wait for one its parent is holding, and
+deadlock. It runs on the parent's connection instead, so its writes
+belong to the parent either way.
+
+Not entering a scope of its own is not a convenience, it is what keeps
+the rule simple. If the nested transaction entered a second scope, it
+would shadow the parent's: the parent would finish and empty the wrong
+scope, the nested block's writes would find no transaction, and they
+would go back into the queue — into a queue the parent is holding. The
+deadlock the manager was warned about is exactly that.
 
 ---
 
@@ -134,25 +202,30 @@ in commit `6160eea`, the premium one in the working tree.
 
 ## 5. The tests
 
-`db/write-queue.test.ts` (new, 7 tests). It opens a temporary SQLite
-file, applies the migration, and asserts against a real database.
+`db/write-queue.test.ts` (11 tests). It opens a temporary SQLite file,
+applies the migration, and asserts against a real database.
 
 | Test | What it proves |
 |---|---|
 | "answers a contended write with the constraint, not with SQLITE_BUSY" | Two overlapping writes: the loser gets `SQLITE_CONSTRAINT_UNIQUE`, **not** `SQLITE_BUSY`. |
-| "makes a write outside a transaction wait for the transaction" | A `DELETE`-shaped write issued while a transaction is open waits for its turn instead of colliding. |
+| "makes a write outside a transaction wait for the transaction" | A write issued while a transaction is open waits for its turn instead of colliding. |
 | "lets a transaction body write through the database handle" | The re-entrancy case: a write issued inside a transaction body through the *database* handle joins the transaction instead of deadlocking against it. |
 | "rolls the inner write back with the transaction that made it" | That inner write is part of the transaction — it is rolled back with it. |
 | "lets a transaction inside a transaction join it" | The nested case: a savepoint on the same connection, no deadlock. |
 | "lets the constraint decide the race, not the driver" | The double-lock race: one caller is told "claimed", the other "already locked" — the constraint's answer, not a busy error. |
 | "does not make a read wait for a write" | A read during an open write transaction is not queued. |
+| "holds the transaction in the context while the body runs, and not after" | The context is entered for the body, and the caller's chain is not left inside the transaction. |
+| "puts a write made during the transaction into the transaction" | **The handle path.** A write through the *client* while a raw transaction is open finds that transaction instead of waiting for a lock the transaction is holding. |
+| "empties the context when the transaction finishes" | **The handle path.** After the transaction, the context holds nothing: a later write in the same chain is an ordinary write. |
+| "makes a transaction opened inside a transaction a savepoint" | **The handle path.** The nested transaction does not shadow the parent's scope. |
 
-**The tests fail without the queue.** With the queue bypassed, the
-"write outside a transaction" test fails with `SQLITE_BUSY: database is
-locked` — the exact hazard.
+**The tests fail without the fixes.** With the context enter removed,
+the three handle-path tests fail — the write goes back into the queue
+and waits for a lock its own transaction is holding. With the exit
+removed, "empties the context when the transaction finishes" fails.
 
-`npm run typecheck` passes. `npm test` passes: **90 files, 1338 tests**
-(26 of them in `db/`).
+`npm run typecheck` passes. `npm test` passes: **90 files, 1343 tests**
+(30 of them in `db/`).
 
 ---
 
@@ -160,11 +233,11 @@ locked` — the exact hazard.
 
 | File | Change |
 |---|---|
-| `db/write-queue.ts` | **New.** The queue, the read/write classifier, the transaction context, the queued client. |
-| `db/write-queue.test.ts` | **New.** The seven tests above. |
-| `db/client.ts` | The queued client, `timeout` on the client config, `db.transaction` wrapped so every transaction body runs inside the transaction context, `closeDatabase` drains the queue first. |
-| `db/README.md` | The queue, documented. |
-| `db/PORT-REPORT.md` | §5.5 updated: the timeout is done, and it was never the whole fix. |
+| `db/write-queue.ts` | The queue, the read/write classifier, the transaction context and its scope, the queued client. |
+| `db/write-queue.test.ts` | The eleven tests above. |
+| `db/client.ts` | The queued client, `db.transaction` wrapped so every transaction body runs inside the transaction's scope and the caller's chain is left outside it, the busy timeout removed, `closeDatabase` drains the queue first. |
+| `db/README.md` | The queue and the seam, documented; what is left to do for Postgres. |
+| `db/PORT-REPORT.md` | §5.5 updated: the timeout was the wrong answer, and it is off. |
 
 Nothing else was touched. The module-local queues (moderation, scrims)
 are still there and are harmless: they are taken *before* the global

@@ -35,7 +35,7 @@ describes the *shape*; this one describes the *dialect*.
 | `db/seed.ts` | The premium plan catalogue. |
 | `db/retention.ts` | The `command_usage` prune. |
 | `db/schema.test.ts` | The test. It creates a temporary SQLite database and drops it with the run. |
-| `db/write-queue.test.ts` | The test for the queue. It proves a contended write is answered by the constraint and not by the driver. |
+| `db/write-queue.test.ts` | The test for the queue. It proves a contended write is answered by the constraint and not by the driver, and it drives both transaction paths: the callback one and the handle one. |
 | `db/migrations/` | Generated SQL. Never hand-edit it. |
 
 ---
@@ -132,12 +132,12 @@ boolean. No smallint-and-map-it-in-the-app is needed.
 The point of the seam is that a future Postgres run is a *configuration
 change*. It is not there yet. The remaining work is:
 
-1. **Write the Postgres branch of each helper in `db/dialect.ts`.** Most of
-   them are already written — `textCol`, `intCol`, `smallIntCol`,
+1. **Finish the Postgres DDL in `db/dialect.ts`.** Every helper has a
+   Postgres branch today — `textCol`, `intCol`, `smallIntCol`,
    `boolCol`, `jsonCol`, `tsCol`, `idCol`, `serialIdCol`,
    `createdAtCol`, `updatedAtCol`, `defineTable` and the five constraint
-   builders all have a Postgres branch today. What is *not* written is the
-   Postgres **DDL**: the `idCol` branch needs `uuid` with
+   builders — and each branch picks the right builder. What is *not*
+   written is the Postgres **DDL**: the `idCol` branch needs `uuid` with
    `default gen_random_uuid()` rather than the application's
    `crypto.randomUUID()`, and the boolean and JSON defaults have to be
    written the way Postgres wants them.
@@ -152,13 +152,29 @@ change*. It is not there yet. The remaining work is:
    libsql file. The Postgres branch needs `pg.Pool` and
    `drizzle-orm/node-postgres` back — which is what the file did before
    this port.
-5. **Check the raw SQL.** Six statements in the feature modules spell
-   Postgres out loud (`now()`, `ILIKE`, `ARRAY[…]`, `&&`, `for update`).
-   They are listed in the porting report; they have to be rewritten for
-   the dialect-neutral subset before a Postgres run is possible.
-6. **Re-run the tests against Postgres.** `db/schema.test.ts` asserts
-   SQLite's extended error codes; a Postgres run needs the SQLSTATE
-   equivalents.
+5. **Rewrite the write queue — or drop it.** This is the one part of
+   `db/` that is *shaped* by SQLite. The queue exists because SQLite has
+   one writer: two writes that overlap in one process collide instead of
+   queueing, and the loser is refused by the driver with `SQLITE_BUSY`
+   rather than by the database with the constraint it violated. Postgres
+   has no such rule — a pool gives each transaction its own connection
+   and concurrent writes do not collide that way — so on Postgres the
+   queue would become a *pool* with `max: 1`, or would go away in favour
+   of the pool's own behaviour. Everything else in that file carries
+   over unchanged: the transaction context, the scope that is entered
+   when a transaction opens and emptied when it finishes, and the rule
+   that a transaction inside a transaction is a savepoint rather than a
+   second writer.
+6. **Re-check the raw SQL.** The feature modules' hand-written
+   statements were made dialect-neutral in the port — `like` rather
+   than `ILIKE`, `cast(... as integer)` rather than `::int`, `case when`
+   rather than `greatest()`, join tables rather than `ARRAY[…]` — so
+   there is nothing dialect-specific left in them. A Postgres run still
+   has to check them against a live database.
+7. **Re-run the tests against Postgres.** `db/schema.test.ts` and
+   `db/write-queue.test.ts` assert SQLite's extended error codes
+   (`SQLITE_CONSTRAINT_UNIQUE`, `SQLITE_BUSY`); a Postgres run needs the
+   SQLSTATE equivalents (`23505`, `40001`).
 
 None of that touches the schema files or the feature modules, which is
 the point.
@@ -500,5 +516,13 @@ migration twice is safe.
 two overlapping writes are answered by the **constraint** and not by
 `SQLITE_BUSY`, that a write outside an open transaction waits its turn
 instead of colliding, that a transaction body may write through the
-database handle without deadlocking against itself, and that the loser
-of a race is still told "already locked".
+database handle without deadlocking against itself, that a transaction
+opened inside a transaction is a savepoint rather than a second writer,
+and that the loser of a race is still told "already locked".
+
+It also drives the **handle path** — the libsql transaction handle, where
+the caller writes the body itself instead of handing it to drizzle as a
+callback. That is the path where the context has to carry the
+transaction by itself: a write made through the client while such a
+transaction is open has to find the transaction it belongs to, and it
+has to stop finding it once the transaction has finished.

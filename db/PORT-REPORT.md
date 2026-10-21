@@ -82,9 +82,9 @@ Why:
 - **The native binding is fast** and there is a WASM fallback.
 
 The trade-off: SQLite has one writer. `modules/slots/repo.ts` already
-carries a retry loop for `SQLITE_BUSY`; that is the belt to the braces of
-a busy timeout, and the busy timeout is a `db/client.ts` change (not
-mine — it is listed below).
+carries a retry loop for `SQLITE_BUSY`; the real answer is the queue in
+`db/write-queue.ts`, and it is a `db/client.ts` change (not mine — it is
+listed below).
 
 ---
 
@@ -235,25 +235,27 @@ instead:
 Drizzle wraps the driver's error, so the code is on `error.cause`. The
 helper in `db/schema.test.ts` does exactly this — copy it.
 
-### 5.5 `db/client.ts` — a busy timeout **and** a write queue (done)
+### 5.5 `db/client.ts` — a write queue (done)
 
 SQLite has one writer. `modules/slots/repo.ts` already retries on
-`SQLITE_BUSY`, but the central fix belongs in the client: a busy
-timeout on every connection libsql opens, so a write waits instead of
-failing.
+`SQLITE_BUSY`, but the central fix belongs in the client: one queue in
+front of every write in the process.
 
-**Done, and more than the timeout.** The timeout is set on the client
-(`timeout: 5000`), so the driver applies it to *every* connection it
-opens — a `PRAGMA busy_timeout` would only reach the one connection
-that happened to run it.
+**The busy timeout turned out to be the wrong answer, and it is off.**
+The driver applies `timeout` to *every* connection it opens, so it
+covers the connection a transaction is given — the one that already
+holds the write lock. Two transactions that overlap in one process then
+stall for the whole timeout, and one of them fails with `SQLITE_BUSY`
+anyway: a slow failure instead of a fast one. The client is opened
+without a timeout, and `db/write-queue.ts` puts one queue in front of
+every write instead — see `db/QUEUE-REPORT.md`.
 
-**The timeout is not enough.** It makes a contended *statement* wait.
-It does nothing for a statement that collides with an **open
-transaction** on another connection: that transaction holds the write
-lock for its whole body, and the loser of the race is refused by the
-*driver* with `SQLITE_BUSY` rather than by the *constraint* it
-violated. So `db/write-queue.ts` adds one queue in front of every write
-in the process — see `db/QUEUE-REPORT.md`.
+**The timeout would not have been enough either.** It makes a contended
+*statement* wait. It does nothing for a statement that collides with an
+**open transaction** on another connection: that transaction holds the
+write lock for its whole body, and the loser of the race is refused by
+the *driver* with `SQLITE_BUSY` rather than by the *constraint* it
+violated. The queue is what covers that case.
 
 ---
 
