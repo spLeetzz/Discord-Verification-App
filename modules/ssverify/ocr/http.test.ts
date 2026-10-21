@@ -21,7 +21,7 @@ function serviceAnswer(overrides: Record<string, unknown> = {}): unknown {
 
 describe("HttpOcrProvider", () => {
   it("posts the image url to the service", async () => {
-    const fetchImpl = vi.fn(async () =>
+    const fetchImpl = vi.fn<typeof fetch>(async (_input, _init) =>
       new Response(JSON.stringify(serviceAnswer()), { status: 200 }),
     );
 
@@ -40,7 +40,7 @@ describe("HttpOcrProvider", () => {
   });
 
   it("sends the api key the way the service expects it", async () => {
-    const fetchImpl = vi.fn(async () =>
+    const fetchImpl = vi.fn<typeof fetch>(async (_input, _init) =>
       new Response(JSON.stringify(serviceAnswer()), { status: 200 }),
     );
 
@@ -53,6 +53,10 @@ describe("HttpOcrProvider", () => {
     await provider.analyze("https://example.com/screenshot.png");
 
     const [, init] = fetchImpl.mock.calls[0] ?? [];
+    // `RequestInit["headers"]` is a union of `Headers`, a list of pairs and
+    // a record, and only the record can be read with a string key. The
+    // provider always sends a plain record of header names to values, so
+    // the cast names that shape instead of widening the check to `any`.
     const headers = init?.headers as Record<string, string> | undefined;
 
     expect(headers?.["authorization"]).toBe("secret");
@@ -60,7 +64,7 @@ describe("HttpOcrProvider", () => {
   });
 
   it("sends no api key when there is none", async () => {
-    const fetchImpl = vi.fn(async () =>
+    const fetchImpl = vi.fn<typeof fetch>(async (_input, _init) =>
       new Response(JSON.stringify(serviceAnswer()), { status: 200 }),
     );
 
@@ -69,13 +73,14 @@ describe("HttpOcrProvider", () => {
     await provider.analyze("https://example.com/screenshot.png");
 
     const [, init] = fetchImpl.mock.calls[0] ?? [];
+    // The same cast as above: the provider sends a plain record of headers.
     const headers = init?.headers as Record<string, string> | undefined;
 
     expect(headers?.["authorization"]).toBeUndefined();
   });
 
   it("returns the hashes and the normalised text", async () => {
-    const fetchImpl = vi.fn(async () =>
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify(serviceAnswer()), { status: 200 }),
     );
 
@@ -90,7 +95,7 @@ describe("HttpOcrProvider", () => {
   });
 
   it("refuses binary data, because the service fetches the image itself", async () => {
-    const fetchImpl = vi.fn(async () =>
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify(serviceAnswer()), { status: 200 }),
     );
 
@@ -103,7 +108,7 @@ describe("HttpOcrProvider", () => {
   });
 
   it("reports a service that answers with an error", async () => {
-    const fetchImpl = vi.fn(async () => new Response("nope", { status: 503 }));
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response("nope", { status: 503 }));
 
     const provider = new HttpOcrProvider({ url: SERVICE_URL, fetchImpl });
 
@@ -113,7 +118,7 @@ describe("HttpOcrProvider", () => {
   });
 
   it("reports a service that cannot be reached", async () => {
-    const fetchImpl = vi.fn(async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
       throw new Error("connection refused");
     });
 
@@ -125,7 +130,7 @@ describe("HttpOcrProvider", () => {
   });
 
   it("refuses an answer that is not an array of results", async () => {
-    const fetchImpl = vi.fn(async () =>
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({ dhash: "abc" }), { status: 200 }),
     );
 
@@ -137,7 +142,7 @@ describe("HttpOcrProvider", () => {
   });
 
   it("refuses an answer without a usable hash", async () => {
-    const fetchImpl = vi.fn(async () =>
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
       new Response(
         JSON.stringify(serviceAnswer({ dhash: "not-a-hash" })),
         { status: 200 },
@@ -152,7 +157,7 @@ describe("HttpOcrProvider", () => {
   });
 
   it("refuses an answer without text", async () => {
-    const fetchImpl = vi.fn(async () =>
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify(serviceAnswer({ text: 42 })), { status: 200 }),
     );
 
@@ -164,7 +169,7 @@ describe("HttpOcrProvider", () => {
   });
 
   it("brings a hash the service answered in upper case down to lower case", async () => {
-    const fetchImpl = vi.fn(async () =>
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
       new Response(
         JSON.stringify(serviceAnswer({ dhash: "9C63949032868431" })),
         { status: 200 },

@@ -1,5 +1,5 @@
 import sharp from "sharp";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { LocalOcrProvider } from "./local.js";
 import { createOcrProvider } from "./index.js";
