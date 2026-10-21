@@ -235,12 +235,25 @@ instead:
 Drizzle wraps the driver's error, so the code is on `error.cause`. The
 helper in `db/schema.test.ts` does exactly this — copy it.
 
-### 5.5 `db/client.ts` — a busy timeout (worth doing, not blocking)
+### 5.5 `db/client.ts` — a busy timeout **and** a write queue (done)
 
 SQLite has one writer. `modules/slots/repo.ts` already retries on
-`SQLITE_BUSY`, but the central fix belongs in the client: set a busy
+`SQLITE_BUSY`, but the central fix belongs in the client: a busy
 timeout on every connection libsql opens, so a write waits instead of
-failing. The libsql client takes a `timeout` option in its configuration.
+failing.
+
+**Done, and more than the timeout.** The timeout is set on the client
+(`timeout: 5000`), so the driver applies it to *every* connection it
+opens — a `PRAGMA busy_timeout` would only reach the one connection
+that happened to run it.
+
+**The timeout is not enough.** It makes a contended *statement* wait.
+It does nothing for a statement that collides with an **open
+transaction** on another connection: that transaction holds the write
+lock for its whole body, and the loser of the race is refused by the
+*driver* with `SQLITE_BUSY` rather than by the *constraint* it
+violated. So `db/write-queue.ts` adds one queue in front of every write
+in the process — see `db/QUEUE-REPORT.md`.
 
 ---
 

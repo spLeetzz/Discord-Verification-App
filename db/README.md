@@ -30,11 +30,48 @@ describes the *shape*; this one describes the *dialect*.
 | `db/schema/premium.ts` | Plans, purchases, entitlements. |
 | `db/schema/system.ts` | Guild and user settings, the scheduler, the utility tables. |
 | `db/client.ts` | The libsql client, the drizzle instance, `withTransaction`, `closeDatabase`. |
+| `db/write-queue.ts` | The write queue. One queue, in front of every write in the process. |
 | `db/migrate.ts` | The boot migration runner. |
 | `db/seed.ts` | The premium plan catalogue. |
 | `db/retention.ts` | The `command_usage` prune. |
 | `db/schema.test.ts` | The test. It creates a temporary SQLite database and drops it with the run. |
+| `db/write-queue.test.ts` | The test for the queue. It proves a contended write is answered by the constraint and not by the driver. |
 | `db/migrations/` | Generated SQL. Never hand-edit it. |
+
+---
+
+## The write queue
+
+**SQLite has one writer.** The libsql driver gives a transaction a
+connection of its own, so two writes that overlap in this process do not
+queue — they collide, and the second one is refused by the **driver**
+with `SQLITE_BUSY` rather than by the **database** with the constraint
+it violated. The loser of a race has to be told "already locked", not
+"database busy": only the first of those is an answer a caller can act
+on.
+
+`db/write-queue.ts` is one queue, in front of every write in the
+process. It does not decide who wins a race — the unique constraints
+are still the authority. It only makes two statements *reach* the
+database one after the other, so the loser gets the constraint's error.
+
+| | |
+|---|---|
+| **Where it sits** | It wraps the libsql client, so it is in front of every statement: the query builders, the raw statements, the migrations, the seed, the retention prune and the scheduler's deletes. No module has to know that it exists. |
+| **What is queued** | The writes. A statement is a write unless its first keyword is `select`, `pragma`, `explain` or `values`. |
+| **What is not queued** | The reads. A read must not wait behind a long write, or the whole bot stalls behind one slow transaction. |
+| **The transaction is the unit** | A transaction holds the write lock for its whole body, so it holds the queue for its whole body too. Everything inside it runs on its own connection, without going back through the queue — otherwise the transaction would wait for itself. |
+| **It is re-entrant** | A transaction's body calls repository functions that write. Those writes are part of the transaction: an `AsyncLocalStorage` carries the open transaction through the async call chain, so a write issued anywhere inside the body finds the transaction it belongs to. A write from *outside* the body is not dragged into it. |
+| **A transaction inside a transaction** | It cannot take the queue — the outer transaction is holding it — so it becomes a savepoint on the same connection. |
+
+**The busy timeout is not the queue.** `busy_timeout` makes a contended
+*statement* wait; it does nothing for a statement that collides with an
+*open transaction* on another connection, because that transaction holds
+the write lock for its whole body. The timeout is set on the client
+(`timeout: 5000`), so the driver applies it to every connection it
+opens — a `PRAGMA` would only reach the one connection that happened to
+run it. The timeout is what covers another *process* writing the same
+file; the queue is what covers this one.
 
 ---
 
@@ -454,3 +491,10 @@ Discord ids are text, that timestamps are epoch milliseconds, the unique
 and CHECK constraints (by SQLite's extended error code), the slot claim,
 the foreign-key cascade, the partial unique index, and that applying the
 migration twice is safe.
+
+`db/write-queue.test.ts` does the same with the queue: it asserts that
+two overlapping writes are answered by the **constraint** and not by
+`SQLITE_BUSY`, that a write outside an open transaction waits its turn
+instead of colliding, that a transaction body may write through the
+database handle without deadlocking against itself, and that the loser
+of a race is still told "already locked".
