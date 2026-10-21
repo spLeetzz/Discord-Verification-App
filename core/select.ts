@@ -58,6 +58,9 @@ import { sendCollectable } from "./context.js";
 import type { ReplyPayload } from "./context.js";
 import { COLLECTOR_CUSTOM_ID_PREFIX, randomId } from "./custom-id.js";
 import { panelEmbed } from "./ui.js";
+import { clearComponentMenu } from "./context.js";
+import { logger } from "../utils/logger.js";
+import { errorMessage } from "../utils/errors.js";
 
 /**
  * The prefix every select-menu custom id starts with.
@@ -404,14 +407,18 @@ export async function awaitSelect(
 
       const values = answer.isStringSelectMenu() ? answer.values : [];
 
-      await answer.update({ components: [] });
+      await clearComponentMenu(answer);
 
       return values;
     } finally {
       collector.stop("done");
     }
-  } catch {
-    // Timed out. Nobody chose anything.
+  } catch (error) {
+    // Nobody chose anything, or the answer could not be delivered. The
+    // reason is logged: a failure that is swallowed is a failure that
+    // looks like a bug in the user's mouse.
+    logger.warn(`[Select] The menu was not answered: ${errorMessage(error)}`);
+
     try {
       // The edit lands on the message the menu is on — the interaction's
       // reply, or the follow-up the menu was sent as.
@@ -636,14 +643,18 @@ async function collectAutoSelect(
 
       const values = menu.readValues(answer);
 
-      await answer.update({ components: [] });
+      await clearComponentMenu(answer);
 
       return values;
     } finally {
       collector.stop("done");
     }
-  } catch {
-    // Timed out. Nobody chose anything.
+  } catch (error) {
+    // Nobody chose anything, or the answer could not be delivered. The
+    // reason is logged: a failure that is swallowed is a failure that
+    // looks like a bug in the user's mouse.
+    logger.warn(`[Select] The menu was not answered: ${errorMessage(error)}`);
+
     try {
       // The edit lands on the message the menu is on — the interaction's
       // reply, or the follow-up the menu was sent as.

@@ -36,7 +36,9 @@
 
 import { ComponentType } from "discord.js";
 import type { MessageComponentInteraction, RepliableInteraction } from "discord.js";
-import { sendCollectable } from "./context.js";
+import { replaceComponentContent, sendCollectable } from "./context.js";
+import { logger } from "../utils/logger.js";
+import { errorMessage } from "../utils/errors.js";
 import type { ReplyHandle } from "./context.js";
 import { COLLECTOR_CUSTOM_ID_PREFIX, randomId } from "./custom-id.js";
 import {
@@ -211,7 +213,12 @@ export async function prompt(
 
   try {
     answer = await collector.next;
-  } catch {
+  } catch (error) {
+    // Nobody answered, or the answer could not be delivered. The reason
+    // is logged, because a failure that is swallowed is a failure that
+    // looks like a bug in the user's mouse.
+    logger.warn(`[Prompt] The prompt was not answered: ${errorMessage(error)}`);
+
     // The prompt timed out. Nobody answered, so the answer is "no".
     await finishWithTimeout(handle, clearButtons);
 
@@ -222,7 +229,7 @@ export async function prompt(
 
   const confirmed = answer.customId === confirmId;
 
-  await answer.update({
+  await replaceComponentContent(answer, {
     embeds: [
       // The question stays on the panel, so the answer can be read in
       // context: the title says what happened, the colour says how it

@@ -25,7 +25,9 @@
  */
 
 import {
+  ActionRowBuilder,
   AttachmentBuilder,
+  ButtonBuilder,
   EmbedBuilder,
   MessageFlags,
 } from "discord.js";
@@ -216,6 +218,72 @@ function scheduleDelete(interaction: RepliableInteraction, seconds: number): voi
 
   // A pending deletion is not a reason to keep the process alive.
   timer.unref();
+}
+
+/**
+ * Clears the menu off a component, whichever way the message allows.
+ *
+ * **An ephemeral message cannot be updated.** Discord refuses a `PATCH`
+ * on one, so `interaction.update()` fails with a 403 — and the user is
+ * shown "interaction failed" for a pick they made correctly. The
+ * ephemeral response is edited through the *interaction* instead, which
+ * is the documented way to change one.
+ *
+ * A menu on an ordinary message is updated the ordinary way. So: try the
+ * update, and fall back to the edit when the message is ephemeral.
+ *
+ * @throws whatever the edit throws, if the edit fails too — the caller
+ *         has to know that the answer did not land.
+ */
+export async function clearComponentMenu(
+  answer: MessageComponentInteraction,
+): Promise<void> {
+  try {
+    await answer.update({ components: [] });
+  } catch (error) {
+    if (!isEphemeral(answer.message)) throw error;
+
+    await answer.editReply({ components: [] });
+  }
+}
+
+/**
+ * Is this an ephemeral message?
+ *
+ * The ephemeral flag is on the message, and the flag is the only honest
+ * answer: discord.js does not model the ephemeral property on a message
+ * the way it does on an interaction.
+ */
+function isEphemeral(message: Message | null): boolean {
+  if (!message) return false;
+
+  const flags = message.flags;
+
+  if (!flags || typeof flags.has !== "function") return false;
+
+  return flags.has(MessageFlags.Ephemeral);
+}
+
+/**
+ * Replaces a component's content, whichever way the message allows.
+ *
+ * The same rule as {@link clearComponentMenu}: an ephemeral message
+ * cannot be updated, so the edit goes through the interaction.
+ */
+export async function replaceComponentContent(
+  answer: MessageComponentInteraction,
+  content: {
+    readonly embeds?: EmbedBuilder[];
+    readonly components?: readonly ActionRowBuilder<ButtonBuilder>[];
+  },
+): Promise<void> {
+  try {
+    await answer.update(content);
+  } catch (error) {
+    if (!isEphemeral(answer.message)) throw error;
+
+    await answer.editReply(content);
+  }
 }
 
 /**
