@@ -280,6 +280,18 @@ tag check and the easy tag. The port stores the role's **id** on the
 configuration row (D16); the name is only ever used to **create** the
 role. A role that merely carries the name does not opt anybody out.
 
+### The channel cache
+
+The message listener asks "is this channel one of ours?" on **every**
+message, so the answer must not touch the database. `cache.ts` holds
+three `ChannelIdCache` instances from `core/channel-cache.ts` (D21) — one
+per kind — and they are rebuilt from the database at startup.
+
+The cache is **only ever a hint**: a channel id in the cache does not
+mean the row exists, and the row is always read before anything is
+written. A listener that finds no record for a cached channel removes
+that channel from the cache.
+
 ### The rate limits
 
 | Limit | Shape |
