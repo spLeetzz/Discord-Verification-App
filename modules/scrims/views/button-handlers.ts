@@ -56,8 +56,7 @@ import { writeBanLog } from "./ban-log.js";
 import { openRegistrationFlow, closeRegistrationFlow } from "./lifecycle.js";
 import { punishSelection } from "./modal-handlers.js";
 import { awaitChannelSelect, awaitRoleSelect } from "./select-flow.js";
-import { slotSelection } from "./modal-handlers.js";
-import { randomId } from "../../../core/custom-id.js";
+import { openSlotPicker } from "./slot-pick.js";
 
 /**
  * May the guild have one more scrim?
@@ -1440,6 +1439,12 @@ async function handleSlotlistButton(
  * The slots on offer are the scrim's **own** free slot numbers. The
  * source offered `range(start_from, 30)`, so twenty numbers that did
  * not exist were on offer (B4).
+ *
+ * The menu is **persistent** — a real component in the panel's own
+ * message — because a modal cannot follow a menu that was waited on:
+ * `awaitSelect` answers the select interaction it opens, and
+ * `showModal` on an answered interaction is a hard error. See
+ * `views/slot-pick.ts`.
  */
 async function addTeam(
   interaction: ButtonInteraction,
@@ -1454,47 +1459,7 @@ async function addTeam(
     return;
   }
 
-  const chosen = await awaitSelect(
-    interaction,
-    free.slice(0, 25).map((slot) => ({
-      label: `Slot ${slot.num}`.slice(0, 100),
-      value: slot.id,
-      description: `Slot ${slot.num}`.slice(0, 100),
-    })),
-    {
-      maxValues: 1,
-      placeholder: "Select the slot to add a team to",
-      question: "Select the slot to add a team to.",
-      ephemeral: true,
-    },
-  );
-
-  const slotId = chosen[0];
-
-  if (!slotId) return;
-
-  const token = randomId();
-  slotSelection.set(token, { scrimId: scrim.id, slotId });
-
-  await interaction.showModal(
-    buildModal({
-      customId: scrimsId("modal", "slot_team", token),
-      title: "Add a team",
-      texts: [
-        {
-          id: "team_name",
-          label: "The team name",
-          maxLength: 25,
-        },
-        {
-          id: "leader",
-          label: "The team leader (optional)",
-          placeholder: "@leader",
-          maxLength: 64,
-        },
-      ],
-    }),
-  );
+  await openSlotPicker(interaction, scrim, free, "add");
 }
 
 /** The slotlist editor's "Remove Team". */
@@ -1550,7 +1515,13 @@ async function removeTeam(
   await refresh(interaction, buildSlotlistEditorPanel(scrim));
 }
 
-/** The slotlist editor's "Change Team". */
+/**
+ * The slotlist editor's "Change Team".
+ *
+ * The menu is **persistent**, for the same reason as "Add Team": a
+ * modal cannot follow a menu that was waited on. See
+ * `views/slot-pick.ts`.
+ */
 async function changeTeam(
   interaction: ButtonInteraction,
   scrim: ScrimRecord,
@@ -1564,47 +1535,7 @@ async function changeTeam(
     return;
   }
 
-  const chosen = await awaitSelect(
-    interaction,
-    claimed.slice(0, 25).map((slot) => ({
-      label: `Slot ${slot.num}`.slice(0, 100),
-      value: slot.id,
-      description: (slot.teamName ?? "—").slice(0, 100),
-    })),
-    {
-      maxValues: 1,
-      placeholder: "Select the slot to change",
-      question: "Select the slot to change.",
-      ephemeral: true,
-    },
-  );
-
-  const slotId = chosen[0];
-
-  if (!slotId) return;
-
-  const token = randomId();
-  slotSelection.set(token, { scrimId: scrim.id, slotId });
-
-  await interaction.showModal(
-    buildModal({
-      customId: scrimsId("modal", "slot_team", token),
-      title: "Change the team",
-      texts: [
-        {
-          id: "team_name",
-          label: "The team name",
-          maxLength: 25,
-        },
-        {
-          id: "leader",
-          label: "The team leader (optional)",
-          placeholder: "@leader",
-          maxLength: 64,
-        },
-      ],
-    }),
-  );
+  await openSlotPicker(interaction, scrim, claimed, "change");
 }
 
 /**

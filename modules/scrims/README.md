@@ -66,10 +66,40 @@ Examples:
 - `scrims:manager:<scrimId>` — the panel of one scrim;
 - `scrims:editor:set_role:<scrimId>` — one field of the editor;
 - `scrims:wizard:set_role:<token>` — one field of the wizard;
-- `scrims:modal:field:set_role:<scrimId>` — the modal behind a field.
+- `scrims:modal:field:set_role:<scrimId>` — the modal behind a field;
+- `scrims:slotm_pick:<scrimId>:<kind>:<userId>` — the "which slot?" menu
+  of the slotlist editor, and the member who opened it.
 
 The **wizard** carries a token rather than a record id, because the scrim
 does not exist yet: that is exactly the case D18 says a token is for.
+
+### The menus
+
+**A modal cannot follow a menu that was waited on.** Discord lets an
+interaction do exactly one thing — reply, defer, update or show a modal
+— and `core/select.ts`'s `awaitSelect` *answers* the select interaction
+it opens. A menu that is awaited inline therefore cannot be followed by
+a modal: `showModal` on it is a hard error
+(`InteractionAlreadyReplied`).
+
+So a flow that needs a choice **and then** a modal uses a
+**persistent** menu: a real component in a message, whose answer
+arrives as an interaction of its own — still unanswered, so the modal
+can be shown from it. That is the "which slot?" menu of the slotlist
+editor (`scrims:slotm_pick:<scrimId>:<kind>:<userId>`), handled in
+`views/slot-pick.ts`. The tournaments area solves the same problem the
+same way (`views/select-handlers.ts`), and the slots area does it in
+`views/pick.ts`.
+
+The menu goes on the **panel's own message**, so the pick is an
+interaction on the panel and the modal that follows is opened from it —
+which is what lets the modal submit re-render the panel in place.
+
+**The owner check is the handler's own.** The menu is dispatched by
+custom id through the router, and the router has no owner check of its
+own, so the member who opened the menu is encoded in the custom id and
+checked in the handler. A pick from another moderator is refused and
+drives nothing.
 
 ---
 
@@ -556,6 +586,8 @@ would let one area evict the other area's channels.
 | Situation | What happens |
 |---|---|
 | The scrim was deleted while a panel was open | "This scrim no longer exists." |
+| Another moderator picked a slot on somebody else's menu | "That menu is not yours." — the pick is refused, and nothing is written. |
+| The slot pick expired before the form was submitted | "That form is no longer active." |
 | The bot cannot manage the registration channel | "I do not have `Manage Channels` in …" — and the daily job logs the reason. |
 | The success role is above the bot's top role | Registration does not open. |
 | The wizard expired | "This wizard has expired. Please run the command again." |

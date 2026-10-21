@@ -99,7 +99,7 @@ export function registerScrimsInteractions(): void {
       return;
     }
 
-    await handleScrimsSelect(interaction, id.action);
+    await handleScrimsSelect(interaction, id.action, id.parts);
   });
 
   registerModal("scrims", async (interaction, payload) => {
@@ -116,7 +116,22 @@ export function registerScrimsInteractions(): void {
       return;
     }
 
-    await handleScrimsModal(interaction, id.action, id.parts);
+    // A modal's custom id is `scrims:modal:<kind>:<parts…>`, so the
+    // *kind* is the first part and the rest is the payload. The handler
+    // switches on the kind — "wizard", "field", "slot_team" — and the
+    // id's own action is always "modal".
+    const [kind, ...parts] = id.parts;
+
+    if (!kind) {
+      await interaction.reply({
+        content: "That form is no longer active. Please run the command again.",
+        flags: MessageFlags.Ephemeral,
+      });
+
+      return;
+    }
+
+    await handleScrimsModal(interaction, kind, parts);
   });
 }
 

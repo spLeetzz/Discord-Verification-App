@@ -22,6 +22,7 @@ import * as service from "../service.js";
 import { slotNumbers } from "../slots.js";
 import { modalText } from "./components.js";
 import { writeBanLog } from "./ban-log.js";
+import { takeSlotSelection } from "./slot-pick.js";
 import {
   buildEditorPanel,
   buildWizardPanel,
@@ -623,23 +624,14 @@ export const punishSelection = new Map<string, string[]>();
  * ------------------------------------------------------------------ */
 
 /**
- * The slot a team is being added to or changed on.
- *
- * A multi-select's values cannot travel in a custom id — twenty-five
- * uuids do not fit in a hundred characters — so the selection is kept
- * in a token store (D18).
- */
-export const slotSelection = new Map<
-  string,
-  { readonly scrimId: string; readonly slotId: string }
->();
-
-/**
  * Adds or changes the team on a slot.
  *
  * The source wrote the team name and the owner in two separate
  * statements, which could leave a half-changed slot behind. Ours is one
  * statement.
+ *
+ * The state the pick collected — the scrim, the slot and the member who
+ * opened the menu — travels in a token (D18). See `views/slot-pick.ts`.
  */
 async function handleSlotTeamModal(
   interaction: ModalSubmitInteraction,
@@ -653,12 +645,19 @@ async function handleSlotTeamModal(
     return;
   }
 
-  const selection = slotSelection.get(token);
-
-  slotSelection.delete(token);
+  const selection = takeSlotSelection(token);
 
   if (!selection) {
     await fail(interaction, "That form is no longer active.");
+
+    return;
+  }
+
+  // The form belongs to the member who opened the menu. Discord only
+  // shows a modal to the member who triggered it, so this is a second
+  // lock rather than the first one.
+  if (selection.userId !== interaction.user.id) {
+    await fail(interaction, "That form is not yours.");
 
     return;
   }

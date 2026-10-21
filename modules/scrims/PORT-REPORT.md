@@ -510,3 +510,54 @@ preview, whose body is a plain list. One renderer for the preview and
 the published list is the next step, and it is not this area's to
 write.
 
+---
+
+## 10. The two team flows — the pick is a persistent menu
+
+**The bug.** "Add Team" and "Change Team" called `awaitSelect` and then
+`interaction.showModal(...)` on the *same* interaction. `awaitSelect`
+answers the select interaction it opens — that is how it collects the
+value — so `showModal` on it is a hard error
+(`InteractionAlreadyReplied`). Both flows threw every time a moderator
+used them.
+
+**The fix.** The choice is made with a **persistent** menu: a real
+component in the panel's own message, whose answer arrives as an
+interaction of its own, still unanswered, so the modal is shown from it.
+The tournaments area solves the same problem the same way, and the
+slots area does it in `views/pick.ts`.
+
+| | |
+|---|---|
+| The menu's custom id | `scrims:slotm_pick:<scrimId>:<kind>:<userId>` |
+| The kind | `add` (the scrim's free slots) or `change` (its claimed ones) |
+| The menu's value | the slot id |
+| The modal's custom id | `scrims:modal:slot_team:<token>` |
+| The token carries | the scrim, the slot and the member who asked |
+
+**The owner check is the handler's own.** The menu is dispatched by
+custom id through the router, and the router has no owner check of its
+own, so the member who opened the menu is encoded in the custom id and
+checked in the handler. A pick from another moderator is refused
+("That menu is not yours.") and drives nothing; the modal's token
+carries the member too, so a form that is not the member's is refused
+as well.
+
+**The menu goes on the panel's own message.** The pick is then an
+interaction on the panel, and the modal that follows is opened from it
+— so the modal submit's message is the panel, and the panel is
+re-rendered in place. A press that has already answered cannot edit the
+panel through the interaction, so the menu goes into a follow-up
+instead; the flow is the same either way.
+
+**A second bug fell out of it.** The modal handler switches on the
+*kind* ("wizard", "field", "slot_team"), but the register passed the
+id's own action — which is always "modal". Every scrims modal was
+refused with "That form is no longer active." The register now splits
+the kind out of the parts, the way the tournaments area does.
+
+`views/slot-pick.test.ts` drives the whole flow through the real
+router: the button's id opens the menu, the menu's id opens the modal,
+and the modal's id applies the team name and the new leader.
+
+

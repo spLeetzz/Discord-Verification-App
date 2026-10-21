@@ -16,7 +16,13 @@
  *  - `scrims:manager:<scrimId>` — the panel of one scrim;
  *  - `scrims:editor:set_role:<scrimId>` — one field of the editor;
  *  - `scrims:wizard:set_role:<token>` — one field of the wizard;
- *  - `scrims:modal:field:set_role:<scrimId>` — the modal behind a field.
+ *  - `scrims:modal:field:set_role:<scrimId>` — the modal behind a field;
+ *  - `scrims:slotm_pick:<scrimId>:<kind>:<userId>` — the "which slot?"
+ *    menu of the slotlist editor, and the member who opened it.
+ *
+ * The `slotm_pick` menu is **persistent** rather than awaited inline: a
+ * modal cannot follow a menu that was waited on, because waiting on it
+ * answers the interaction. See `views/slot-pick.ts`.
  *
  * The wizard carries a **token** rather than a record id, because the
  * scrim does not exist yet: it is state with no database row, which is
@@ -45,6 +51,7 @@ export const SCRIMS_ACTIONS = [
   "slotlist",
   "modal",
   "select",
+  "slotm_pick",
 ] as const;
 
 export type ScrimsAction = (typeof SCRIMS_ACTIONS)[number];
