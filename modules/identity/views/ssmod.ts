@@ -542,7 +542,7 @@ export function buildPageDetailsModal(
           .setMaxLength(50)
           .setRequired(true)
           .setStyle(TextInputStyle.Short)
-          .setDefault(current.channelName),
+          .setValue(current.channelName),
       ),
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
@@ -552,7 +552,7 @@ export function buildPageDetailsModal(
           .setMaxLength(150)
           .setRequired(false)
           .setStyle(TextInputStyle.Short)
-          .setDefault(current.channelLink),
+          .setValue(current.channelLink),
       ),
     );
 }
@@ -577,7 +577,7 @@ export function buildSuccessMessageModal(
           .setMaxLength(500)
           .setRequired(false)
           .setStyle(TextInputStyle.Paragraph)
-          .setDefault(current ?? ""),
+          .setValue(current ?? ""),
       ),
     );
 }
@@ -1473,13 +1473,28 @@ async function applySuccessMessage(
  * ------------------------------------------------------------------ */
 
 /**
+ * The interactions that carry the panel.
+ */
+type SsPanelInteraction =
+  | ButtonInteraction
+  | AnySelectMenuInteraction
+  | ModalSubmitInteraction;
+
+/**
  * Re-renders the panel.
+ *
+ * A button press and a select-menu press are answered with `update`, which
+ * acknowledges the interaction and edits the message the component sits on.
+ *
+ * A **modal submit** has no `update` — the method is not part of
+ * `ModalSubmitInteraction` — so the panel message is edited directly and the
+ * interaction is acknowledged with a deferred update instead. The modal is
+ * always launched from a button on the panel, so the message the modal
+ * carries is the panel; the reply path is only a fallback for a modal that
+ * was launched from somewhere else.
  */
 async function renderPanel(
-  interaction:
-    | ButtonInteraction
-    | AnySelectMenuInteraction
-    | ModalSubmitInteraction,
+  interaction: SsPanelInteraction,
   resolved: ResolvedTarget,
 ): Promise<void> {
   const target: SsTarget =
@@ -1493,7 +1508,41 @@ async function renderPanel(
 
   const panel = buildSsPanel(target);
 
+  if (interaction.isModalSubmit()) {
+    await renderPanelAfterModal(interaction, panel);
+
+    return;
+  }
+
   await interaction.update({
+    embeds: [panel.embed],
+    components: panel.components,
+  });
+}
+
+/**
+ * Re-renders the panel after a modal was submitted.
+ */
+async function renderPanelAfterModal(
+  interaction: ModalSubmitInteraction,
+  panel: SsPanel,
+): Promise<void> {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferUpdate().catch(() => undefined);
+  }
+
+  const message = interaction.message;
+
+  if (message) {
+    await message.edit({
+      embeds: [panel.embed],
+      components: panel.components,
+    });
+
+    return;
+  }
+
+  await interaction.editReply({
     embeds: [panel.embed],
     components: panel.components,
   });

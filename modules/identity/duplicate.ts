@@ -29,7 +29,7 @@
  * `modules/ssverify/ocr/` and every stored hash comes from it.
  */
 
-import { hammingDistance } from "../ssverify/ocr/hash.js";
+import { hammingDistance, HASH_HEX_LENGTH } from "../ssverify/ocr/hash.js";
 
 /** The stored submission a new screenshot is compared against. */
 export interface StoredSubmission {
@@ -75,31 +75,46 @@ export interface DuplicateMatch {
  * hides itself is a duplicate that lets a member farm a role.
  */
 export class MalformedHashError extends Error {
-  /** The stored value that could not be read. */
-  readonly storedHash: string;
+  /** The hash that could not be read. */
+  readonly hash: string;
 
-  constructor(storedHash: string, detail: string) {
-    super(
-      `A stored screenshot hash is malformed and cannot be compared: ${detail}`,
-    );
+  constructor(hash: string, detail: string) {
+    super(`A screenshot hash is malformed and cannot be compared: ${detail}`);
 
     this.name = "MalformedHashError";
-    this.storedHash = storedHash;
+    this.hash = hash;
   }
+}
+
+/** What a hash looks like: sixteen hex characters. */
+const HASH_PATTERN = new RegExp(
+  `^[0-9a-fA-F]{${HASH_HEX_LENGTH}}$`,
+);
+
+/**
+ * Is this a hash?
+ */
+function isHashHex(value: string): boolean {
+  return HASH_PATTERN.test(value);
 }
 
 /**
  * The Hamming distance between two hashes.
  *
  * @throws MalformedHashError when either side is not sixteen hex
- *         characters.
+ *         characters. The error names the hash that is actually
+ *         malformed, which is the one the caller has to look at.
  */
 export function safeHammingDistance(a: string, b: string): number {
   try {
     return hammingDistance(a, b);
   } catch (error) {
+    // `hammingDistance` reads the first argument first, so the first
+    // argument is the one that is malformed when only one of them is.
+    const malformed = isHashHex(a) ? b : a;
+
     throw new MalformedHashError(
-      a,
+      malformed,
       error instanceof Error ? error.message : String(error),
     );
   }

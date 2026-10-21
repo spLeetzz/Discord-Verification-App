@@ -1,0 +1,8 @@
+/**
+ * The `/tagcheck` command.
+ *
+ * The loader scans `commands/<folder>/*.ts` one level deep, and the real
+ * definitions live in the module.
+ */
+
+export { tagCheckCommand as default } from "../../modules/identity/commands/index.js";

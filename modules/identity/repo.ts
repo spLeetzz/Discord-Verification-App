@@ -113,6 +113,20 @@ export async function countTagCheckChannels(guildId: string): Promise<number> {
   return row?.count ?? 0;
 }
 
+/**
+ * The channel id of every tag-check channel.
+ *
+ * The cache's loader: it wants the ids and nothing else, and it does not
+ * want the ignore role of every row (D21).
+ */
+export async function listTagCheckChannelIds(): Promise<string[]> {
+  const rows = await db
+    .select({ channelId: tagcheckChannels.channelId })
+    .from(tagcheckChannels);
+
+  return rows.map((row) => row.channelId);
+}
+
 /** Creates a tag-check channel. */
 export async function insertTagCheckChannel(input: {
   guildId: string;
@@ -210,6 +224,19 @@ export async function countEasyTagChannels(guildId: string): Promise<number> {
     .where(eq(easytagChannels.guildId, guildId));
 
   return row?.count ?? 0;
+}
+
+/**
+ * The channel id of every easy-tag channel.
+ *
+ * The cache's loader (D21).
+ */
+export async function listEasyTagChannelIds(): Promise<string[]> {
+  const rows = await db
+    .select({ channelId: easytagChannels.channelId })
+    .from(easytagChannels);
+
+  return rows.map((row) => row.channelId);
 }
 
 /** Creates an easy-tag channel. */
@@ -453,6 +480,19 @@ export async function countSsConfigs(guildId: string): Promise<number> {
     .where(eq(ssConfigs.guildId, guildId));
 
   return row?.count ?? 0;
+}
+
+/**
+ * The channel id of every screenshot-verification setup.
+ *
+ * The cache's loader (D21).
+ */
+export async function listSsConfigChannelIds(): Promise<string[]> {
+  const rows = await db
+    .select({ channelId: ssConfigs.channelId })
+    .from(ssConfigs);
+
+  return rows.map((row) => row.channelId);
 }
 
 /** Creates a setup. */

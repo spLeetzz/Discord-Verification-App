@@ -10,7 +10,7 @@
  */
 
 import { ChannelType, PermissionFlagsBits, SlashCommandBuilder } from "discord.js";
-import type { ChatInputCommandInteraction, GuildTextChannel } from "discord.js";
+import type { ChatInputCommandInteraction, GuildTextBasedChannel } from "discord.js";
 import { replyError, replySimple, replySuccess } from "../../../core/context.js";
 import { hasGuildPermissions } from "../../../core/guards.js";
 import type { Command } from "../../../types/command.js";
@@ -110,7 +110,7 @@ async function setEasyTag(
     return;
   }
 
-  const textChannel = channel as GuildTextChannel;
+  const textChannel = channel as GuildTextBasedChannel;
 
   const existing = await service.listEasyTagChannels(guild.id);
 
@@ -120,7 +120,18 @@ async function setEasyTag(
     return;
   }
 
-  const permissions = textChannel.permissionsFor(guild.members.me);
+  const me = guild.members.me;
+
+  if (!me) {
+    await replyError(
+      interaction,
+      "I could not find my own member record, so I could not check the channel permissions.",
+    );
+
+    return;
+  }
+
+  const permissions = textChannel.permissionsFor(me);
 
   if (
     !permissions?.has([
@@ -131,7 +142,7 @@ async function setEasyTag(
   ) {
     await replyError(
       interaction,
-      `I need \`send_messages\`, \`embed_links\` and \`manage_messages\` permission in ${textChannel.mention}`,
+      `I need \`send_messages\`, \`embed_links\` and \`manage_messages\` permission in <#${textChannel.id}>`,
     );
 
     return;

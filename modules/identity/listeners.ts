@@ -19,7 +19,6 @@ import type { Attachment, GuildMember, Message } from "discord.js";
 import { EmbedBuilder } from "discord.js";
 import { EMBED_COLOR } from "../../core/constants.js";
 import { STAFF_ROLE_NAME } from "../../core/guards.js";
-import { findTeam } from "../../core/team-name.js";
 import { errorMessage } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 import * as cache from "./cache.js";
@@ -29,7 +28,8 @@ import * as service from "./service.js";
 import { buildEasyTagReply, extractEasyTags, resolveEasyTag } from "./easytag.js";
 import { NO_TAG_MESSAGE } from "./easytag.js";
 import type { EasyTagMember } from "./easytag.js";
-import { checkTagCheckMessage } from "./tagcheck.js";
+import { buildTagCheckSummary, checkTagCheckMessage } from "./tagcheck.js";
+import { isIgnoredMember } from "./ignore-role.js";
 
 /* ------------------------------------------------------------------ *
  * The entry point
@@ -120,21 +120,20 @@ export async function handleTagCheckMessage(message: Message): Promise<void> {
 
   // The team name comes from the message itself, through the ported
   // `find_team` (D27). It is not reimplemented here.
-  const teamName = findTeam({
+  const summary = buildTagCheckSummary({
     content: message.content,
     author: message.author,
+    authorId: message.author.id,
+    mentions,
   });
 
   await message.react("✅");
 
-  const players =
-    mentions.length > 0
-      ? mentions.map((mention) => `<@${mention.id}>`).join(", ")
-      : `<@${message.author.id}>`;
-
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR)
-    .setDescription(`Team Name: ${teamName}\nPlayer(s): ${players}`);
+    .setDescription(
+      `Team Name: ${summary.teamName}\nPlayer(s): ${summary.players}`,
+    );
 
   await message.reply({ embeds: [embed] });
 }
@@ -345,13 +344,11 @@ async function isIgnored(
   message: Message,
   ignoreRoleId: string | null,
 ): Promise<boolean> {
-  if (!ignoreRoleId) return false;
-
   const member = message.member;
 
   if (!member) return false;
 
-  return member.roles.cache.has(ignoreRoleId);
+  return isIgnoredMember([...member.roles.cache.keys()], ignoreRoleId);
 }
 
 /**

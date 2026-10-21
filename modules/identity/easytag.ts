@@ -44,6 +44,26 @@ const FULL_TAG_PATTERN = /(?<![\w.])@([A-Za-z0-9_][A-Za-z0-9_.]{0,31})(?:#(\d{4}
 /** A raw account id: seventeen to nineteen digits. */
 const RAW_ID_PATTERN = /\b\d{17,19}\b/g;
 
+/**
+ * The `@` of a mention in front of a raw account id.
+ *
+ * A real Discord mention is `<@123456789012345678>`. The tag pattern sees
+ * the `@123456789012345678` inside it, and the id pattern sees the digits
+ * — the same member twice.
+ */
+const AT_RAW_ID_PATTERN = /^@\d{17,19}$/;
+
+/**
+ * A tag **or** a raw id, in one pass.
+ *
+ * The two are matched together so that the tokens come out in the order
+ * they appear in the message, the way Quotient's single `findall` did.
+ */
+const TOKEN_PATTERN = new RegExp(
+  `${FULL_TAG_PATTERN.source}|${RAW_ID_PATTERN.source}`,
+  "g",
+);
+
 /** What the resolver needs to know about a member. */
 export interface EasyTagMember {
   readonly id: string;
@@ -60,27 +80,23 @@ export interface EasyTagMember {
 export function extractEasyTags(content: string): string[] {
   const found: string[] = [];
 
-  const rawIds = content.match(RAW_ID_PATTERN);
-
-  if (rawIds) {
-    for (const id of rawIds) {
-      if (!found.includes(id)) found.push(id);
-    }
-  }
-
   // The pattern is global, so the state has to be reset before it is used
   // again — `String.match` with a global pattern does that, but `exec` in a
   // loop does not.
-  FULL_TAG_PATTERN.lastIndex = 0;
+  TOKEN_PATTERN.lastIndex = 0;
 
-  let match = FULL_TAG_PATTERN.exec(content);
+  let match = TOKEN_PATTERN.exec(content);
 
   while (match !== null) {
-    const token = match[0];
+    // A mention of a member is the member's id, not a name — the `@` is
+    // how Discord writes it, not part of it.
+    const token = AT_RAW_ID_PATTERN.test(match[0])
+      ? match[0].slice(1)
+      : match[0];
 
     if (!found.includes(token)) found.push(token);
 
-    match = FULL_TAG_PATTERN.exec(content);
+    match = TOKEN_PATTERN.exec(content);
   }
 
   return found;
@@ -130,8 +146,12 @@ export function resolveEasyTag(
   token: string,
   members: readonly EasyTagMember[],
 ): string | null {
-  if (isRawId(token)) {
-    const byId = members.find((member) => member.id === token);
+  // The token without its `@`. A real mention (`<@123>`) carries the `@`
+  // in front of the id, and the id is what identifies the member.
+  const bare = token.startsWith("@") ? token.slice(1) : token;
+
+  if (isRawId(bare)) {
+    const byId = members.find((member) => member.id === bare);
 
     return byId ? byId.id : null;
   }
@@ -158,11 +178,9 @@ export function resolveEasyTag(
     return null;
   }
 
-  const name = token.startsWith("@") ? token.slice(1) : token;
+  if (bare.length === 0) return null;
 
-  if (name.length === 0) return null;
-
-  const lowered = name.toLowerCase();
+  const lowered = bare.toLowerCase();
 
   const byUsername = members.find(
     (member) => member.username.toLowerCase() === lowered,

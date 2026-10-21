@@ -25,6 +25,9 @@
  * user mentions are counted here.
  */
 
+import { findTeam } from "../../core/team-name.js";
+import type { TeamNameAuthor } from "../../core/team-name.js";
+
 /** A mention, as far as the rules care. */
 export interface TagCheckMention {
   readonly id: string;
@@ -112,4 +115,48 @@ export function checkTagCheckMessage(input: TagCheckInput): string | null {
   }
 
   return null;
+}
+
+/* ------------------------------------------------------------------ *
+ * The reply
+ * ------------------------------------------------------------------ */
+
+/**
+ * The team name and the player list the reply shows.
+ */
+export interface TagCheckSummary {
+  readonly teamName: string;
+  readonly players: string;
+}
+
+/**
+ * Builds what the reply says about the team.
+ *
+ * The team name comes from the message itself, through the ported
+ * `find_team` (D27) — it is not reimplemented here. The helper exists so
+ * that the *use* of the ported function is testable without a Discord
+ * message: the listener only has to hand over the content, the author and
+ * the mentions.
+ */
+export function buildTagCheckSummary(input: {
+  /** The raw message content. */
+  readonly content: string;
+  /** The message's author — its `toString()` is the mention. */
+  readonly author: TeamNameAuthor;
+  /** The author's id, used when the message mentions nobody. */
+  readonly authorId: string;
+  /** The users the captain mentioned. */
+  readonly mentions: readonly TagCheckMention[];
+}): TagCheckSummary {
+  const teamName = findTeam({
+    content: input.content,
+    author: input.author,
+  });
+
+  const players =
+    input.mentions.length > 0
+      ? input.mentions.map((mention) => `<@${mention.id}>`).join(", ")
+      : `<@${input.authorId}>`;
+
+  return { teamName, players };
 }

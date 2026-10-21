@@ -82,3 +82,23 @@ export function rememberIgnoreRole(guildId: string, roleId: string): void {
 export function forgetIgnoreRoles(): void {
   resolved.clear();
 }
+
+/**
+ * Does the member hold the ignore role?
+ *
+ * The role is compared **by id** (D16). A role that merely carries the
+ * name `quotient-tag-ignore` does not opt anybody out — the id is what
+ * counts, and the id is what the configuration row holds.
+ *
+ * @param roleIds     the ids of the roles the member holds.
+ * @param ignoreRoleId the id of the ignore role, or `null` when the guild
+ *                     has none.
+ */
+export function isIgnoredMember(
+  roleIds: readonly string[],
+  ignoreRoleId: string | null,
+): boolean {
+  if (!ignoreRoleId) return false;
+
+  return roleIds.includes(ignoreRoleId);
+}
