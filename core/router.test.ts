@@ -13,8 +13,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ButtonInteraction } from "discord.js";
+import type { ButtonInteraction, StringSelectMenuInteraction } from "discord.js";
 import { logger } from "../utils/logger.js";
+import { COLLECTOR_CUSTOM_ID_PREFIX } from "./custom-id.js";
 import {
   clearRegistry,
   dispatch,
@@ -23,8 +24,26 @@ import {
   registerSelect,
 } from "./router.js";
 
+/**
+ * The error replies the router sent.
+ *
+ * The router refuses an id it does not own by replying to it, so the
+ * reply is the thing the collector must not have. It is mocked at the
+ * module boundary because a namespace import cannot be spied on.
+ */
+const replyErrorMock = vi.hoisted(() => vi.fn(async () => {}));
+
+vi.mock("./context.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./context.js")>();
+
+  return { ...actual, replyError: replyErrorMock };
+});
+
 /** The warnings the router wrote. */
 const warnings: string[] = [];
+
+/** The errors the router wrote. */
+const errors: string[] = [];
 
 /** A handler that does nothing. */
 const noop = (): void => {};
@@ -44,17 +63,72 @@ function fakeButton(customId: string): ButtonInteraction {
   } as unknown as ButtonInteraction;
 }
 
+/**
+ * A select-menu interaction, for the dispatch tests.
+ */
+function fakeSelect(customId: string): StringSelectMenuInteraction {
+  return {
+    customId,
+    isButton: () => false,
+    isAnySelectMenu: () => true,
+    isModalSubmit: () => false,
+  } as unknown as StringSelectMenuInteraction;
+}
+
 beforeEach(() => {
   warnings.length = 0;
+  errors.length = 0;
   clearRegistry();
 
   vi.spyOn(logger, "warn").mockImplementation((...args: unknown[]) => {
     warnings.push(args.map((arg) => String(arg)).join(" "));
   });
+
+  vi.spyOn(logger, "error").mockImplementation((...args: unknown[]) => {
+    errors.push(args.map((arg) => String(arg)).join(" "));
+  });
+
+  replyErrorMock.mockClear();
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+
+describe("a component a pending collector owns", () => {
+  it("is not refused", async () => {
+    // The bug: a select menu that is waiting for an answer is owned by
+    // the collector, not by a module. The router used to refuse it as an
+    // id nobody owned, which acknowledged the interaction out from under
+    // the collector and told the user their button had expired.
+    const handled = await dispatch(
+      fakeSelect(`${COLLECTOR_CUSTOM_ID_PREFIX}:channel-select:abc123`),
+    );
+
+    expect(handled).toBe(true);
+    expect(errors).toHaveLength(0);
+    expect(replyErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("is not refused when it is a button", async () => {
+    const handled = await dispatch(
+      fakeButton(`${COLLECTOR_CUSTOM_ID_PREFIX}:prompt:abc123:confirm`),
+    );
+
+    expect(handled).toBe(true);
+    expect(errors).toHaveLength(0);
+    expect(replyErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("still refuses an id that is not a collector's", async () => {
+    const handled = await dispatch(fakeSelect("somethingelse"));
+
+    expect(handled).toBe(true);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("No select menu handler registered");
+    expect(replyErrorMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("a prefix that shadows another one", () => {

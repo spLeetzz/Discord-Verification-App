@@ -108,6 +108,39 @@ export function randomId(bytes = 12): string {
   return randomBytes(bytes).toString("base64url");
 }
 
+/**
+ * The prefix every component that a *pending collector* owns starts with.
+ *
+ * A collector is a select menu waiting for somebody to pick a channel, a
+ * prompt waiting for a confirmation. The interaction that answers it
+ * belongs to the collector, not to a module: the collector is the only
+ * thing that knows what the answer means.
+ *
+ * **Why the prefix matters.** The router dispatches every button, select
+ * and modal by custom id, and it refuses any id nobody owns — it replies
+ * "This button is no longer active". A collector's id is owned by nobody,
+ * because no module registered it, so without this prefix the router would
+ * refuse the interaction out from under the collector: the reply would
+ * acknowledge it, the collector's own `update` would then fail, and the
+ * user would be told a button had expired when all they had done was pick
+ * a channel.
+ *
+ * So every collector-owned id carries this prefix, and the router leaves
+ * those interactions alone.
+ */
+export const COLLECTOR_CUSTOM_ID_PREFIX = "core:collect";
+
+/**
+ * Builds a custom id for a component a collector will own.
+ *
+ * @param kind what the collector is waiting for — `select`, `channel`,
+ *        `role`, `prompt`. It is only there to keep the ids readable in
+ *        the Discord UI; nothing dispatches on it.
+ */
+export function collectorCustomId(kind: string): string {
+  return `${COLLECTOR_CUSTOM_ID_PREFIX}:${kind}:${randomId()}`;
+}
+
 /** How a token store is configured. */
 export interface TokenStoreOptions {
   /** How long an entry stays valid. Defaults to 15 minutes. */

@@ -37,7 +37,7 @@ import {
 import { buildManagerPanel, buildTourneyPanel } from "./manager.js";
 import { buildFieldModal, buildTwoInputModal } from "./modals.js";
 import { buildPartnerPanel } from "./partner.js";
-import { awaitChannelSelect, awaitRoleSelect } from "./select-flow.js";
+import { awaitChannelSelect, awaitRoleSelect } from "../../../core/select.js";
 import { buildSlotManagerPanel } from "./slotm.js";
 import { tourneysId } from "./ids.js";
 import { buildWizardPanel, parseOpenDays, wizardStore } from "./wizard.js";
@@ -354,7 +354,7 @@ async function onWizard(
   }
 
   if (field.kind === "channel") {
-    const channelId = await awaitChannelSelect(interaction, {
+    const [channelId] = await awaitChannelSelect(interaction, {
       placeholder: `Pick the ${field.label.toLowerCase()}`,
     });
 
@@ -371,7 +371,7 @@ async function onWizard(
   }
 
   if (field.kind === "role") {
-    const roleId = await awaitRoleSelect(interaction, {
+    const [roleId] = await awaitRoleSelect(interaction, {
       placeholder: "Pick the success role",
     });
 
@@ -557,7 +557,7 @@ async function onEditor(
   }
 
   if (field.kind === "channel") {
-    const channelId = await awaitChannelSelect(interaction, {
+    const [channelId] = await awaitChannelSelect(interaction, {
       placeholder: `Pick the ${field.label.toLowerCase()}`,
     });
 
@@ -589,7 +589,7 @@ async function onEditor(
   }
 
   if (field.kind === "role") {
-    const roleId = await awaitRoleSelect(interaction, {
+    const [roleId] = await awaitRoleSelect(interaction, {
       placeholder: `Pick the ${field.label.toLowerCase()}`,
     });
 
@@ -937,7 +937,7 @@ async function giveGroupRole(
     return;
   }
 
-  const roleId = await awaitRoleSelect(interaction, {
+  const [roleId] = await awaitRoleSelect(interaction, {
     placeholder: "Pick the role to give to the group",
   });
 
@@ -1037,7 +1037,7 @@ async function onGroupPublish(
     return;
   }
 
-  const channelId = await awaitChannelSelect(interaction, {
+  const [channelId] = await awaitChannelSelect(interaction, {
     placeholder: "Pick the channel to publish the group list in",
   });
 

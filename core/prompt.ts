@@ -38,11 +38,17 @@ import {
 import type { MessageComponentInteraction, RepliableInteraction } from "discord.js";
 import { sendCollectable } from "./context.js";
 import type { ReplyHandle } from "./context.js";
-import { randomId } from "./custom-id.js";
+import { COLLECTOR_CUSTOM_ID_PREFIX, randomId } from "./custom-id.js";
 import { EMBED_COLOR, ERROR_COLOR } from "./constants.js";
 
-/** The prefix every prompt button id starts with. */
-export const PROMPT_CUSTOM_ID_PREFIX = "core:prompt";
+/**
+ * The prefix every prompt button id starts with.
+ *
+ * A prompt's buttons are answered by a collector, so the id carries the
+ * collector prefix: the router must leave the interaction alone rather
+ * than refuse it as an id nobody owns.
+ */
+export const PROMPT_CUSTOM_ID_PREFIX = `${COLLECTOR_CUSTOM_ID_PREFIX}:prompt`;
 
 /** How long a prompt stays open by default. */
 const DEFAULT_TIMEOUT_MS = 60_000;

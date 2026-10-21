@@ -50,17 +50,25 @@ import type {
 } from "discord.js";
 import { sendCollectable } from "./context.js";
 import type { ReplyPayload } from "./context.js";
-import { randomId } from "./custom-id.js";
+import { COLLECTOR_CUSTOM_ID_PREFIX, randomId } from "./custom-id.js";
 import { EMBED_COLOR } from "./constants.js";
 
-/** The prefix every select-menu custom id starts with. */
-export const SELECT_CUSTOM_ID_PREFIX = "core:select";
+/**
+ * The prefix every select-menu custom id starts with.
+ *
+ * A menu that is *waiting* for an answer is owned by the collector, so
+ * these ids carry the collector prefix: the router must leave them alone
+ * rather than refuse them as an id nobody owns.
+ */
+export const SELECT_CUSTOM_ID_PREFIX = `${COLLECTOR_CUSTOM_ID_PREFIX}:select`;
 
 /** The prefix every channel-menu custom id starts with. */
-export const CHANNEL_SELECT_CUSTOM_ID_PREFIX = "core:channel-select";
+export const CHANNEL_SELECT_CUSTOM_ID_PREFIX =
+  `${COLLECTOR_CUSTOM_ID_PREFIX}:channel-select`;
 
 /** The prefix every role-menu custom id starts with. */
-export const ROLE_SELECT_CUSTOM_ID_PREFIX = "core:role-select";
+export const ROLE_SELECT_CUSTOM_ID_PREFIX =
+  `${COLLECTOR_CUSTOM_ID_PREFIX}:role-select`;
 
 /** How long a menu stays open by default. */
 const DEFAULT_TIMEOUT_MS = 60_000;

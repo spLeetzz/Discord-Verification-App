@@ -34,7 +34,7 @@ import type {
   ModalSubmitInteraction,
   RepliableInteraction,
 } from "discord.js";
-import { CUSTOM_ID_SEPARATOR } from "./custom-id.js";
+import { COLLECTOR_CUSTOM_ID_PREFIX, CUSTOM_ID_SEPARATOR } from "./custom-id.js";
 import { replyError } from "./context.js";
 import { logger } from "../utils/logger.js";
 
@@ -306,6 +306,24 @@ async function refuseUnknown(
 }
 
 /**
+ * Is this custom id owned by a pending collector?
+ *
+ * A collector — a select menu waiting for a channel, a prompt waiting for
+ * a confirmation — owns the interaction that answers it. No module
+ * registered that id, so the router would otherwise refuse it: it would
+ * reply "This button is no longer active", that reply would acknowledge
+ * the interaction, and the collector's own `update` would then fail. The
+ * user would be told a button had expired when all they had done was
+ * pick a channel.
+ *
+ * The answer is silence. The collector is waiting for this interaction,
+ * and it is the only thing that knows what the answer means.
+ */
+function ownedByCollector(customId: string): boolean {
+  return matches(COLLECTOR_CUSTOM_ID_PREFIX, customId);
+}
+
+/**
  * Routes an interaction to the module that owns it.
  *
  * @returns `true` when the interaction was handled, `false` when it was
@@ -313,6 +331,19 @@ async function refuseUnknown(
  *          when no legacy handler has been registered.
  */
 export async function dispatch(interaction: RepliableInteraction): Promise<boolean> {
+  // A collector's component is not the router's to route. It is checked
+  // first, before any handler is looked for, because there will never be
+  // one: the collector is the owner.
+  if (
+    interaction.isButton() ||
+    interaction.isAnySelectMenu() ||
+    interaction.isModalSubmit()
+  ) {
+    if (ownedByCollector(interaction.customId)) {
+      return true;
+    }
+  }
+
   if (interaction.isButton()) {
     const customId = interaction.customId;
 
