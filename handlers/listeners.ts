@@ -63,7 +63,7 @@ const AREAS: readonly AreaDefinition[] = [
     interactions: "Community",
     listeners: "Community",
     job: "Community",
-    jobEvents: ["reminder", "autopurge"],
+    jobEvents: ["reminder", "autopurge", "community_daily"],
   },
   {
     dir: "identity",

@@ -5,6 +5,7 @@ import { isStaff } from "../core/guards.js";
 import { RateLimiter } from "../core/ratelimit.js";
 import { dispatch } from "../core/router.js";
 import { isBlocked, BLOCK_ID_TYPE } from "../modules/moderation/register.js";
+import { recordCommandUsage } from "../modules/community/register.js";
 import { errorMessage, isIgnorableInteractionError } from "../utils/errors.js";
 import { handleCommand } from "../utils/graceful-exit.js";
 import { logger } from "../utils/logger.js";
@@ -162,10 +163,51 @@ async function handleChatInput(interaction: ChatInputCommandInteraction): Promis
 
   if (denial) {
     await interaction.editReply({ content: denial });
+    await recordUsage(interaction, command.data.name, true);
     return;
   }
 
-  await command.execute(interaction);
+  try {
+    await command.execute(interaction);
+  } catch (err) {
+    await recordUsage(interaction, command.data.name, true);
+    throw err;
+  }
+
+  await recordUsage(interaction, command.data.name, false);
+}
+
+/**
+ * Writes one row to the command-usage log.
+ *
+ * The log is the source of the tag statistics and the per-guild command
+ * counts. It is written on every invocation, successful or not, because a
+ * failed command is exactly what a moderator wants to see.
+ *
+ * A failure to log must never fail the command, so this swallows its errors.
+ */
+async function recordUsage(
+  interaction: ChatInputCommandInteraction,
+  cmd: string,
+  failed: boolean,
+): Promise<void> {
+  if (!interaction.guildId || !interaction.channelId) return;
+
+  try {
+    await recordCommandUsage({
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      userId: interaction.user.id,
+      cmd,
+      // The bot has no prefix commands, so there is no prefix to record.
+      prefix: "",
+      failed,
+    });
+  } catch (err) {
+    logger.warn(
+      `[InteractionCreate] Could not record command usage: ${errorMessage(err)}`,
+    );
+  }
 }
 
 export { denialMessage };
