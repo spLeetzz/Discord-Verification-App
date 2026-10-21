@@ -2,7 +2,6 @@ import { MessageFlags } from "discord.js";
 import type { ChatInputCommandInteraction, Interaction } from "discord.js";
 import { denialMessage } from "../core/errors.js";
 import { isStaff } from "../core/guards.js";
-import { RateLimiter } from "../core/ratelimit.js";
 import { dispatch } from "../core/router.js";
 import { isBlocked, BLOCK_ID_TYPE } from "../modules/moderation/register.js";
 import { recordCommandUsage } from "../modules/community/register.js";
@@ -15,44 +14,19 @@ import "./buttons.js";
 import { handleModal } from "./modals.js";
 
 /**
- * The global command rate limit.
+ * **There is no rate limit on commands or components.**
  *
- * Quotient applied this in a cog-level `bot_check` that ran before every
- * command in the whole bot. In discord.js there is no cog-level hook, so it
- * has to live in the dispatcher — otherwise there is no rate limit at all,
- * which is an abuse vector rather than a nicety.
+ * Quotient applied a cog-level `bot_check` to every command — two per ten
+ * seconds per member — and this dispatcher carried that for a while. It is
+ * gone: a member who is working through a setup flow (open a panel, pick a
+ * select, submit a modal, run a command) was being told to wait, and the
+ * ceiling was the bot's rather than Discord's.
  *
- * Two uses per ten seconds per member, as in the source.
+ * Discord's own rate limits still apply, and they are the ones that
+ * actually protect the bot. The screenshot-verification intake keeps its
+ * own limiter, which is about how much a member may push at the OCR
+ * service rather than about how fast they may type.
  */
-const commandRateLimit = new RateLimiter({
-  limit: 2,
-  windowMs: 10_000,
-  bucket: "member",
-});
-
-/**
- * The rate limit for component interactions — buttons, select menus and
- * modal submissions.
- *
- * The command limiter only ever saw chat-input commands, so a member could
- * press a button on a published panel as fast as Discord allowed. Every
- * panel flow — claiming a slot, cancelling one, purging a list — is an
- * action, and the ceiling on it should be the bot's, not Discord's.
- *
- * The allowance is looser than the command one, because a legitimate flow
- * does use several components in a row: open a panel, pick a select, submit
- * a modal. Ten per ten seconds leaves room for a flow and still stops a
- * panel being spammed.
- */
-const componentRateLimit = new RateLimiter({
-  limit: 10,
-  windowMs: 10_000,
-  bucket: "member",
-});
-
-function rateLimitMessage(waitMs: number): string {
-  return `You are being rate limited for using commands too fast. Try again in **${(waitMs / 1000).toFixed(2)} seconds**.`;
-}
 
 async function reportError(interaction: Interaction, err: unknown): Promise<void> {
   logger.error("[InteractionCreate]", err);
@@ -123,19 +97,6 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
         return;
       }
 
-      // Component interactions get their own allowance. They are actions
-      // too, and the command limiter never saw them.
-      const waitMs = componentRateLimit.hit(interaction.user.id);
-      if (waitMs !== null) {
-        if (interaction.isRepliable()) {
-          await interaction.reply({
-            content: rateLimitMessage(waitMs),
-            flags: MessageFlags.Ephemeral,
-          });
-        }
-        return;
-      }
-
       if (interaction.isModalSubmit()) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await handleModal(interaction);
@@ -172,15 +133,6 @@ async function handleChatInput(interaction: ChatInputCommandInteraction): Promis
 
   if (!command) {
     logger.error(`No command matching ${interaction.commandName}.`);
-    return;
-  }
-
-  const waitMs = commandRateLimit.hit(interaction.user.id);
-  if (waitMs !== null) {
-    await interaction.reply({
-      content: rateLimitMessage(waitMs),
-      flags: MessageFlags.Ephemeral,
-    });
     return;
   }
 
