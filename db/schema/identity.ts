@@ -8,48 +8,38 @@
  * strictly one-to-many relation.
  */
 
-import { sql } from "drizzle-orm";
+import { SCREENSHOT_TYPES, oneOfCheck } from "./common.js";
 import {
-  boolean,
+  boolCol,
+  createdAtCol,
+  defineTable,
+  foreignIdCol,
+  idCol,
   index,
-  integer,
-  pgTable,
-  text,
+  intCol,
+  textCol,
   unique,
-} from "drizzle-orm/pg-core";
-import {
-  SCREENSHOT_TYPES,
-  createdAt,
-  discordId,
-  foreignId,
-  oneOfCheck,
-  primaryId,
-  updatedAt,
-} from "./common.js";
+  updatedAtCol,
+} from "../dialect.js";
 
 /**
  * A screenshot-verification configuration: one channel, one flavour of
  * screenshot, one role to grant.
  */
-export const ssConfigs = pgTable(
+export const ssConfigs = defineTable(
   "ss_configs",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    channelId: discordId("channel_id").notNull(),
-    roleId: discordId("role_id").notNull(),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    channelId: textCol("channel_id").notNull(),
+    roleId: textCol("role_id").notNull(),
     /** How many screenshots a user has to submit. */
-    requiredSs: integer("required_ss").notNull().default(4),
+    requiredSs: intCol("required_ss").notNull().default(4),
     /** The channel or page the screenshot has to belong to. */
-    channelName: text("channel_name").notNull(),
-    channelLink: text("channel_link").notNull(),
-    /** The words a custom screenshot must contain. */
-    keywords: text("keywords")
-      .array()
-      .notNull()
-      .default(sql`'{}'::text[]`),
+    channelName: textCol("channel_name").notNull(),
+    channelLink: textCol("channel_link").notNull(),
     /** Allow the same screenshot to be submitted twice. */
-    allowSame: boolean("allow_same").notNull().default(false),
+    allowSame: boolCol("allow_same").notNull().default(false),
     /**
      * The Hamming distance at which two screenshots count as duplicates.
      *
@@ -59,11 +49,11 @@ export const ssConfigs = pgTable(
      * the threshold has to move with the hash implementation, and because a
      * guild whose screenshots rescale differently may need a different one.
      */
-    duplicateThreshold: integer("duplicate_threshold").notNull().default(7),
-    ssType: text("ss_type").notNull(),
-    successMessage: text("success_message"),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    duplicateThreshold: intCol("duplicate_threshold").notNull().default(7),
+    ssType: textCol("ss_type").notNull(),
+    successMessage: textCol("success_message"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     // One configuration per channel — the source enforced this by reading
@@ -71,6 +61,33 @@ export const ssConfigs = pgTable(
     unique("ss_configs_channel_id_unique").on(t.channelId),
     index("ss_configs_guild_id_idx").on(t.guildId),
     oneOfCheck("ss_configs_ss_type_check", t.ssType, SCREENSHOT_TYPES),
+  ],
+);
+
+/**
+ * The words a custom screenshot must contain.
+ *
+ * One row per (configuration, keyword). The source kept them in a `text[]`
+ * column and rewrote the whole array on every edit; a join table makes the
+ * edit an insert or a delete.
+ */
+export const ssConfigKeywords = defineTable(
+  "ss_config_keywords",
+  {
+    id: idCol(),
+    ssConfigId: foreignIdCol("ss_config_id")
+      .notNull()
+      .references(() => ssConfigs.id, { onDelete: "cascade" }),
+    keyword: textCol("keyword").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("ss_config_keywords_ss_config_id_keyword_unique").on(
+      t.ssConfigId,
+      t.keyword,
+    ),
+    index("ss_config_keywords_ss_config_id_idx").on(t.ssConfigId),
   ],
 );
 
@@ -83,21 +100,21 @@ export const ssConfigs = pgTable(
  *
  * S4: the source's `submitted_at` becomes `created_at`.
  */
-export const ssSubmissions = pgTable(
+export const ssSubmissions = defineTable(
   "ss_submissions",
   {
-    id: primaryId(),
-    ssConfigId: foreignId("ss_config_id")
+    id: idCol(),
+    ssConfigId: foreignIdCol("ss_config_id")
       .notNull()
       .references(() => ssConfigs.id, { onDelete: "cascade" }),
-    authorId: discordId("author_id").notNull(),
-    channelId: discordId("channel_id").notNull(),
-    messageId: discordId("message_id").notNull(),
+    authorId: textCol("author_id").notNull(),
+    channelId: textCol("channel_id").notNull(),
+    messageId: textCol("message_id").notNull(),
     /** 16 hex characters of dHash; compared with a Hamming distance. */
-    dhash: text("dhash"),
-    phash: text("phash"),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    dhash: textCol("dhash"),
+    phash: textCol("phash"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     index("ss_submissions_ss_config_id_idx").on(t.ssConfigId),
@@ -108,16 +125,16 @@ export const ssSubmissions = pgTable(
 );
 
 /** A channel where a clan tag is checked on every message. */
-export const tagcheckChannels = pgTable(
+export const tagcheckChannels = defineTable(
   "tagcheck_channels",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    channelId: discordId("channel_id").notNull(),
-    requiredMentions: integer("required_mentions").notNull().default(0),
-    deleteAfter: boolean("delete_after").notNull().default(false),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    channelId: textCol("channel_id").notNull(),
+    requiredMentions: intCol("required_mentions").notNull().default(0),
+    deleteAfter: boolCol("delete_after").notNull().default(false),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     index("tagcheck_channels_guild_id_idx").on(t.guildId),
@@ -126,15 +143,15 @@ export const tagcheckChannels = pgTable(
 );
 
 /** A channel where members are asked to tag their clan. */
-export const easytagChannels = pgTable(
+export const easytagChannels = defineTable(
   "easytag_channels",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    channelId: discordId("channel_id").notNull(),
-    deleteAfter: boolean("delete_after").notNull().default(false),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    channelId: textCol("channel_id").notNull(),
+    deleteAfter: boolCol("delete_after").notNull().default(false),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     index("easytag_channels_guild_id_idx").on(t.guildId),

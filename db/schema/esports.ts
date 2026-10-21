@@ -10,110 +10,108 @@
  *  - D25: a tourney slot is a row that belongs to exactly one tourney.
  *    `num` is a per-tourney position, so it is unique per tourney and not
  *    per row.
+ *
+ * **Every list of ids is a join table.** Postgres has arrays and SQLite
+ * does not, so a column that holds a list cannot be written in a dialect
+ * both engines understand. The lists are therefore normalised: `slots`
+ * has `slot_members`, `tourney_slots` has `tourney_slot_members`, and so
+ * on. The overlap checks that used to be the array operator `&&` become a
+ * join, which is faster than the operator was.
  */
 
 import { sql } from "drizzle-orm";
-import {
-  boolean,
-  check,
-  index,
-  integer,
-  jsonb,
-  pgTable,
-  smallint,
-  text,
-  timestamp,
-  unique,
-} from "drizzle-orm/pg-core";
 import {
   AUTOCLEAN_KINDS,
   SCRIM_STATUSES,
   SLOT_STATES,
   TOURNEY_STATUSES,
   WEEKDAYS,
-  arrayContainedInCheck,
-  createdAt,
-  discordId,
-  discordIdArray,
-  foreignId,
   oneOfCheck,
-  primaryId,
-  updatedAt,
 } from "./common.js";
+import {
+  boolCol,
+  check,
+  createdAtCol,
+  defineTable,
+  foreignIdCol,
+  idCol,
+  index,
+  intCol,
+  jsonCol,
+  smallIntCol,
+  textCol,
+  tsCol,
+  unique,
+  updatedAtCol,
+} from "../dialect.js";
 
 /* ------------------------------------------------------------------ *
  * Scrims
  * ------------------------------------------------------------------ */
 
-export const scrims = pgTable(
+export const scrims = defineTable(
   "scrims",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    name: text("name").notNull().default("Quotient-Scrims"),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    name: textCol("name").notNull().default("Quotient-Scrims"),
     /**
      * D26: the lifecycle is a value, not a pair of nullable timestamps.
      * Quotient derived "open" and "closed" from `opened_at`/`closed_at` and
      * could not tell "paused" from "closed" at all.
      */
-    status: text("status").notNull().default("draft"),
-    registrationChannelId: discordId("registration_channel_id").notNull(),
-    slotlistChannelId: discordId("slotlist_channel_id").notNull(),
-    slotlistMessageId: discordId("slotlist_message_id"),
-    roleId: discordId("role_id"),
-    openRoleId: discordId("open_role_id"),
-    pingRoleId: discordId("ping_role_id"),
-    hostId: discordId("host_id").notNull(),
-    requiredMentions: integer("required_mentions").notNull().default(4),
-    requiredLines: smallint("required_lines").notNull().default(0),
+    status: textCol("status").notNull().default("draft"),
+    registrationChannelId: textCol("registration_channel_id").notNull(),
+    slotlistChannelId: textCol("slotlist_channel_id").notNull(),
+    slotlistMessageId: textCol("slotlist_message_id"),
+    roleId: textCol("role_id"),
+    openRoleId: textCol("open_role_id"),
+    pingRoleId: textCol("ping_role_id"),
+    hostId: textCol("host_id").notNull(),
+    requiredMentions: intCol("required_mentions").notNull().default(4),
+    requiredLines: smallIntCol("required_lines").notNull().default(0),
     /** The first slot number; slots run from here to `total_slots`. */
-    startFrom: integer("start_from").notNull().default(1),
-    totalSlots: integer("total_slots").notNull(),
-    openTime: timestamp("open_time", { withTimezone: true, mode: "date" }).notNull(),
-    openedAt: timestamp("opened_at", { withTimezone: true, mode: "date" }),
-    closedAt: timestamp("closed_at", { withTimezone: true, mode: "date" }),
-    matchTime: timestamp("match_time", { withTimezone: true, mode: "date" }),
-    /** What the autoclean pass removes when the match ends. */
-    autoclean: text("autoclean")
-      .array()
-      .notNull()
-      .default(sql.raw(`'{"${AUTOCLEAN_KINDS.join('","')}"}'::text[]`)),
-    autocleanTime: timestamp("autoclean_time", {
-      withTimezone: true,
-      mode: "date",
-    }),
-    autoslotlist: boolean("autoslotlist").notNull().default(true),
-    multiregister: boolean("multiregister").notNull().default(false),
+    startFrom: intCol("start_from").notNull().default(1),
+    totalSlots: intCol("total_slots").notNull(),
+    openTime: tsCol("open_time").notNull(),
+    openedAt: tsCol("opened_at"),
+    closedAt: tsCol("closed_at"),
+    matchTime: tsCol("match_time"),
+    /**
+     * When the autoclean pass runs. *What* it removes is in
+     * `scrim_autoclean` — one row per kind.
+     */
+    autocleanTime: tsCol("autoclean_time"),
+    autoslotlist: boolCol("autoslotlist").notNull().default(true),
+    multiregister: boolCol("multiregister").notNull().default(false),
     /**
      * S4: the source called this `stoggle`, a typo of "toggle" that
      * collided with `slot_managers.toggle`. Two different meanings, two
      * tables, two names.
      */
-    enabled: boolean("enabled").notNull().default(true),
-    autodeleteRejects: boolean("autodelete_rejects").notNull().default(false),
-    autodeleteExtras: boolean("autodelete_extras").notNull().default(true),
-    teamnameCompulsion: boolean("teamname_compulsion").notNull().default(false),
-    noDuplicateName: boolean("no_duplicate_name").notNull().default(false),
-    allowDuplicateTags: boolean("allow_duplicate_tags").notNull().default(true),
+    enabled: boolCol("enabled").notNull().default(true),
+    autodeleteRejects: boolCol("autodelete_rejects").notNull().default(false),
+    autodeleteExtras: boolCol("autodelete_extras").notNull().default(true),
+    teamnameCompulsion: boolCol("teamname_compulsion").notNull().default(false),
+    noDuplicateName: boolCol("no_duplicate_name").notNull().default(false),
+    allowDuplicateTags: boolCol("allow_duplicate_tags").notNull().default(true),
     /**
      * S4: the source stored a pre-formatted sentence ("2 hours 3 minutes").
      * Ours stores the duration in seconds and formats it at render time.
      */
-    timeElapsedSeconds: integer("time_elapsed_seconds"),
-    openDays: text("open_days")
-      .array()
-      .notNull()
-      .default(sql.raw(`'{"${WEEKDAYS.join('","')}"}'::text[]`)),
+    timeElapsedSeconds: intCol("time_elapsed_seconds"),
     /** D32: embed templates are JSON, not Python literal strings. */
-    slotlistFormat: jsonb("slotlist_format").notNull().default(sql`'{}'::jsonb`),
-    openMessage: jsonb("open_message").notNull().default(sql`'{}'::jsonb`),
-    closeMessage: jsonb("close_message").notNull().default(sql`'{}'::jsonb`),
-    emojis: jsonb("emojis").notNull().default(sql`'{}'::jsonb`),
-    cdn: jsonb("cdn")
-      .notNull()
-      .default(sql`'{"status": false, "countdown": 3, "msg": {}}'::jsonb`),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    slotlistFormat: jsonCol<Record<string, unknown>>("slotlist_format", {}),
+    openMessage: jsonCol<Record<string, unknown>>("open_message", {}),
+    closeMessage: jsonCol<Record<string, unknown>>("close_message", {}),
+    emojis: jsonCol<Record<string, unknown>>("emojis", {}),
+    cdn: jsonCol<Record<string, unknown>>("cdn", {
+      status: false,
+      countdown: 3,
+      msg: {},
+    }),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     index("scrims_guild_id_idx").on(t.guildId),
@@ -121,8 +119,53 @@ export const scrims = pgTable(
     // application code by reading then writing, which races.
     unique("scrims_registration_channel_id_unique").on(t.registrationChannelId),
     oneOfCheck("scrims_status_check", t.status, SCRIM_STATUSES),
-    arrayContainedInCheck("scrims_autoclean_check", t.autoclean, AUTOCLEAN_KINDS),
-    arrayContainedInCheck("scrims_open_days_check", t.openDays, WEEKDAYS),
+  ],
+);
+
+/**
+ * The days a scrim may be opened on.
+ *
+ * One row per (scrim, weekday). An empty set means "no restriction" — the
+ * same meaning the source's `open_days` array had.
+ */
+export const scrimOpenDays = defineTable(
+  "scrim_open_days",
+  {
+    id: idCol(),
+    scrimId: foreignIdCol("scrim_id")
+      .notNull()
+      .references(() => scrims.id, { onDelete: "cascade" }),
+    day: textCol("day").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("scrim_open_days_scrim_id_day_unique").on(t.scrimId, t.day),
+    index("scrim_open_days_scrim_id_idx").on(t.scrimId),
+    oneOfCheck("scrim_open_days_day_check", t.day, WEEKDAYS),
+  ],
+);
+
+/**
+ * What a scrim's autoclean pass removes when the match ends.
+ *
+ * One row per (scrim, kind). `kind` is `channel` or `role`.
+ */
+export const scrimAutoclean = defineTable(
+  "scrim_autoclean",
+  {
+    id: idCol(),
+    scrimId: foreignIdCol("scrim_id")
+      .notNull()
+      .references(() => scrims.id, { onDelete: "cascade" }),
+    kind: textCol("kind").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("scrim_autoclean_scrim_id_kind_unique").on(t.scrimId, t.kind),
+    index("scrim_autoclean_scrim_id_idx").on(t.scrimId),
+    oneOfCheck("scrim_autoclean_kind_check", t.kind, AUTOCLEAN_KINDS),
   ],
 );
 
@@ -134,33 +177,30 @@ export const scrims = pgTable(
  *
  * ```sql
  * UPDATE slots
- *    SET state = 'claimed', team_name = $3, owner_user_id = $4, members = $5
+ *    SET state = 'claimed', team_name = $3, owner_user_id = $4
  *  WHERE scrim_id = $1 AND num = $2 AND state = 'free'
  *  RETURNING id;
  * ```
  *
  * Zero rows updated means somebody else won the race. The database enforces
- * the invariant; there is no lock and no read-modify-write anywhere.
+ * the invariant; there is no lock and no read-modify-write anywhere. The
+ * team members go into `slot_members` in the same transaction.
  */
-export const slots = pgTable(
+export const slots = defineTable(
   "slots",
   {
-    id: primaryId(),
-    scrimId: foreignId("scrim_id")
+    id: idCol(),
+    scrimId: foreignIdCol("scrim_id")
       .notNull()
       .references(() => scrims.id, { onDelete: "cascade" }),
-    num: integer("num").notNull(),
-    state: text("state").notNull().default("free"),
-    teamName: text("team_name"),
-    ownerUserId: discordId("owner_user_id"),
-    /** The whole team, not just the captain — the IDP transfer needs it (B3). */
-    members: discordIdArray("members")
-      .notNull()
-      .default(sql`'{}'::text[]`),
-    messageId: discordId("message_id"),
-    jumpUrl: text("jump_url"),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    num: intCol("num").notNull(),
+    state: textCol("state").notNull().default("free"),
+    teamName: textCol("team_name"),
+    ownerUserId: textCol("owner_user_id"),
+    messageId: textCol("message_id"),
+    jumpUrl: textCol("jump_url"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("slots_scrim_id_num_unique").on(t.scrimId, t.num),
@@ -175,6 +215,30 @@ export const slots = pgTable(
 );
 
 /**
+ * The team that holds a slot.
+ *
+ * One row per (slot, member). The fake-tag check — "does any other
+ * claimed slot in this scrim already hold one of these players?" — is a
+ * join against this table.
+ */
+export const slotMembers = defineTable(
+  "slot_members",
+  {
+    id: idCol(),
+    slotId: foreignIdCol("slot_id")
+      .notNull()
+      .references(() => slots.id, { onDelete: "cascade" }),
+    userId: textCol("user_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("slot_members_slot_id_user_id_unique").on(t.slotId, t.userId),
+    index("slot_members_user_id_idx").on(t.userId),
+  ],
+);
+
+/**
  * Slots a host set aside for somebody before registration opened.
  *
  * Quotient modelled these as a many-to-many relation, but every reserved
@@ -183,26 +247,43 @@ export const slots = pgTable(
  * across a join table, and `UNIQUE (scrim_id, num)` keeps one reservation
  * per slot number.
  */
-export const reservedSlots = pgTable(
+export const reservedSlots = defineTable(
   "reserved_slots",
   {
-    id: primaryId(),
-    scrimId: foreignId("scrim_id")
+    id: idCol(),
+    scrimId: foreignIdCol("scrim_id")
       .notNull()
       .references(() => scrims.id, { onDelete: "cascade" }),
-    num: integer("num").notNull(),
-    userId: discordId("user_id"),
-    teamName: text("team_name"),
-    members: discordIdArray("members")
-      .notNull()
-      .default(sql`'{}'::text[]`),
-    expires: timestamp("expires", { withTimezone: true, mode: "date" }),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    num: intCol("num").notNull(),
+    userId: textCol("user_id"),
+    teamName: textCol("team_name"),
+    expires: tsCol("expires"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("reserved_slots_scrim_id_num_unique").on(t.scrimId, t.num),
     index("reserved_slots_scrim_id_idx").on(t.scrimId),
+  ],
+);
+
+/** The members a reserved slot was reserved for. */
+export const reservedSlotMembers = defineTable(
+  "reserved_slot_members",
+  {
+    id: idCol(),
+    reservedSlotId: foreignIdCol("reserved_slot_id")
+      .notNull()
+      .references(() => reservedSlots.id, { onDelete: "cascade" }),
+    userId: textCol("user_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("reserved_slot_members_reserved_slot_id_user_id_unique").on(
+      t.reservedSlotId,
+      t.userId,
+    ),
   ],
 );
 
@@ -214,23 +295,20 @@ export const reservedSlots = pgTable(
  * duplicates, which is what the read-then-write in Quotient's `ban_slot`
  * could not guarantee.
  */
-export const bannedTeams = pgTable(
+export const bannedTeams = defineTable(
   "banned_teams",
   {
-    id: primaryId(),
-    scrimId: foreignId("scrim_id")
+    id: idCol(),
+    scrimId: foreignIdCol("scrim_id")
       .notNull()
       .references(() => scrims.id, { onDelete: "cascade" }),
-    num: integer("num").notNull().default(0),
-    userId: discordId("user_id").notNull(),
-    teamName: text("team_name"),
-    members: discordIdArray("members")
-      .notNull()
-      .default(sql`'{}'::text[]`),
-    reason: text("reason"),
-    expires: timestamp("expires", { withTimezone: true, mode: "date" }),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    num: intCol("num").notNull().default(0),
+    userId: textCol("user_id").notNull(),
+    teamName: textCol("team_name"),
+    reason: textCol("reason"),
+    expires: tsCol("expires"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("banned_teams_scrim_id_user_id_unique").on(t.scrimId, t.userId),
@@ -238,15 +316,39 @@ export const bannedTeams = pgTable(
   ],
 );
 
+/**
+ * The members of a banned team.
+ *
+ * The ban survives a rename because the ids are stored, not the names.
+ */
+export const bannedTeamMembers = defineTable(
+  "banned_team_members",
+  {
+    id: idCol(),
+    bannedTeamId: foreignIdCol("banned_team_id")
+      .notNull()
+      .references(() => bannedTeams.id, { onDelete: "cascade" }),
+    userId: textCol("user_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("banned_team_members_banned_team_id_user_id_unique").on(
+      t.bannedTeamId,
+      t.userId,
+    ),
+  ],
+);
+
 /** The channel a guild's ban log is written to. One per guild. */
-export const banLogs = pgTable(
+export const banLogs = defineTable(
   "ban_logs",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    channelId: discordId("channel_id").notNull(),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    channelId: textCol("channel_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [unique("ban_logs_guild_id_unique").on(t.guildId)],
 );
@@ -259,16 +361,16 @@ export const banLogs = pgTable(
  * unsubscribing the user from the rest. Keying the row by (scrim, user)
  * makes the dispatch independent per scrim.
  */
-export const slotReminders = pgTable(
+export const slotReminders = defineTable(
   "slot_reminders",
   {
-    id: primaryId(),
-    scrimId: foreignId("scrim_id")
+    id: idCol(),
+    scrimId: foreignIdCol("scrim_id")
       .notNull()
       .references(() => scrims.id, { onDelete: "cascade" }),
-    userId: discordId("user_id").notNull(),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    userId: textCol("user_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("slot_reminders_scrim_id_user_id_unique").on(t.scrimId, t.userId),
@@ -283,18 +385,18 @@ export const slotReminders = pgTable(
  * table. A scrim may sit in at most one panel, which is why the join table
  * also carries a unique constraint on `scrim_id` alone.
  */
-export const slotManagers = pgTable(
+export const slotManagers = defineTable(
   "slot_managers",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    mainChannelId: discordId("main_channel_id").notNull(),
-    messageId: discordId("message_id").notNull(),
-    toggle: boolean("toggle").notNull().default(true),
-    allowReminders: boolean("allow_reminders").notNull().default(true),
-    multipleSlots: boolean("multiple_slots").notNull().default(false),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    mainChannelId: textCol("main_channel_id").notNull(),
+    messageId: textCol("message_id").notNull(),
+    toggle: boolCol("toggle").notNull().default(true),
+    allowReminders: boolCol("allow_reminders").notNull().default(true),
+    multipleSlots: boolCol("multiple_slots").notNull().default(false),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     index("slot_managers_guild_id_idx").on(t.guildId),
@@ -302,18 +404,18 @@ export const slotManagers = pgTable(
   ],
 );
 
-export const slotManagerScrims = pgTable(
+export const slotManagerScrims = defineTable(
   "slot_manager_scrims",
   {
-    id: primaryId(),
-    slotManagerId: foreignId("slot_manager_id")
+    id: idCol(),
+    slotManagerId: foreignIdCol("slot_manager_id")
       .notNull()
       .references(() => slotManagers.id, { onDelete: "cascade" }),
-    scrimId: foreignId("scrim_id")
+    scrimId: foreignIdCol("scrim_id")
       .notNull()
       .references(() => scrims.id, { onDelete: "cascade" }),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("slot_manager_scrims_slot_manager_id_scrim_id_unique").on(
@@ -328,47 +430,48 @@ export const slotManagerScrims = pgTable(
  * Tournaments
  * ------------------------------------------------------------------ */
 
-export const tourneys = pgTable(
+export const tourneys = defineTable(
   "tourneys",
   {
-    id: primaryId(),
-    guildId: discordId("guild_id").notNull(),
-    name: text("name").notNull().default("Quotient-Tourney"),
+    id: idCol(),
+    guildId: textCol("guild_id").notNull(),
+    name: textCol("name").notNull().default("Quotient-Tourney"),
     /** D26: same explicit lifecycle as scrims, plus `paused`. */
-    status: text("status").notNull().default("draft"),
-    registrationChannelId: discordId("registration_channel_id").notNull(),
-    confirmChannelId: discordId("confirm_channel_id").notNull(),
-    roleId: discordId("role_id").notNull(),
-    openRoleId: discordId("open_role_id"),
-    pingRoleId: discordId("ping_role_id"),
-    hostId: discordId("host_id").notNull(),
-    requiredMentions: smallint("required_mentions").notNull().default(4),
-    requiredLines: smallint("required_lines").notNull().default(0),
-    totalSlots: smallint("total_slots").notNull(),
-    startedAt: timestamp("started_at", { withTimezone: true, mode: "date" }),
-    closedAt: timestamp("closed_at", { withTimezone: true, mode: "date" }),
-    multiregister: boolean("multiregister").notNull().default(false),
-    teamnameCompulsion: boolean("teamname_compulsion")
+    status: textCol("status").notNull().default("draft"),
+    registrationChannelId: textCol("registration_channel_id").notNull(),
+    confirmChannelId: textCol("confirm_channel_id").notNull(),
+    roleId: textCol("role_id").notNull(),
+    openRoleId: textCol("open_role_id"),
+    pingRoleId: textCol("ping_role_id"),
+    hostId: textCol("host_id").notNull(),
+    requiredMentions: smallIntCol("required_mentions").notNull().default(4),
+    requiredLines: smallIntCol("required_lines").notNull().default(0),
+    totalSlots: smallIntCol("total_slots").notNull(),
+    startedAt: tsCol("started_at"),
+    closedAt: tsCol("closed_at"),
+    multiregister: boolCol("multiregister").notNull().default(false),
+    teamnameCompulsion: boolCol("teamname_compulsion")
       .notNull()
       .default(false),
-    noDuplicateName: boolean("no_duplicate_name").notNull().default(true),
-    autodeleteRejects: boolean("autodelete_rejects").notNull().default(false),
-    allowDuplicateTags: boolean("allow_duplicate_tags").notNull().default(true),
+    noDuplicateName: boolCol("no_duplicate_name").notNull().default(true),
+    autodeleteRejects: boolCol("autodelete_rejects").notNull().default(false),
+    allowDuplicateTags: boolCol("allow_duplicate_tags").notNull().default(true),
     /**
      * S4: the source called this `slotlist_start` and the decision log
      * says *both* names are wrong. It is `start_from`, same as the scrim's.
      */
-    startFrom: smallint("start_from").notNull().default(2),
+    startFrom: smallIntCol("start_from").notNull().default(2),
     /** How many teams share a group. Null until the groups are drawn. */
-    groupSize: smallint("group_size"),
-    successMessage: text("success_message"),
-    emojis: jsonb("emojis")
-      .notNull()
-      .default(sql`'{"tick": "✅", "cross": "❌"}'::jsonb`),
-    slotmChannelId: discordId("slotm_channel_id"),
-    slotmMessageId: discordId("slotm_message_id"),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    groupSize: smallIntCol("group_size"),
+    successMessage: textCol("success_message"),
+    emojis: jsonCol<Record<string, unknown>>("emojis", {
+      tick: "✅",
+      cross: "❌",
+    }),
+    slotmChannelId: textCol("slotm_channel_id"),
+    slotmMessageId: textCol("slotm_message_id"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     index("tourneys_guild_id_idx").on(t.guildId),
@@ -385,33 +488,51 @@ export const tourneys = pgTable(
  * the unique constraint mid-update — do it as a two-step swap through a
  * temporary number inside one transaction, not as a single statement.
  */
-export const tourneySlots = pgTable(
+export const tourneySlots = defineTable(
   "tourney_slots",
   {
-    id: primaryId(),
-    tourneyId: foreignId("tourney_id")
+    id: idCol(),
+    tourneyId: foreignIdCol("tourney_id")
       .notNull()
       .references(() => tourneys.id, { onDelete: "cascade" }),
-    num: integer("num").notNull(),
-    teamName: text("team_name").notNull(),
-    leaderId: discordId("leader_id").notNull(),
-    /**
-     * The team members. Kept as an array because the fake-tag check is an
-     * array overlap (`$2 && members`) and the members have no natural key
-     * of their own.
-     */
-    members: discordIdArray("members")
-      .notNull()
-      .default(sql`'{}'::text[]`),
-    messageId: discordId("message_id"),
-    jumpUrl: text("jump_url"),
-    confirmJumpUrl: text("confirm_jump_url"),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    num: intCol("num").notNull(),
+    teamName: textCol("team_name").notNull(),
+    leaderId: textCol("leader_id").notNull(),
+    messageId: textCol("message_id"),
+    jumpUrl: textCol("jump_url"),
+    confirmJumpUrl: textCol("confirm_jump_url"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("tourney_slots_tourney_id_num_unique").on(t.tourneyId, t.num),
     index("tourney_slots_tourney_id_idx").on(t.tourneyId),
+  ],
+);
+
+/**
+ * The members of a registered tournament team.
+ *
+ * The fake-tag check — "does any other slot in this tournament already
+ * hold one of these players?" — is a join against this table.
+ */
+export const tourneySlotMembers = defineTable(
+  "tourney_slot_members",
+  {
+    id: idCol(),
+    tourneySlotId: foreignIdCol("tourney_slot_id")
+      .notNull()
+      .references(() => tourneySlots.id, { onDelete: "cascade" }),
+    userId: textCol("user_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique("tourney_slot_members_tourney_slot_id_user_id_unique").on(
+      t.tourneySlotId,
+      t.userId,
+    ),
+    index("tourney_slot_members_user_id_idx").on(t.userId),
   ],
 );
 
@@ -422,16 +543,16 @@ export const tourneySlots = pgTable(
  * ARRAY_REMOVE — a read-modify-write that races under concurrent bans. A
  * join table with a unique key is idempotent: banning twice is a no-op.
  */
-export const tourneyBannedUsers = pgTable(
+export const tourneyBannedUsers = defineTable(
   "tourney_banned_users",
   {
-    id: primaryId(),
-    tourneyId: foreignId("tourney_id")
+    id: idCol(),
+    tourneyId: foreignIdCol("tourney_id")
       .notNull()
       .references(() => tourneys.id, { onDelete: "cascade" }),
-    userId: discordId("user_id").notNull(),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    userId: textCol("user_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("tourney_banned_users_tourney_id_user_id_unique").on(
@@ -442,16 +563,16 @@ export const tourneyBannedUsers = pgTable(
 );
 
 /** A media-partner channel attached to a tournament. */
-export const mediaPartners = pgTable(
+export const mediaPartners = defineTable(
   "media_partners",
   {
-    id: primaryId(),
-    tourneyId: foreignId("tourney_id")
+    id: idCol(),
+    tourneyId: foreignIdCol("tourney_id")
       .notNull()
       .references(() => tourneys.id, { onDelete: "cascade" }),
-    channelId: discordId("channel_id").notNull(),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    channelId: textCol("channel_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("media_partners_channel_id_unique").on(t.channelId),
@@ -465,24 +586,40 @@ export const mediaPartners = pgTable(
  * The source's table was `tm.media_partner_users` plus a join table; ours
  * is one table with `media_partner_id` as a plain column.
  */
-export const mediaPartnerSlots = pgTable(
+export const mediaPartnerSlots = defineTable(
   "media_partner_slots",
   {
-    id: primaryId(),
-    mediaPartnerId: foreignId("media_partner_id")
+    id: idCol(),
+    mediaPartnerId: foreignIdCol("media_partner_id")
       .notNull()
       .references(() => mediaPartners.id, { onDelete: "cascade" }),
-    userId: discordId("user_id").notNull(),
-    messageId: discordId("message_id").notNull(),
-    jumpUrl: text("jump_url"),
-    members: discordIdArray("members")
-      .notNull()
-      .default(sql`'{}'::text[]`),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    userId: textCol("user_id").notNull(),
+    messageId: textCol("message_id").notNull(),
+    jumpUrl: textCol("jump_url"),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     index("media_partner_slots_media_partner_id_idx").on(t.mediaPartnerId),
+  ],
+);
+
+/** The members of a media-partner registration. */
+export const mediaPartnerSlotMembers = defineTable(
+  "media_partner_slot_members",
+  {
+    id: idCol(),
+    mediaPartnerSlotId: foreignIdCol("media_partner_slot_id")
+      .notNull()
+      .references(() => mediaPartnerSlots.id, { onDelete: "cascade" }),
+    userId: textCol("user_id").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
+  },
+  (t) => [
+    unique(
+      "media_partner_slot_members_media_partner_slot_id_user_id_unique",
+    ).on(t.mediaPartnerSlotId, t.userId),
   ],
 );
 
@@ -497,18 +634,18 @@ export const mediaPartnerSlots = pgTable(
  * modification time *is* the last refresh time. The two-minute cooldown
  * reads `updated_at`.
  */
-export const tourneyGroupLists = pgTable(
+export const tourneyGroupLists = defineTable(
   "tourney_group_lists",
   {
-    id: primaryId(),
-    tourneyId: foreignId("tourney_id")
+    id: idCol(),
+    tourneyId: foreignIdCol("tourney_id")
       .notNull()
       .references(() => tourneys.id, { onDelete: "cascade" }),
-    messageId: discordId("message_id").notNull(),
-    channelId: discordId("channel_id").notNull(),
-    groupNumber: smallint("group_number").notNull(),
-    createdAt: createdAt(),
-    updatedAt: updatedAt(),
+    messageId: textCol("message_id").notNull(),
+    channelId: textCol("channel_id").notNull(),
+    groupNumber: smallIntCol("group_number").notNull(),
+    createdAt: createdAtCol(),
+    updatedAt: updatedAtCol(),
   },
   (t) => [
     unique("tourney_group_lists_message_id_unique").on(t.messageId),

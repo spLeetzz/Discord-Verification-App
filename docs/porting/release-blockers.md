@@ -142,8 +142,8 @@ They are being fixed now; they are listed here so nothing is lost.
 ## B11. The OCR "off" switch and the `any_ss` fail-open
 
 The `any_ss` screenshot type has **no rules at all**, so a rule-based refusal
-does not apply to it: if the OCR is broken — a Tesseract worker that failed to
-start — an `any_ss` setup would accept **any image at all** and grant the
+does not apply to it: if the OCR service is unreachable or answers with
+rubbish — an `any_ss` setup would accept **any image at all** and grant the
 role.
 
 `isOcrDisabled` only detects the *disabled* provider, not a *broken* local

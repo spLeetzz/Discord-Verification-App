@@ -228,10 +228,14 @@ group-management UI.
   `OcrResult.rawText` for literal checks like `"SUBSCRIBE "`, which the
   normalisation would otherwise destroy.
 - The provider is **serialised per instance** — one screenshot at a time.
-  Call `warmup()` at boot so the Tesseract model download happens at startup
-  rather than on the first submission, and `shutdown()` on exit.
-- **OCR takes about 2 seconds per screenshot** — defer the interaction. The
-  hashing alone is about 28ms.
+  There is **no local engine**: the provider is the remote
+  Quotient-compatible service, so there is nothing to warm up.
+  `shutdown()` on exit still ends the HTTP client. With no
+  `OCR_PROVIDER_URL` configured the provider is the disabled one and every
+  submission is refused.
+- **The service fetches the image itself**, so it needs the attachment's
+  public URL rather than a buffer.
+- The OCR takes about two seconds per screenshot — defer the interaction.
 - If the OCR cannot start, the text comes back empty and every text rule
   rejects. **It fails closed** — a broken OCR rejects a screenshot rather
   than waving it through.
