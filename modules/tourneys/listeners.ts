@@ -150,9 +150,22 @@ export async function handleRegistrationMessage(
 
   const member = message.guild.members.cache.get(message.author.id);
 
-  if (member && (await isTourneyMod(member))) {
-    return skip("the author is a tournament moderator");
-  }
+  /**
+   * **A moderator may register their own team.**
+   *
+   * Being a moderator used to end it there: the message was ignored and
+   * nothing was said. But a host registering their own team in their own
+   * tournament is ordinary, and the requirements already decide what a
+   * registration attempt is - a moderator's ordinary chatter does not
+   * carry a team name and the required mentions, so it does not register
+   * either way.
+   *
+   * So a moderator is not ignored. What is different is that a refusal
+   * is *quiet* for them: being told "you did not mention enough
+   * teammates" every time they say something in the channel would be
+   * noise, and the channel is theirs.
+   */
+  const isMod = member !== undefined && (await isTourneyMod(member));
 
   if (!canRegister(message, tourney)) {
     logger.warn(
@@ -169,7 +182,13 @@ export async function handleRegistrationMessage(
   const reason = await evaluateRegistration(context);
 
   if (reason) {
-    await refuseRegistration(message, tourney, reason);
+    if (!isMod) {
+      await refuseRegistration(message, tourney, reason);
+    } else {
+      logger.info(
+        `[Tourneys] A moderator's message in ${channelId} was not a registration: ${reason}.`,
+      );
+    }
 
     return true;
   }
