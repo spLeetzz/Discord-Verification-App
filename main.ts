@@ -75,6 +75,22 @@ client.on(Events.InteractionCreate, (interaction) => {
 client.on(Events.MessageCreate, (message) => {
   if (ALLOWED_GUILD_ID && message.guildId !== ALLOWED_GUILD_ID) return;
 
+  /**
+   * **Every message the bot hears is logged.**
+   *
+   * Discord only delivers a message event for a channel the bot can read.
+   * A bot that cannot read a channel is *deaf* in it, and nothing says
+   * so - not the gateway, not the log, not the bot. That is how a
+   * registration channel went silent for an hour: the code was right,
+   * the permission was not, and the only symptom was silence.
+   *
+   * So the arrival is logged, with the channel and the author. When a
+   * message is not heard, this line is missing, and that is the answer.
+   */
+  logger.info(
+    `[Message] A message arrived in ${message.channelId} from ${message.author.tag}.`,
+  );
+
   void handleMessage(message);
 });
 
